@@ -39,7 +39,7 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       DASHBOARD_URL_FILE, STATE_EVERY_S, LAYER_CAPS, KAPPA_FROM_OCT30, LOSS_STOP, MARKET_MAX_POS,
                       LADDER_LEVELS, LADDER_CAPACITY_SHARE, TAKE_NOTIONAL, REF_WINDOW_S, REF_MIN_SAMPLES, REF_MAX_SPREAD,
                       BREAKER_WINDOW_S, BREAKER_MARKETS, BREAKER_SHARE, BREAKER_PAUSE_S, MM_PILOT_MARKETS,
-                      LADDER_PILOT_MARKETS, PILOT_S, REQUOTE_CANCELS_PER_MIN)
+                      LADDER_PILOT_MARKETS, PILOT_S, REQUOTE_CANCELS_PER_MIN, BREAKER_FAIR_MOVE)
 from d_ledger import Ledger, stamp, write_atomic
 
 
@@ -936,7 +936,12 @@ class Engine:
                 continue
             ms = set(market_dir)
             mine = [ex for ex, d in market_dir.items() if d == direction]
-            if len(ms) >= BREAKER_MARKETS and len(mine) / len(ms) >= BREAKER_SHARE - 1e-9:
+            # news moves Polymarket too: what we bought must have lost >= 1c of fair since (MM flow at a flat fair is
+            # not news; without this the breaker trips on ordinary MM fills and its mass cancels eat the write budget)
+            hit = [f for f in recent if f["ex"] in mine and f.get("fair") is not None]
+            q = sum(f["qty"] for f in hit)
+            moved = sum(((self.side_fair(f["ex"], f["side"]) or f["fair"]) - f["fair"]) * f["qty"] for f in hit) / q if q else 0.0
+            if len(ms) >= BREAKER_MARKETS and len(mine) / len(ms) >= BREAKER_SHARE - 1e-9 and moved <= -BREAKER_FAIR_MOVE:
                 self.breaker[direction] = now + BREAKER_PAUSE_S
                 night["breaker_trips_since_ladder"] = night.get("breaker_trips_since_ladder", 0) + 1
                 n = 0
@@ -945,7 +950,8 @@ class Engine:
                     if rec and rec["layer"] in ("ladder", "mm") and o["action"] == "buy" and self.pol(o["ex"], o["side"]) == direction \
                             and not jx.reduces(o["side"], "buy", self.book.get(o["ex"], {}).get("pos", 0)):
                         n += bool(self.ex.cancel(o, reason="breaker"))
-                msg = (f"BREAKER pro-{direction}: {len(mine)}/{len(ms)} markets with ladder/MM fills leaned pro-{direction} within 10 min "
+                msg = (f"BREAKER pro-{direction}: {len(mine)}/{len(ms)} markets with ladder/MM fills leaned pro-{direction} within 10 min, "
+                       f"Polymarket fair {moved * 100:+.1f}c against them "
                        f"(news, not a sweep): {n} {direction}-side ladder/MM buys cancelled, entries that way paused 30 min")
                 self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
                 self.event("BREAKER", msg)

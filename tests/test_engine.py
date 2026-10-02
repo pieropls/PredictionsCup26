@@ -850,6 +850,16 @@ class BreakerTests(EngineCase):
         for o in pro_d[:5]:
             fake.fill(o["id"], o["qty"])
         loop(eng, fake)
+        self.assertEqual(eng.breaker, {}, "correlated fills at a flat Polymarket fair: MM flow, not news")
+        for o in pro_d[:5]:                               # news: Polymarket moves against what we bought
+            f = eng.fair[o["ex"]]
+            FAIR[o["ex"]] = f - 0.03 if o["side"] == "yes" else f + 0.03
+        try:
+            loop(eng, fake)
+        finally:
+            for o in pro_d[:5]:
+                FAIR.pop(o["ex"], None)
+            FAIR.update({AK: 0.785, RI: 0.965, "1059": 0.93, "1060": 0.07})
         self.assertGreater(eng.breaker.get("D", 0), time.time())
         self.assertTrue(any("BREAKER pro-D" in a for a in eng.alerts))
         for _ in range(3):
