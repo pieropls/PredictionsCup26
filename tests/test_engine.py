@@ -1319,10 +1319,13 @@ class FatFingerTests(EngineCase):
         now = time.time()
         c.layer("fatfinger").update(state="pilot", since=now - 2 * 3600 - 60)
         eng.fat_sent.clear()
-        eng.fat_fills.append((now - 600, 0.80, 0.60))                   # filled 20c from fair: the gate holds
+        fill = dict(key="k1", order="o1", ex="1000", side="yes", qty=100.0, price=0.60, action="buy", realized=0.0,
+                    t=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 600)), bot="b", layer="fatfinger", fair=0.80,
+                    before_engine=False, edge=None, sig_edge=None, sig_mid=None)
+        eng.ledger.fills.append(fill)                                    # filled 20c from fair (in the ledger): the gate holds
         eng.controller(now)
         self.assertEqual(c.state("fatfinger"), "pilot")
-        eng.fat_fills[:] = [(now - 600, 0.80, 0.05)]                    # a real fat-finger catch: promote
+        fill["price"] = 0.05                                             # a real fat-finger catch: promote
         eng.controller(now)
         self.assertEqual(c.state("fatfinger"), "full")
 

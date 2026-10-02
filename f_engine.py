@@ -318,7 +318,7 @@ class Engine:
         self.pilot_sets, self.sweep_rank = {}, {}
         self.release_now, self.release_t, self.depth_cache = {}, 0.0, {}
         self.fat_book, self.fat_anchor, self.fat_block, self.fair_hist, self.fat_now = {}, {}, {}, {}, {}
-        self.fat_fills, self.fat_sent = [], collections.deque(maxlen=5000)   # (t, fair, price) per fill; placement times
+        self.fat_sent = collections.deque(maxlen=5000)      # placement times (pilot gate: write usage)
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
@@ -1087,13 +1087,13 @@ class Engine:
                     ok, why = True, (f"pilot target reached (free cash {free:,.0f})" if free >= RELEASE_PILOT_TARGET else "2 h pilot") + \
                         f", freed {r['sig']:,.0f} at {(r['avg_cost'] or 0) * 100:.1f}% average cost, no I2 trims"
             if l == "fatfinger" and age >= PILOT_S:         # morning_plan 1.10: pilot tier A 2 h -> full tiers A + B
-                close = [x for x in self.fat_fills if x[0] >= since[l] and x[1] is not None and x[1] - x[2] < 0.25]
+                fills = [f for f in self.fills_since(since[l]) if f["layer"] == "fatfinger" and f["action"] == "buy"]
+                close = [f for f in fills if f.get("fair") is not None and f["fair"] - f["price"] < 0.25]   # ledger: survives restarts
                 trims = self.ex.trims.get("fatfinger", 0)
                 thr = api.health(PILOT_S).get("throttled", 0)
                 late = sum(1 for t in self.fat_sent if t >= now - 3600)   # after 2 h the initial placement is older than this
                 if not close and trims == 0 and thr == 0 and late <= FAT_REFRESH_MAX_H:
-                    n_f = sum(1 for x in self.fat_fills if x[0] >= since[l])
-                    ok, why = True, (f"2 h pilot: {n_f} fills, none within 25c of fair; no I2 trims; no HTTP 429s; "
+                    ok, why = True, (f"2 h pilot: {len(fills)} fills, none within 25c of fair; no I2 trims; no HTTP 429s; "
                                      f"{late} placements in the last hour")
                 elif now - night.get(f"{l}_ext", 0) >= PILOT_S:
                     night[f"{l}_ext"] = now
@@ -1355,7 +1355,6 @@ class Engine:
                 continue
             fv = self.side_fair(f["ex"], f["side"])
             cap = None if fv is None else (fv - f["price"]) * f["qty"]
-            self.fat_fills.append((time.time(), fv, f["price"]))
             msg = (f"FATFINGER FILL {self.name(f['ex'])}: bought {f['qty']:,.0f} {f['side'].upper()} at {f['price']:.3f}"
                    + ("" if fv is None else f" (fair {fv:.3f}): value captured {cap:+,.0f}"))
             self.event("FATFINGER", msg)
