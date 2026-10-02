@@ -1,6 +1,7 @@
 """D. LEDGER: every order the engine placed and what became of it, every fill on the account, and every arb basket.
 Saved to data/ledger.json so history and arb baskets survive restarts."""
 import json
+import math
 import os
 import threading
 import time
@@ -30,6 +31,8 @@ class Ledger:
         self.fills = d.get("fills", [])         # oldest first
         self.baskets = d.get("baskets", [])     # pair-bot sets: {race, side, legs, orders[], margin, repaired}
         self.subbooks = d.get("subbooks", {})   # I3: ex -> {"manual" | "inventory" | "pairset:<id>" | "tranche:<id>": signed YES shares}
+        self.tranches = d.get("tranches", {})   # A1/A5: tranche sub-book id -> {ex, side, level, ref_side, off, fair_side, t, state}
+        self.ladder_seq = d.get("ladder_seq", {})  # (ex|side|level) -> current tranche number
         for i, b in enumerate(self.baskets):    # sets recorded before ids existed
             b.setdefault("id", f"{b.get('race', 'set')}:{int(b.get('ts', 0)) or i}")
         self.lock = threading.RLock()           # the executor's threads record placements while the engine syncs fills
@@ -91,6 +94,43 @@ class Ledger:
                     books = hold.get(ex, {})
                     self.subbooks[ex] = dict(books, inventory=q - sum(books.values()))
             return True
+
+    def move_sub(self, ex, src, dst, log=print):
+        """Hand a sub-book's shares to another (news guard: tranche -> inventory; D1: manual -> recycle:ak-d1)."""
+        with self.lock:
+            books = self.subbooks.setdefault(ex, {})
+            q = books.pop(src, 0)
+            if q:
+                books[dst] = books.get(dst, 0) + q
+            return q
+
+    def split_sub(self, ex, src, dst, qty):
+        """Move qty shares (same sign as src) from src to dst: D1 releases part of a manual position to the recycler."""
+        with self.lock:
+            books = self.subbooks.setdefault(ex, {})
+            have = books.get(src, 0)
+            q = math.copysign(min(abs(qty), abs(have)), have) if have else 0
+            books[src] = have - q
+            books[dst] = books.get(dst, 0) + q
+            return q
+
+    def ladder_id(self, ex, side, level):
+        """The tranche sub-book a ladder level's orders feed: a new id once the current one has shares (a fill)."""
+        with self.lock:
+            key = f"{ex}|{side}|{level}"
+            n = self.ladder_seq.get(key, 0)
+            sub = f"tranche:{ex}{side[0]}{level}-{n}"
+            if abs(self.subbooks.get(ex, {}).get(sub, 0)) >= 1 or sub in self.tranches:
+                n += 1
+                self.ladder_seq[key] = n
+                sub = f"tranche:{ex}{side[0]}{level}-{n}"
+            return sub
+
+    def tranche_avg(self, sub):
+        """Average fill price of the ladder fills that built a tranche (orders placed into that sub-book)."""
+        ids = {i for i, o in self.orders.items() if o.get("sub") == sub and o.get("layer") == "ladder"}
+        q = sum(f["qty"] for f in self.fills if f["order"] in ids)
+        return sum(f["qty"] * f["price"] for f in self.fills if f["order"] in ids) / q if q else None
 
     def audit_subbooks(self, positions, log=print):
         """I3: the REST position is the truth. Any difference from the sum of sub-books goes to 'inventory' (logged)."""
@@ -197,13 +237,16 @@ class Ledger:
 
     # ---- arb baskets
     def basket_fills(self, b):
-        """[(order id, ex, side, filled, avg price)] for each leg of a basket."""
+        """[(order id, ex, side, held, avg price)] for each leg of a basket: the leg's fills plus its repair (completing)
+        orders' fills, minus what unwinds sold back (complement buys) at the leg's average."""
         out = []
         for oid in b["orders"]:
             o = self.orders.get(oid, {})
             parts = [o] + [self.orders.get(r, {}) for r in b.get("repairs", {}).get(oid, [])]   # repair orders join their leg
             f, c = sum(p.get("filled", 0.0) for p in parts), sum(p.get("cost", 0.0) for p in parts)
-            out.append((oid, o.get("ex"), o.get("side"), f, c / f if f else None))
+            avg = c / f if f else None
+            sold = sum(self.orders.get(r, {}).get("filled", 0.0) for r in b.get("unwinds", {}).get(oid, []))
+            out.append((oid, o.get("ex"), o.get("side"), max(0.0, f - sold), avg))
         return out
 
     def matched(self, b):
@@ -223,5 +266,6 @@ class Ledger:
     def save(self):
         if self.persist:
             with self.lock:
-                text = json.dumps(dict(orders=self.orders, fills=self.fills, baskets=self.baskets[-1000:], subbooks=self.subbooks))
+                text = json.dumps(dict(orders=self.orders, fills=self.fills, baskets=self.baskets[-1000:], subbooks=self.subbooks,
+                                       tranches=self.tranches, ladder_seq=self.ladder_seq))
             write_atomic(LEDGER_FILE, text)

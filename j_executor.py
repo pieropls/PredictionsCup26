@@ -24,8 +24,8 @@ import time
 import uuid
 from datetime import datetime, timedelta
 
-PRIORITY = {"cancel": 0, "position": 1, "trim": 1, "take": 2, "rebound": 3, "recycle": 3, "repair": 3, "set": 4,
-            "unwind": 4, "mm": 5, "exit": 3, "touch": 5, "ladder": 6, "add": 1}
+PRIORITY = {"cancel": 0, "position": 1, "trim": 1, "take": 2, "rebound": 3, "recycle": 3, "repair": 3, "unwind": 3,
+            "set": 4, "mm": 5, "exit": 3, "touch": 5, "ladder": 6, "add": 1}
 
 
 def reduces(side, action, pos):
@@ -104,6 +104,8 @@ class Executor:
         self.recovered = self.recover_acked()               # acked after the last ledger save (process was killed)
         self.capacity = 60.0                                # orders SIG processes per minute (EWMA)
         self.paused_until, self.dropped_stale, self.sent_orders, self.halted = 0.0, 0, 0, False
+        self.trims = {}                                     # layer -> I2 trims (an order cut or dropped to fit the position)
+        self.trim_log = []                                  # (time, layer, ex, wanted, sent), last 200
         self.threads, self.running = [], False
 
     # ---------------------------------------------------------------------------------------- state from the engine
@@ -220,7 +222,7 @@ class Executor:
             q["0"] = q.get("0", 0) + len(self.cancels)
             return dict(queue=q, in_flight=sum(len(j["items"]) for j in self.in_flight.values()), unknown=len(self.frozen),
                         frozen=sorted(self.frozen), capacity_ewma=round(self.capacity, 1), batch_cap=self.batch_cap(),
-                        dropped_stale=self.dropped_stale, recovered=self.recovered, halted=self.halted,
+                        dropped_stale=self.dropped_stale, recovered=self.recovered, halted=self.halted, trims=dict(self.trims),
                         sent_orders=self.sent_orders, paused_s=max(0, round(self.paused_until - self.clock())))
 
     # ---------------------------------------------------------------------------------------- I2
@@ -244,11 +246,15 @@ class Executor:
             pos = self.pos.get(ex, 0)
             if ex not in cap:
                 cap[ex] = self._reducing_capacity(ex, exclude_key)
+            want = qty
             if reduces(side, action, pos):
                 qty = int(max(0, min(qty, cap[ex])))
                 cap[ex] -= qty
             elif action == "sell":
                 qty = 0                                     # an unbacked sell would become an opposite buy: never send it
+            if qty < want:
+                self.trims[l] = self.trims.get(l, 0) + 1
+                self.trim_log = (self.trim_log + [(self.clock(), l, ex, want, qty)])[-200:]
             if qty >= self.min_qty:
                 out.append((b, s, l, (ex, side, action, price, int(qty))))
         return out
@@ -410,7 +416,7 @@ class Executor:
         return n
 
     # ---------------------------------------------------------------------------------------- audit (I8)
-    def resolve_unknown(self, open_orders, fills):
+    def resolve_unknown(self, open_orders, fills, on_adopt=None):
         """Resolve UNKNOWN writes from a REST snapshot: an open order or fill matching an UNKNOWN item, placed after the
         write and not already ours, is adopted (ACKED, ownership recorded); otherwise NOT_PLACED. Markets unfreeze."""
         unknown = self.journal.unknown()
@@ -440,6 +446,11 @@ class Executor:
                     ids.append(match["id"])
                     self.ledger.adopt(match["id"], it["bot"], it["sub"], it["layer"], it["order"])
             self.journal.close(e["key"], "ACKED" if ids else "NOT_PLACED", ids=ids, note="resolved by REST audit")
+            if ids and on_adopt:
+                try:
+                    on_adopt(e, ids)                        # e.g. a pair set: recorded as a set, with repair tracking
+                except Exception as err:
+                    self.log(f"  ERR on_adopt: {err!r}")
             resolved += 1
         self.frozen = {}
         return resolved

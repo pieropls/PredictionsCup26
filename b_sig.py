@@ -164,6 +164,16 @@ def fills(known=(), max_pages=5):
     return out
 
 
+def leaderboard(limit=20, offset=0):
+    """Tournament leaderboard (sort by P&L): {leaderboard: [{rank, username, pnl, tradesCount, volume, roi}], total, myRank}."""
+    return _req("GET", f"/tournaments/{T['slug']}/leaderboard", params={"limit": limit, "offset": offset, "sort": "pnl", "period": "all"})
+
+
+def recent_markets(limit=20):
+    """Newest tournament markets first (1 read): [{id, title, status, createdAt, exchanges: [{id, ...}]}]."""
+    return _req("GET", "/markets", params={"tournamentId": T["id"], "sort": "recent", "limit": limit, "status": "open"})["data"]
+
+
 def pnl():
     """{totalAccountValue, totalHoldingsValue, unrealizedPnl, roi, ...}"""
     return _req("GET", f"/tournaments/{T['slug']}/portfolio/pnl", params={"period": "all"})

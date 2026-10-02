@@ -6,7 +6,7 @@ import os
 import re
 import urllib.request
 
-from a_config import PM_MAP_FILE, PM_EXTRA
+from a_config import PM_MAP_FILE, PM_EXTRA, FAIR_HALF_LIFE_S, FAIR_JUMP, FAIR_CONFIRM_S, PM_MIN_LIQUIDITY, MB_PM_MAX_SPREAD
 
 GAMMA = "https://gamma-api.polymarket.com"
 SIG_TITLE = re.compile(r"Will the (\w+) Party win the (.+?)\??$")
@@ -103,20 +103,63 @@ def market_map(sig_markets):
 
 
 def fairs(mp):
-    """{ex: (pm_bid, pm_ask)} for every mapped exchange. A candidate sum treats a missing bid as 0 and a missing ask as the
-    bid; a single market needs both sides. Closed or missing legs drop the exchange."""
+    """{ex: (pm_bid, pm_ask, liquidity)} for every mapped exchange. A candidate sum treats a missing bid as 0 and a
+    missing ask as the bid (liquidity: the smallest leg); a single market needs both sides. Closed or missing legs drop
+    the exchange."""
     ids = sorted({i for m in mp for i in m["pm_ids"]})
     quotes = {}
     for i in range(0, len(ids), 100):
         for x in _get("/markets?limit=100&" + "&".join(f"id={j}" for j in ids[i:i + 100])):
             if not x.get("closed"):
-                quotes[str(x["id"])] = (x.get("bestBid"), x.get("bestAsk"))
+                quotes[str(x["id"])] = (x.get("bestBid"), x.get("bestAsk"), float(x.get("liquidityNum") or x.get("liquidity") or 0))
     out = {}
     for m in mp:
         legs = [quotes.get(i) for i in m["pm_ids"]]
         if not legs or any(l is None for l in legs):
             continue
-        if len(legs) == 1 and None in legs[0]:
+        if len(legs) == 1 and None in legs[0][:2]:
             continue
-        out[m["ex"]] = (sum(float(b or 0) for b, _ in legs), sum(float(a if a is not None else (b or 0)) for b, a in legs))
+        out[m["ex"]] = (sum(float(l[0] or 0) for l in legs), sum(float(l[1] if l[1] is not None else (l[0] or 0)) for l in legs),
+                        min(l[2] for l in legs))
     return out
+
+
+class FairTracker:
+    """plan_review A6: fair = Polymarket mid smoothed by an EWMA (half-life 20 s). A move of >= 1.5c acts only once it has
+    persisted 5 s (seen again on a later poll), then fair jumps to it. u = Polymarket half-spread. No fair when the
+    spread is wider than MB_PM_MAX_SPREAD, liquidity < PM_MIN_LIQUIDITY, or the quote is older than 60 s."""
+
+    def __init__(self, half_life=FAIR_HALF_LIFE_S, jump=FAIR_JUMP, confirm_s=FAIR_CONFIRM_S, max_age=60.0):
+        self.half_life, self.jump, self.confirm_s, self.max_age = half_life, jump, confirm_s, max_age
+        self.f, self.u, self.t, self.pending = {}, {}, {}, {}
+
+    def update(self, quotes, now):
+        for ex, q in quotes.items():
+            b, a = float(q[0]), float(q[1])
+            liq = q[2] if len(q) > 2 else PM_MIN_LIQUIDITY
+            if not 0 < a - b <= MB_PM_MAX_SPREAD or liq < PM_MIN_LIQUIDITY:
+                self.f.pop(ex, None)
+                continue
+            mid, self.u[ex] = (a + b) / 2, (a - b) / 2
+            old, last = self.f.get(ex), self.t.get(ex, now)
+            self.t[ex] = now
+            if old is None:
+                self.f[ex] = mid
+                continue
+            if abs(mid - old) >= self.jump - 1e-12:
+                p = self.pending.get(ex)
+                if p and (mid - old) * (p[1] - old) > 0 and now - p[0] >= self.confirm_s:
+                    self.f[ex] = mid                        # confirmed: act on it
+                    self.pending.pop(ex, None)
+                elif not p or (mid - old) * (p[1] - old) <= 0:
+                    self.pending[ex] = (now, mid)
+                continue
+            self.pending.pop(ex, None)
+            w = 1 - 0.5 ** (max(now - last, 0.0) / self.half_life)
+            self.f[ex] = old + w * (mid - old)
+
+    def fair(self, ex, now):
+        return self.f.get(ex) if now - self.t.get(ex, -1e18) <= self.max_age else None
+
+    def fairs(self, now):
+        return {ex: v for ex, v in self.f.items() if now - self.t.get(ex, -1e18) <= self.max_age}

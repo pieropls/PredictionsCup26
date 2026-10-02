@@ -35,7 +35,10 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       MB_FOCUS, MB_REFILL_S, MB_QUOTE_TTL_S, PAIR_ENABLED, PAIR_EDGE, PAIR_THIRD_PARTY, PAIR_MAX_QTY,
                       PAIR_MAX_SHOTS, PAIR_MIN_LOCK, PAIR_TTL_S, PAIR_COOLDOWN_S, DATA, POSITION_REF_FILE, PNL_FILE, PNL_EVERY_S,
                       STATE_FILE, DASHBOARD_FILE, PID_FILE, LOCK_FILE, OVERRIDES_FILE, NIGHT_LOG_FILE, HOST_ID_FILE,
-                      DASHBOARD_URL_FILE, STATE_EVERY_S, LAYER_CAPS, KAPPA_FROM_OCT30, LOSS_STOP)
+                      DASHBOARD_URL_FILE, STATE_EVERY_S, LAYER_CAPS, KAPPA_FROM_OCT30, LOSS_STOP, MARKET_MAX_POS,
+                      LADDER_LEVELS, LADDER_CAPACITY_SHARE, TAKE_NOTIONAL, REF_WINDOW_S, REF_MIN_SAMPLES, REF_MAX_SPREAD,
+                      BREAKER_WINDOW_S, BREAKER_MARKETS, BREAKER_SHARE, BREAKER_PAUSE_S, MM_PILOT_MARKETS,
+                      LADDER_PILOT_MARKETS, PILOT_S)
 from d_ledger import Ledger, stamp, write_atomic
 
 
@@ -302,6 +305,11 @@ class Engine:
         self.focus, self.pnl_t, self.risk_view, self.t = set(), 0.0, {}, {}
         self.hour, self.started, self.errors = None, time.time(), []
         self.pm, self.px_t, self.state_t, self.alerts = {}, None, 0.0, []
+        self.ft, self.mids, self.mids_t = pm.FairTracker(), read_json(os.path.join(DATA, "mids.json"), {}), 0.0
+        self.breaker, self.bad_since, self.tranche_view, self.used, self.ladder_quota = {}, None, {}, {}, 0
+        self.pilot_sets = {}
+        self.load_pilots()
+        self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
         self.position_names = {b.name for b in self.bots if b.kind == "position"}
         if self.ex.recovered:
             self.event("AUDIT", f"{self.ex.recovered} orders acked after the last ledger save recovered from the journal as ours")
@@ -351,7 +359,7 @@ class Engine:
         return max(0.0, qty - closes) * price
 
     MARKET_LAYERS = {"exit": "recycler", "recycle": "recycler", "take": "sniper", "touch": "mm", "mm": "mm",
-                     "ladder": "ladder", "rebound": "ladder"}
+                     "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs"}
     REDUCING = {"exit", "recycle", "rebound", "unwind", "repair"}
 
     def gate(self, b, wants):
@@ -359,10 +367,13 @@ class Engine:
         new risk drops every want that adds risk; exits, rebounds, unwinds and repairs keep running."""
         c, out = self.controls, []
         for w in wants:
-            layer = "position" if b.kind == "position" else self.MARKET_LAYERS.get(w["layer"], w["layer"])
+            layer = ("recycler" if w["layer"] == "recycle" else "position") if b.kind == "position" else \
+                self.MARKET_LAYERS.get(w["layer"], w["layer"])
+            reducing = w["layer"] in self.REDUCING or w.get("reduce")
             if not c.on(layer) or not c.allows(b.ex, layer):
-                continue
-            if c.paused and w["layer"] not in self.REDUCING:
+                if not (reducing and layer not in ("recycler",) and c.d["layers"].get(layer, {}).get("state") is not None):
+                    continue                                 # a layer that is off keeps closing what it holds (not the recycler)
+            if c.paused and not reducing:
                 continue
             out.append(w)
         return out
@@ -402,7 +413,8 @@ class Engine:
         self.t["read"] = time.time() - now
         if "fair" in got:
             self.pm = got["fair"]
-            self.fair = {ex: (b + a) / 2 for ex, (b, a) in got["fair"].items() if 0 < a - b <= MB_PM_MAX_SPREAD}
+            self.ft.update(got["fair"], now)                # A6: EWMA mid, jumps confirmed, wide/illiquid dropped
+            self.fair = self.ft.fairs(now)
             self.fair_t = time.time()
         self.px_t = time.time()
         fresh = time.time() - self.fair_t <= PM_MAX_AGE_S
@@ -431,7 +443,7 @@ class Engine:
         self.ledger.audit_subbooks(pos, log=lambda s: self.event("AUDIT", s.strip()[6:].strip()))
         self.ex.update(pos, self.open, as_of=now)
         if self.ex.frozen or self.journal.unknown():
-            n = self.ex.resolve_unknown(self.open, got.get("fills", []))
+            n = self.ex.resolve_unknown(self.open, got.get("fills", []), on_adopt=self.adopted)
             if n:
                 self.event("AUDIT", f"resolved {n} writes with an unknown outcome; their markets are unfrozen")
         self.book = {ex: dict(pos=pos[ex], row=rows[ex]) for ex in pos}
@@ -439,70 +451,65 @@ class Engine:
         if self.n % 20 == 0 or not self.focus:
             self.pick_focus()
 
-        # F2 plan: account risk = filled + resting adds + this loop's new adds; cash keeps CASH_RESERVE
-        hold = self.ledger.arb_hold()
+        # F2 context: free cash, kappa, SIG reference mids, tranches, the layer controller, bucket usage
+        cash = (self.acct.get("totalAccountValue") or 0) - (self.acct.get("totalHoldingsValue") or 0)
+        self.update_mids(now)
+        self.track_tranches(now)
+        self.controller(now)
+        kappa, _ = self.kappa()
+        used = self.bucket_usage()
         engine_ex = {b.ex for b in self.bots if b.kind == "market"} | {ex for pb in self.pairs for ex in pb.legs}
         filled = sum(self.risk(ex, pos.get(ex, 0)) for ex in engine_ex)
-        resting = sum(self.adds(o["side"], o["qty"], o["price"], pos.get(o["ex"], 0)) for o in self.open
-                      if o["ex"] in engine_ex and o["action"] == "buy")
-        cash = (self.acct.get("totalAccountValue") or 0) - (self.acct.get("totalHoldingsValue") or 0)
-        budget = min(RISK_MAX_EXPOSURE - filled - resting, cash - CASH_RESERVE - resting)
-        self.risk_view = dict(filled=round(filled), resting=round(resting), cash=round(cash), budget=round(budget))
+        self.risk_view = dict(filled=round(filled), resting=round(used["committed"]), cash=round(cash),
+                              budget=round(cash - CASH_RESERVE - used["committed"]))
+        budget = self.risk_view["budget"]
 
-        # F2a pairs first: riskless sets get first call on the budget
+        # F2a pairs first: unwinds and repairs always; new sets only with the pairs layer on and new risk allowed
         t0 = time.time()
-        shots, spent = self.run_pairs(now, budget) if self.controls.on("pairs") and not self.controls.paused else (0, 0.0)
+        shots, spent = self.run_pairs(now, min(budget, self.cap("pairs", "capital") - used["pairs"]), kappa) \
+            if self.controls.on("pairs") else (0, 0.0)
         self.t["pairs"] = time.time() - t0
         t0 = time.time()
-        recent = {}
-        for f in self.ledger.fills[-400:]:
-            if f["action"] == "buy" and f["layer"] in ("take", "touch", "ladder"):
-                recent[(f["ex"], f["side"])] = f["t"]
-        cut = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - MB_REFILL_S))
         # each bot sees only its own orders: resting ones it placed (ownership record) + its queued/in-flight ones
         mine = {}
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
             if rec:
-                mine.setdefault(rec["bot"], []).append(dict(o, sub=rec.get("sub", "")))
+                mine.setdefault(rec["bot"], []).append(dict(o, sub=rec.get("sub", ""), layer=rec.get("layer", "")))
         for p in self.ex.pending():
             mine.setdefault(p["bot"], []).append(dict(p, id=None, price=p["price"]))
-        plans, reserved = [], spent
+        plans = []
+        self.ladder_quota = int(LADDER_CAPACITY_SHARE * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60)
         for b in self.bots:
-            bid, ask, last = self.px.get(b.ex, (None, None, None))
-            r = rows.get(b.ex, {})
-            sub = "manual" if b.kind == "position" else "inventory"
-            s = dict(pos=self.ledger.sub(b.ex, sub), fair=self.fair.get(b.ex), bid=bid, ask=ask, last=last, avg=r.get("avgCost"),
-                     upnl=r.get("unrealizedPnl"), add_ok=budget - reserved > 0, focus=b.ex in self.focus,
-                     cooldown={sd: recent.get((b.ex, sd), "") > cut for sd in ("yes", "no")})
+            s = self.bot_snapshot(b, pos, rows, kappa, cash, used)
+            s["own"] = [o for o in mine.get(b.name, []) if o.get("id")]   # I4: our resting orders aren't the market
             wants = self.gate(b, b.plan(s))
+            if b.kind == "market":                                  # a buy against the net holding nets it (I2 caps it at
+                net = pos.get(b.ex, 0)                              # |net| when sent): want what can actually rest, no churn
+                for w in wants:
+                    if w["action"] == "buy" and jx.reduces(w["side"], "buy", net) and w["qty"] > abs(net):
+                        w["qty"] = int(abs(net))
+                        if w.get("qmax") is not None:
+                            w["qmax"] = min(w["qmax"], w["qty"])
+                wants = [w for w in wants if w["qty"] >= MIN_QTY]
             kept, cancels, places = bots.reconcile(wants, mine.get(b.name, []))
-            if b.kind == "market":                                  # new risk only while it fits the budget
-                fits = []
-                for w in places:
-                    new = self.adds(w["side"], w["qty"], w["px"], s["pos"])
-                    if new and reserved + new > budget:
-                        continue
-                    reserved += new
-                    fits.append(w)
-                places = fits
+            if b.kind == "market":
+                places = self.admit(b, places, used, cash)
             if b.kind == "position":                                # foreign sells (placed by hand) share the holding
                 foreign = sum(o["qty"] for o in self.open if o["ex"] == b.ex and not self.ex.owned(o["id"])
                               and jx.reduces(o["side"], o["action"], pos.get(b.ex, 0)))
                 places = bots.trim_sells(int(abs(s["pos"]) - foreign), kept, places)
-            b.view = dict(s=s, wants=wants)
+            b.view = dict(s={k: v for k, v in s.items() if k in ("pos", "fair", "bid", "ask", "ref", "u")}, wants=wants)
             urgency = max((b.urgency(o) for o in cancels if o.get("id")), default=0.0)
-            edge = max([(s["fair"] - s["ask"]) if None not in (s["fair"], s["ask"]) else -1,
-                        (s["bid"] - s["fair"]) if None not in (s["fair"], s["bid"]) else -1])
-            exits_first = not any(w["layer"] == "exit" for w in places)
-            plans.append((b.kind != "position", exits_first, -urgency, -edge, b, sub, cancels, places))
-        plans.sort(key=lambda t: t[:4])         # position bots, risk-reducing exits, quotes being picked off, biggest gap
+            plans.append((b.kind != "position", not any(w.get("reduce") for w in places), -urgency, b, cancels, places))
+        plans.sort(key=lambda t: t[:3])         # position bots, risk-reducing orders, quotes being picked off
         self.t["plan"] = time.time() - t0
         t0 = time.time()
 
         # F3 submit: cancels to the cancel lane (owned orders only), placements to the queue (I2 trims at send time)
         room, n_cancel, n_place, deferred = self.ex.admit(), 0, 0, 0
-        for _, _, _, _, b, sub, cancels, places in plans:
+        for _, _, _, b, cancels, places in plans:
+            sub = "manual" if b.kind == "position" else "inventory"
             for o in cancels:
                 if o.get("id"):
                     n_cancel += self.ex.cancel(o, reason=b.name)
@@ -521,15 +528,18 @@ class Engine:
             elif time.time() - self.fair_t > PM_MAX_AGE_S:
                 deferred += 1
                 continue
-            self.ex.place([(b.name, sub, w["layer"], (b.ex, w["side"], w["action"], w["px"], w["qty"])) for w in places],
-                          ttl_s=None if b.kind == "position" else MB_QUOTE_TTL_S,
-                          layer_prio=jx.PRIORITY["position"] if b.kind == "position" else None)
+            by_ttl = {}
+            for w in places:                                # one job per TTL (the executor merges same-TTL jobs)
+                ttl = None if b.kind == "position" and w["layer"] in ("exit", "add") else (w.get("ttl") or MB_QUOTE_TTL_S)
+                by_ttl.setdefault(ttl, []).append(w)
+            for ttl, ws in by_ttl.items():
+                self.ex.place([(b.name, w.get("sub") or sub, w["layer"], (b.ex, w["side"], w["action"], w["px"], w["qty"])) for w in ws],
+                              ttl_s=ttl, layer_prio=jx.PRIORITY["position"] if b.kind == "position" and ttl is None else None)
             room -= len(places)
             n_place += len(places)
         self.t["orders"] = time.time() - t0
-        # F4 repair pair sets whose legs filled unevenly
-        if self.controls.on("pairs"):
-            self.repair_baskets(now)
+        # F4 repair pair sets whose legs filled unevenly (runs whatever the pairs flag: repairs reduce risk)
+        self.repair_baskets(now)
         self.t["loop"] = time.time() - now
 
         # F5 record
@@ -537,22 +547,454 @@ class Engine:
         mk = [b for b in self.bots if b.kind == "market"]
         self.summary = (f"{time.strftime('%H:%M:%S')} loop {self.n} | market bots active {sum(1 for b in mk if b.view['wants'])}/{len(mk)} "
                         f"(focus {len(self.focus)}) | cancels queued {n_cancel} | placements queued {n_place} | deferred {deferred} | pair sets {shots} | "
-                        f"risk filled {filled:,.0f} + resting {resting:,.0f}, budget {budget:,.0f} | executor {self.ex.stats()['queue']} | "
+                        f"risk filled {filled:,.0f}, committed {used['committed']:,.0f}, budget {budget:,.0f} | executor {self.ex.stats()['queue']} | "
                         f"account {self.acct.get('totalAccountValue', 0):,.0f} | took {self.t['loop']:.0f}s "
                         f"(read {self.t['read']:.0f}, pairs {self.t['pairs']:.0f}, orders {self.t['orders']:.0f})")
         print(self.summary, flush=True)
         self.ledger.save()
         self.write_state(fresh)
+        for job in (self.hourly, lambda: self.log_leaders(time.time()), lambda: self.leaders_marks_check(time.time()),
+                    lambda: self.scan_new_markets(time.time())):
+            try:
+                job()
+            except Exception as e:                          # side jobs must never stop trading
+                self.event("ERR", f"side job: {e!r}")
+
+    # ------------------------------------------------------------------------------------------------ layers v2
+    def pol(self, ex, side):
+        """Political direction of buying `side` on ex: 'D' (D YES or R NO), 'R' (R YES or D NO), else 'other'."""
+        party = (self.meta.get(ex) or {}).get("party")
+        if party not in ("D", "R"):
+            return "other"
+        return party if side == "yes" else ("R" if party == "D" else "D")
+
+    def update_mids(self, now):
+        """SIG mid snapshots for the ladder anchor (A5): last 30 min per market; saved every 5 min to survive restarts."""
+        for ex, (b, a, _) in self.px.items():
+            if b is not None and a is not None:
+                d = self.mids.setdefault(ex, [])
+                d.append((now, (b + a) / 2, a - b))
+                while d and d[0][0] < now - REF_WINDOW_S:
+                    d.pop(0)
+        if now - self.mids_t >= 300 and not api.DRY_RUN:
+            self.mids_t = now
+            write_atomic(os.path.join(DATA, "mids.json"), json.dumps(self.mids))
+
+    def ref(self, ex):
+        """30-min median SIG mid, ignoring snapshots with a spread > 10c; None until >= 6 samples over >= 10 min."""
+        d = [(t, m) for t, m, sp in self.mids.get(ex, []) if sp <= REF_MAX_SPREAD]
+        if len(d) < REF_MIN_SAMPLES or d[-1][0] - d[0][0] < 600:
+            return None
+        xs = sorted(m for _, m in d)
+        return xs[len(xs) // 2]
+
+    def track_tranches(self, now):
+        """A tranche starts at its first fill (records ref, offset and fair then); the news guard hands it to the
+        recycler when fair drops > off/2 below that; it closes once its sub-book is back to zero."""
+        tr, self.tranche_view = self.ledger.tranches, {}
+        for ex, books in list(self.ledger.subbooks.items()):
+            for sub, q in list(books.items()):
+                if not sub.startswith("tranche:") or abs(q) < 1 or sub in tr:
+                    continue
+                side = "yes" if q > 0 else "no"
+                level = int(sub.split("-")[0][-1]) if sub.split("-")[0][-1].isdigit() else 0
+                f, r = self.side_fair(ex, side), self.ref(ex)
+                ref_side = None if r is None else (r if side == "yes" else 1 - r)
+                base = LADDER_LEVELS[min(level, len(LADDER_LEVELS) - 1)][0]
+                tr[sub] = dict(ex=ex, side=side, level=level, ref_side=ref_side, fair_side=f, state="open", t=stamp(),
+                               off=max(0.015, base * bots.s_of(f if f is not None else 0.5)))
+                self.event("TRANCHE", f"{self.name(ex)}: ladder fill -> tranche {sub} {side.upper()} {abs(q):,.0f}")
+        for sub, t in tr.items():
+            if t["state"] != "open":
+                continue
+            ex, q = t["ex"], self.ledger.subbooks.get(t["ex"], {}).get(sub, 0)
+            if abs(q) < 1:
+                t["state"] = "closed"
+                continue
+            f = self.side_fair(ex, t["side"])
+            if f is not None and t.get("fair_side") is not None and f < t["fair_side"] - t["off"] / 2:
+                self.ledger.move_sub(ex, sub, "inventory")
+                t["state"] = "news"
+                self.event("NEWS", f"{self.name(ex)}: fair {t['side'].upper()} fell {t['fair_side'] - f:+.3f} (> off/2): tranche "
+                                   f"{sub} handed to the recycler")
+                continue
+            if t.get("ref_side") is None:
+                r = self.ref(ex)
+                t["ref_side"] = None if r is None else (r if t["side"] == "yes" else 1 - r)
+            avg = self.ledger.tranche_avg(sub)
+            if avg is not None and t.get("ref_side") is not None:
+                self.tranche_view.setdefault(ex, []).append(dict(sub=sub, ref_side=t["ref_side"], avg=avg, state="open"))
+
+    def market_layers(self, ex):
+        """{layer: True} for the strategy layers that may act on this market: on, allowed here, and in the pilot set."""
+        out = {}
+        for l in ("recycler", "mm", "ladder", "sniper"):
+            st = self.controls.state(l)
+            if st == "off" or not self.controls.allows(ex, l):
+                continue
+            if st == "pilot" and l in self.pilot_sets and ex not in self.pilot_sets[l]:
+                continue
+            out[l] = True
+        return out
+
+    def blocked_sides(self, ex):
+        now = time.time()
+        return {side for side in ("yes", "no") if self.breaker.get(self.pol(ex, side), 0) > now}
+
+    def bot_snapshot(self, b, pos, rows, kappa, cash, used):
+        bid, ask, last = self.px.get(b.ex, (None, None, None))
+        if b.kind == "position":
+            s = dict(pos=self.ledger.sub(b.ex, "manual"), fair=self.fair.get(b.ex), bid=bid, ask=ask, kappa=kappa,
+                     recycle={k: v for k, v in self.ledger.subbooks.get(b.ex, {}).items() if k.startswith("recycle:")}
+                     if self.controls.on("recycler") and self.controls.allows(b.ex, "recycler") else {})
+            return s
+        f = self.fair.get(b.ex)
+        held = {"yes": 0.0, "no": 0.0}
+        q = pos.get(b.ex, 0)
+        if f is not None and q:
+            held["yes" if q > 0 else "no"] = abs(q) * (f if q > 0 else 1 - f)
+        for o in self.open:
+            if o["ex"] == b.ex and o["action"] == "buy":
+                rec = self.ledger.orders.get(o["id"])
+                if rec and rec["layer"] not in self.REDUCING and not (rec["layer"] == "mm" and jx.reduces(o["side"], "buy", q)):
+                    held[o["side"]] += o["qty"] * o["price"]
+        return dict(fair=f, u=self.ft.u.get(b.ex), bid=bid, ask=ask, ref=self.ref(b.ex), kappa=kappa,
+                    subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
+                    paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
+                    room={sd: max(0.0, MARKET_MAX_POS - held[sd]) for sd in ("yes", "no")},
+                    tranches=self.tranche_view.get(b.ex, []),
+                    ladder_ids={(sd, i): self.ledger.ladder_id(b.ex, sd, i) for sd in ("yes", "no") for i in range(len(LADDER_LEVELS))}
+                    if self.market_layers(b.ex).get("ladder") else {},
+                    take_notional=max(0.0, self.cap("sniper", "per_market") - used["sniper_market"].get(b.ex, 0.0)) if
+                    time.time() - self.new_markets.get(b.ex, 0) < 1800 else
+                    min(TAKE_NOTIONAL, max(0.0, self.cap("sniper", "per_market") - used["sniper_market"].get(b.ex, 0.0))))
+
+    def bucket_usage(self):
+        """What each capital bucket uses now (SIG): resting entry buys at full notional, filled inventory at cost."""
+        u = dict(committed=0.0, mm=0.0, ladder_filled=0.0, ladder_resting=0.0, ladder_side={"D": 0.0, "R": 0.0, "other": 0.0},
+                 sniper_market={}, sniper_day=0.0, pairs=0.0)
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"])
+            if not rec or o["action"] != "buy" or rec["bot"] in self.position_names:
+                continue
+            n, l = o["qty"] * o["price"], rec["layer"]
+            if l in ("mm", "take", "set") and not jx.reduces(o["side"], "buy", self.book.get(o["ex"], {}).get("pos", 0)):
+                u["committed"] += n                         # the hard floor counts resting entry buys at full notional
+            if l == "ladder":
+                u["ladder_resting"] += n
+                u["ladder_side"][self.pol(o["ex"], o["side"])] += n
+            elif l == "take":
+                u["sniper_market"][o["ex"]] = u["sniper_market"].get(o["ex"], 0.0) + n
+        for ex, books in self.ledger.subbooks.items():
+            q = books.get("mm", 0)
+            f = self.fair.get(ex)
+            if q and f is not None:
+                u["mm"] += abs(q) * (f if q > 0 else 1 - f)
+        for sub, t in self.ledger.tranches.items():
+            if t["state"] == "open":
+                q = self.ledger.subbooks.get(t["ex"], {}).get(sub, 0)
+                u["ladder_filled"] += abs(q) * (self.ledger.tranche_avg(sub) or 0.5)
+        today = time.strftime("%Y-%m-%d")
+        for f in self.ledger.fills[-3000:]:
+            if f["layer"] == "take" and f["t"][:10] == today and f["action"] == "buy":
+                u["sniper_day"] += f["qty"] * f["price"]
+                u["sniper_market"][f["ex"]] = u["sniper_market"].get(f["ex"], 0.0) + f["qty"] * f["price"]
+        for bk in self.ledger.baskets:
+            if bk.get("state", "held") in ("held", "repair"):
+                u["pairs"] += sum(l[3] * (l[4] or 0) for l in self.ledger.basket_fills(bk))
+        self.used = {("mm", "inventory"): u["mm"], ("ladder", "filled"): u["ladder_filled"], ("ladder", "resting"): u["ladder_resting"],
+                     ("pairs", "capital"): u["pairs"], ("sniper", "per_day"): u["sniper_day"],
+                     ("sniper", "per_market"): max(u["sniper_market"].values(), default=0.0)}
+        return u
+
+    def admit(self, b, places, used, cash):
+        """The risk gate for new entries (night plan §4.2), in place order: hard cash floor for MM/takes, the layer's
+        bucket, the ladder's per-side cash cover and its share of SIG capacity. Reducing orders always pass."""
+        out = []
+        for w in places:
+            if w.get("reduce"):
+                out.append(w)
+                continue
+            n, l = w["qty"] * w["px"], w["layer"]
+            if l in ("mm", "take") and cash - used["committed"] - n < CASH_RESERVE:
+                continue
+            if l == "mm" and used["mm"] >= self.cap("mm", "inventory"):
+                continue                                    # the MM bucket is inventory at cost (§4.2); resting = the floor
+            if l == "take" and (used["sniper_day"] + n > self.cap("sniper", "per_day")
+                                or used["sniper_market"].get(b.ex, 0.0) + n > self.cap("sniper", "per_market")):
+                continue
+            if l == "ladder":
+                side = self.pol(b.ex, w["side"])
+                cover = max(0.0, cash - CASH_RESERVE - used["committed"])
+                if (self.ladder_quota <= 0 or used["ladder_filled"] >= self.cap("ladder", "filled")
+                        or used["ladder_resting"] + n > self.cap("ladder", "resting") or used["ladder_side"][side] + n > cover):
+                    continue
+                self.ladder_quota -= 1
+                used["ladder_resting"] += n
+                used["ladder_side"][side] += n
+            if l in ("mm", "take"):
+                used["committed"] += n
+            if l == "take":
+                used["sniper_day"] += n
+                used["sniper_market"][b.ex] = used["sniper_market"].get(b.ex, 0.0) + n
+            out.append(w)
+        return out
+
+    def load_pilots(self):
+        """Pilot market sets from data/market_stats.json (24 h SIG trade tape): MM = most volume, ladders = most sweeps."""
+        path = os.path.join(DATA, "market_stats.json")
+        stats = (read_json(path, {}) or {}).get("stats", {})
+        mk = [b.ex for b in self.bots if b.kind == "market"]
+        vol = sorted(mk, key=lambda ex: -(stats.get(ex, {}).get("volume") or 0))
+        swp = sorted(mk, key=lambda ex: (-(stats.get(ex, {}).get("sweeps") or 0), -(stats.get(ex, {}).get("volume") or 0)))
+        self.pilot_sets = {"mm": set(vol[:MM_PILOT_MARKETS]), "ladder": set(swp[:LADDER_PILOT_MARKETS])} if stats else {}
+
+    def controller(self, now):
+        """Night plan §4.4-4.5 and §5 gates, every loop: per-layer kill rules, pilot promotions, the D5 loss stop, the
+        SIG 5xx pause, the correlated-fill breaker, and D1 (AK release to the recycler)."""
+        c = self.controls
+        night = c.d.setdefault("night", {})
+        since = {l: c.layer(l).get("since") or now for l in LAYERS}
+        stats = self.layer_stats(since)
+        for l in ("recycler", "mm", "ladder", "pairs", "sniper"):
+            if not c.on(l):
+                continue
+            hit = [k for k in self.kill_status(l, stats.get(l, {})) if k["hit"]]
+            if hit:
+                c.kill(l, f"{hit[0]['rule']}: {hit[0]['value']}")
+                self.alerts.append(f"{time.strftime('%H:%M')} layer {l} killed: {hit[0]['rule']} ({hit[0]['value']})")
+        # promotions (pilot -> full) and pilot extensions
+        for l in ("mm", "ladder", "pairs"):
+            if c.state(l) != "pilot":
+                continue
+            st, age = stats.get(l, {}), now - since[l]
+            ok, why = False, ""
+            if l == "mm" and age >= PILOT_S:
+                n, edge, mo = st.get("fills", 0), st.get("edge"), st.get("markout30")
+                if n >= 20 and edge is not None and edge > 0.01 and (mo is None or mo >= -0.005):
+                    ok, why = True, f"{n} fills, edge {edge * 100:+.2f}c, mark-out {(mo or 0) * 100:+.2f}c"
+                elif now - night.get(f"{l}_ext", 0) >= PILOT_S:
+                    night[f"{l}_ext"] = now
+                    self.night.line(f"layer mm pilot extended 2 h: {n} fills, edge {(edge or 0) * 100:+.2f}c, "
+                                    f"mark-out {(mo or 0) * 100:+.2f}c (gate: >= 20 fills, edge > 1c, mark-out >= -0.5c)")
+            if l == "ladder" and age >= PILOT_S:
+                trims = self.ex.trims.get("ladder", 0) - night.get("ladder_trims0", 0)
+                trips = night.get("breaker_trips_since_ladder", 0)
+                if trims == 0 and trips == 0:
+                    ok, why = True, "2 h pilot: no I2 trims, no breaker trips"
+                elif now - night.get(f"{l}_ext", 0) >= PILOT_S:
+                    night[f"{l}_ext"] = now
+                    self.night.line(f"layer ladder stays pilot: {trims} I2 trims, {trips} breaker trips (review)")
+            if l == "pairs":
+                done = [bk for bk in self.ledger.baskets if bk.get("ts", 0) >= since[l] and bk.get("state") in ("held", "unwound", "done")
+                        and self.ledger.matched(bk) > 0 and not self.basket_residue(bk)]
+                if len(done) >= 5:
+                    ok, why = True, f"{len(done)} sets with no one-leg residue"
+            if ok:
+                c.set_layer(l, "full", f"pilot gate passed: {why}")
+        # D5 loss stop and the SIG 5xx pause
+        bot_24h = sum(self.fill_pnl_fair(f) for f in self.fills_since(now - 86400)
+                      if self.strategy_of(f["bot"], f["layer"]) not in ("position", "old engine"))
+        if bot_24h < -LOSS_STOP and not c.paused:
+            c.set_paused(True, f"D5 loss stop: bot P&L at fair {bot_24h:+,.0f} over 24 h")
+            c.decide(f"loss stop tripped at {time.strftime('%H:%M')} ({bot_24h:+,.0f}): resume new risk?")
+        h = api.health(600)
+        bad = h["read"]["n"] >= 20 and h["read"]["bad_rate"] > 0.5
+        if bad and not c.paused:
+            self.bad_since = self.bad_since or now
+            if now - self.bad_since >= 600:
+                c.set_paused(True, "SIG 5xx/timeouts > 50% for 10 min")
+                night["paused_by_5xx"] = True
+        elif not bad:
+            self.bad_since = None
+            if c.paused and night.pop("paused_by_5xx", False) and h["read"]["bad_rate"] < 0.1:
+                c.set_paused(False, "SIG recovered (< 10% errors)")
+        # correlated-fill breaker: ladder + MM entry fills in >= 5 markets in 10 min, >= 80% one political direction
+        recent = [f for f in self.fills_since(now - BREAKER_WINDOW_S) if f["layer"] in ("ladder", "mm") and f["action"] == "buy"]
+        for direction in ("D", "R"):
+            if self.breaker.get(direction, 0) > now:
+                continue
+            ms = {f["ex"] for f in recent}
+            mine = [f for f in recent if self.pol(f["ex"], f["side"]) == direction]
+            if len(ms) >= BREAKER_MARKETS and recent and len(mine) / len(recent) >= BREAKER_SHARE - 1e-9:
+                self.breaker[direction] = now + BREAKER_PAUSE_S
+                night["breaker_trips_since_ladder"] = night.get("breaker_trips_since_ladder", 0) + 1
+                n = 0
+                for o in self.open:
+                    rec = self.ledger.orders.get(o["id"])
+                    if rec and rec["layer"] in ("ladder", "mm") and o["action"] == "buy" and self.pol(o["ex"], o["side"]) == direction \
+                            and not jx.reduces(o["side"], "buy", self.book.get(o["ex"], {}).get("pos", 0)):
+                        n += bool(self.ex.cancel(o, reason="breaker"))
+                msg = (f"BREAKER pro-{direction}: {len(mine)}/{len(recent)} ladder/MM fills in {len(ms)} markets within 10 min "
+                       f"(news, not a sweep): {n} {direction}-side ladder/MM buys cancelled, entries that way paused 30 min")
+                self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+                self.event("BREAKER", msg)
+                self.night.line(msg)
+        self.alerts = self.alerts[-20:]
+        # D1: release 25% of the AK position to the recycler once the recycler is on (night plan §1)
+        if c.on("recycler") and not night.get("d1_done"):
+            self.apply_d1()
+        c.save()
+
+    def apply_d1(self):
+        c, night = self.controls, self.controls.d.setdefault("night", {})
+        ak = next((b for b in self.bots if b.kind == "position" and b.name == "AK-GOV-D"), None)
+        if ak is None:
+            night["d1_done"] = "no AK bot"
+            return
+        held = self.ledger.sub(ak.ex, "manual")
+        q = self.ledger.split_sub(ak.ex, "manual", "recycle:ak-d1", int(abs(held) * 0.25))
+        refs = read_json(POSITION_REF_FILE, {})
+        old = ak.ref
+        ak.ref = int(round(old * 0.75))
+        if "AK-GOV-D" in refs:
+            refs["AK-GOV-D"]["ref"] = ak.ref
+            write_atomic(POSITION_REF_FILE, json.dumps(refs, indent=1))
+        night["d1_done"] = stamp()
+        self.night.line(f"D1 applied: {abs(q):,.0f} AK NO (25%) moved to sub-book recycle:ak-d1 (sold into the SIG bid while it is "
+                        f">= PM NO fair + 0.5c); the AK exit ladder now covers the other 75% (ref {old:,} -> {ak.ref:,}); 0.10 spike bid kept")
+
+    def log_leaders(self, now):
+        """Every 10 min (night plan §5.6): the top 20 and our own row -> data/leaders.csv (2 reads)."""
+        if now - self.leaders_t < 600 or not self.controls.on("leaders"):
+            return
+        self.leaders_t = now
         try:
-            self.hourly()
-        except Exception as e:                              # the log must never stop trading
-            self.event("ERR", f"night log: {e!r}")
+            d = api.leaderboard(20)
+            rows = [dict(r, ours=0) for r in d["leaderboard"]]
+            if d.get("myRank"):
+                me = api.leaderboard(1, offset=int(d["myRank"]) - 1)["leaderboard"]
+                rows += [dict(r, ours=1) for r in me[:1]]
+        except Exception as err:
+            self.event("ERR", f"leaderboard: {str(err)[:120]}")
+            return
+        path, new = os.path.join(DATA, "leaders.csv"), not os.path.exists(os.path.join(DATA, "leaders.csv"))
+        with open(path, "a", newline="") as fh:
+            w = csv.writer(fh)
+            if new:
+                w.writerow(["time", "rank", "name", "profile", "value", "trades", "volume", "roi", "ours"])
+            t = stamp()
+            for r in rows:
+                w.writerow([t, r.get("rank"), r.get("username") or r.get("profileId"), r.get("profileId"), r.get("pnl"),
+                            r.get("tradesCount"), r.get("volume"), r.get("roi"), r["ours"]])
+
+    def leaders_marks_check(self, now):
+        """After 6 h of samples: does a leader's P&L move without trades (SIG marks catching up, not trading)?"""
+        night = self.controls.d.setdefault("night", {})
+        path = os.path.join(DATA, "leaders.csv")
+        if night.get("marks_check") or not os.path.exists(path):
+            return
+        with open(path, newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        if not rows:
+            return
+        ts = lambda r: time.mktime(time.strptime(r["time"], "%Y-%m-%d %H:%M:%S"))
+        t1 = ts(rows[-1])
+        if t1 - ts(rows[0]) < 6 * 3600:
+            return
+        first = {r["name"]: r for r in rows if ts(r) <= ts(rows[0]) + 60}
+        last = {r["name"]: r for r in rows if ts(r) == t1}
+        moved, still = [], []
+        for name, r in last.items():
+            if name in first:
+                dv = float(r["value"]) - float(first[name]["value"])
+                dn = int(float(r["trades"] or 0)) - int(float(first[name]["trades"] or 0))
+                (still if dn == 0 and abs(dv) >= 1000 else moved).append(f"{name} {dv:+,.0f} on {dn} trades")
+        night["marks_check"] = stamp()
+        self.night.entry(f"{time.strftime('%H:%M')} PT: leaders marks check (6 h)", [
+            f"P&L moved >= 1k WITHOUT trades (SIG marks catching up): {'; '.join(still) or 'none'}",
+            f"P&L with trades: {'; '.join(moved[:20]) or 'none'}"])
+
+    def scan_new_markets(self, now):
+        """Sniper (night plan §5.5): every 60 s, the 20 newest tournament markets (1 read). A market not seen before is
+        mapped to Polymarket strictly; without a confident match: alert, no trade. With one: it gets a MarketBot, and its
+        first plans take asks far below fair (sniper caps), then MM and ladders pick it up."""
+        if now - self.scan_t < 60 or not self.controls.on("sniper"):
+            return
+        self.scan_t = now
+        try:
+            ms = api.recent_markets(20)
+        except Exception as err:
+            self.event("ERR", f"new markets: {str(err)[:120]}")
+            return
+        for m in ms:
+            ex = str(m["exchanges"][0]["id"]) if m.get("exchanges") else None
+            if not ex or ex in self.meta or str(m["id"]) in self.seen_markets:
+                continue
+            self.seen_markets.add(str(m["id"]))
+            race, party = pm.race_party(m["title"]) or (m["title"], "?")
+            self.meta[ex] = dict(mid=str(m["id"]), title=m["title"], race=race, party=party)
+            try:
+                mp = pm.map_one(m)
+            except Exception as err:
+                mp = None
+                self.event("ERR", f"map new market: {str(err)[:120]}")
+            if not mp:
+                msg = f"NEW MARKET {m['title']} (ex {ex}): no confident Polymarket match, not traded"
+                self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+                self.event("NEW", msg)
+                self.night.line(msg)
+                continue
+            self.mp.append(mp)
+            bot = bots.MarketBot(ex, self.meta[ex])
+            self.bots.append(bot)
+            self.owner[ex] = bot
+            self.new_markets[ex] = now
+            msg = f"NEW MARKET {m['title']} (ex {ex}) mapped to Polymarket {mp['pm_ids']}: sniper armed, then MM/ladders"
+            self.event("NEW", msg)
+            self.night.line(msg)
+
+    def basket_residue(self, bk):
+        legs = self.ledger.basket_fills(bk)
+        return sum(l[3] for l in legs) - self.ledger.matched(bk) * bk["legs"] if legs else 0
 
     # ------------------------------------------------------------------------------------------------ F2a / F4 pairs
-    def run_pairs(self, now, budget):
-        """Screen every race; size the best sets from the order books (our own orders removed); send each atomically.
-        -> (sets sent, SIG committed)."""
-        start = budget
+    def run_pairs(self, now, budget, kappa=0.0):
+        """Pairs v2 (A12). Unwinds first (no ROC, no cap, not paused): a NO basket when the YES ask sum <= n-1+kappa, a
+        YES set when the YES bid sum >= 1 - outsider - kappa, sent atomically. Then new sets (pairs layer on, new risk
+        allowed): edge >= PAIR_EDGE (2c), EV vs fair >= 0 (>= 3c when a leg has no fair), sized from the books with our
+        own orders removed, atomic. -> (sets sent, SIG committed)."""
+        start, shots = budget, 0
+        by_race = {pb.race: pb for pb in self.pairs}
+        for bk in self.ledger.baskets:                          # early unwind
+            if bk.get("state", "held") != "held" or bk["race"] not in by_race or self.ex.admit() < 1:
+                continue
+            m = self.ledger.matched(bk)
+            if m < MIN_QTY:
+                continue
+            pb, n = by_race[bk["race"]], bk["legs"]
+            legs = [l[1] for l in self.ledger.basket_fills(bk)]
+            q = [self.px.get(ex, (None, None, None)) for ex in legs]
+            if any(self.ex.is_frozen(ex) for ex in legs) or len(legs) != n:
+                continue
+            if bk["side"] == "no":
+                asks = [x[1] for x in q]
+                if None in asks or sum(asks) > n - 1 + kappa + 1e-9:
+                    bk["unwind_at"], bk["unwind_value"] = round(n - 1 + kappa, 3), None if None in asks else round(sum(asks), 3)
+                    continue
+                orders = [(ex, "yes", "buy", a, int(m)) for ex, a in zip(legs, asks)]
+            else:
+                bids, out = [x[0] for x in q], pb.outsider(self.fair, PAIR_THIRD_PARTY)
+                if None in bids or out is None or sum(bids) < 1 - out - kappa - 1e-9:
+                    bk["unwind_at"] = None if out is None else round(1 - out - kappa, 3)
+                    bk["unwind_value"] = None if None in bids else round(sum(bids), 3)
+                    continue
+                orders = [(ex, "no", "buy", round(1 - b_, 3), int(m)) for ex, b_ in zip(legs, bids)]
+            bk["state"], bk["unwind_t"] = "unwinding", now
+
+            def unwound(results, bk=bk, n=len(orders)):
+                ok = [d.get("orderId") for _, _, ok_, d in results if ok_ and d.get("orderId") is not None]
+                with self.ledger.lock:
+                    bk.setdefault("unwinds", {})
+                    for oid, (_, o, _, d) in zip(bk["orders"], results):
+                        if d.get("orderId") is not None:
+                            bk["unwinds"].setdefault(oid, []).append(str(d["orderId"]))
+                    bk["state"] = "unwound" if len(ok) == n else "held"
+            self.ex.place([(pb.name, f"pairset:{bk['id']}", "unwind", o) for o in orders], ttl_s=PAIR_TTL_S, atomic=True, on_done=unwound)
+            self.event("UNWIND", f"{bk['race']}: {bk['side'].upper()} set x{int(m):,} unwound early at "
+                                 f"{' + '.join(f'{o[3]:.3f}' for o in orders)} (keeps the locked edge, frees the capital)")
+        if self.controls.paused:
+            return 0, 0.0
         own = {}
         for o in self.open:
             yes_px = o["price"] if o["side"] == "yes" else round(1 - o["price"], 3)
@@ -560,11 +1002,12 @@ class Engine:
             own[(o["ex"], book, yes_px)] = own.get((o["ex"], book, yes_px), 0) + o["qty"]
         cands = []
         for pb in self.pairs:
-            for e, side in pb.screen(self.px, self.fair, PAIR_EDGE, PAIR_THIRD_PARTY):
+            if not all(self.controls.allows(ex, "pairs") for ex in pb.legs):
+                continue
+            for e_, side in pb.screen(self.px, self.fair, PAIR_EDGE, PAIR_THIRD_PARTY):
                 if now - pb.last_shot >= PAIR_COOLDOWN_S and not any(self.ex.is_frozen(ex) for ex in pb.legs):
-                    cands.append((e, side, pb))
-        shots = 0
-        for e, side, pb in sorted(cands, key=lambda c: -c[0]):
+                    cands.append((e_, side, pb))
+        for e_, side, pb in sorted(cands, key=lambda c: -c[0]):
             if shots >= PAIR_MAX_SHOTS or self.ex.admit() < 2:
                 break
             pb.last_shot = now
@@ -572,15 +1015,25 @@ class Engine:
             try:                                                                # a bad read skips this pair, not the loop
                 with ThreadPoolExecutor(max_workers=len(pb.legs)) as pool:      # every leg's book at once
                     fetched = list(pool.map(api.orderbook, pb.legs))
-            except Exception as e:
-                self.event("ERR", f"{pb.race} order book: {str(e)[:120]}")
+            except Exception as err:
+                self.event("ERR", f"{pb.race} order book: {str(err)[:120]}")
                 continue
             for ex, (bids, asks) in zip(pb.legs, fetched):
                 lv = bids if side == "no" else asks
                 books[ex] = [(p, q - own.get((ex, key, round(p, 3)), 0)) for p, q in lv if q - own.get((ex, key, round(p, 3)), 0) > 0]
             orders, qty, margin = pb.size(side, books, self.fair, PAIR_EDGE, PAIR_THIRD_PARTY, PAIR_MAX_QTY)
+            if not orders:
+                continue
+            fairs = [self.side_fair(o[0], side) for o in orders]
+            if None in fairs:
+                if margin < 0.03 - 1e-9:                    # A12.1: no fair on a leg -> require >= 3c locked
+                    continue
+            elif sum(f - o[3] for f, o in zip(fairs, orders)) < -1e-9:
+                self.event("PAIR", f"{pb.race}: {side.upper()} set skipped: locks {margin * 100:.1f}c but EV vs fair "
+                                   f"{sum(f - o[3] for f, o in zip(fairs, orders)) * 100:+.1f}c (A12.1)")
+                continue
             cost = sum(o[3] * o[4] for o in orders)
-            if not orders or cost > budget or qty * margin < PAIR_MIN_LOCK:
+            if cost > budget or qty * margin < PAIR_MIN_LOCK:
                 continue
             set_id = f"{pb.race}:{int(now)}:{uuid.uuid4().hex[:6]}"                 # unique even for two sets a second
 
@@ -589,7 +1042,7 @@ class Engine:
                 if len(ids) == n or api.DRY_RUN:            # the set exists once SIG acked every leg
                     with self.ledger.lock:
                         self.ledger.baskets.append(dict(id=set_id, t=stamp(), ts=ts, race=pb.race, side=side, qty=qty,
-                                                        margin=round(margin, 4), legs=n, orders=ids, repaired=False))
+                                                        margin=round(margin, 4), legs=n, orders=ids, repaired=False, state="held"))
             if self.ex.place([(pb.name, f"pairset:{set_id}", "set", o) for o in orders], ttl_s=PAIR_TTL_S, atomic=True,
                              on_done=recorded):
                 budget -= cost
@@ -599,29 +1052,102 @@ class Engine:
                                    f"(~{qty * margin:,.0f} SIG once every leg fills)")
         return shots, start - budget
 
-    def repair_baskets(self, now):
-        """A two-leg set whose legs filled unevenly by its expiry gets ONE order for the short leg, priced so the set
-        still breaks even (short leg price <= 1 - long leg's average). Its fills count toward that leg."""
-        for bk in self.ledger.baskets:
-            if bk.get("repaired") or now - bk.get("ts", now) < PAIR_TTL_S + 10:
-                continue
-            bk["repaired"] = True
-            legs = self.ledger.basket_fills(bk)
-            if bk["legs"] != 2 or len(legs) != 2 or abs(legs[0][3] - legs[1][3]) < MIN_QTY:
-                continue
-            full, short = sorted(legs, key=lambda l: -l[3])
-            limit, qty = bots.tick_down(1 - full[4]), int(full[3] - short[3])
-            if limit < 0.01 or self.ex.is_frozen(short[1]):
-                continue
+    def adopted(self, entry, ids):
+        """A pair set whose atomic write had an UNKNOWN outcome and that the audit found on SIG: record it as a set
+        (with repair tracking), as if its write had been acked."""
+        items = entry.get("items", [])
+        subs = {it["sub"] for it in items}
+        if entry.get("kind") != "multileg" or len(subs) != 1 or not next(iter(subs)).startswith("pairset:") or len(ids) != len(items):
+            return
+        set_id = next(iter(subs))[len("pairset:"):]
+        if any(bk["id"] == set_id for bk in self.ledger.baskets):
+            return
+        side, prices = items[0]["order"][1], [it["order"][3] for it in items]
+        race = items[0]["bot"][len("PAIR "):]
+        pb = next((p for p in self.pairs if p.race == race), None)
+        out = pb.outsider(self.fair, PAIR_THIRD_PARTY) if pb and side == "yes" else 0.0
+        margin = (1 - sum(prices)) if side == "no" else (1 - (out or PAIR_THIRD_PARTY) - sum(prices))
+        with self.ledger.lock:
+            self.ledger.baskets.append(dict(id=set_id, t=stamp(), ts=entry.get("ts", time.time()), race=race, side=side,
+                                            qty=int(items[0]["order"][4]), margin=round(margin, 4), legs=len(items),
+                                            orders=[str(i) for i in ids], repaired=False, state="held", adopted=True))
+        self.event("AUDIT", f"pair set {set_id} adopted after an unknown write: recorded with repair tracking")
 
-            def recorded(results, bk=bk, leg=short[0]):
-                for _, _, ok, d in results:
-                    if ok and d.get("orderId") is not None:
-                        with self.ledger.lock:
-                            bk.setdefault("repairs", {}).setdefault(leg, []).append(str(d["orderId"]))
-            self.ex.place([(f"PAIR {bk['race']}", f"pairset:{bk['id']}", "repair", (short[1], short[2], "buy", limit, qty))],
-                          ttl_s=PAIR_TTL_S, on_done=recorded)
-            self.event("REPAIR", f"{bk['race']}: short leg {short[2].upper()} {qty:,} @ <= {limit:.3f} (set breaks even at worst)")
+    def repair_baskets(self, now):
+        """A12.4, in sequence for a set whose legs filled unevenly by its expiry:
+          1 complete the short leg at the break-even price (2-leg sets; TTL PAIR_TTL_S)
+          2 wait until REST shows that order gone (filled or expired)
+          3 still uneven: unwind the long leg's excess at its average price (TTL PAIR_TTL_S)
+          4 gone and still uneven: the residue goes to 'inventory' (the recycler)."""
+        open_subs = {}
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"])
+            if rec and rec.get("sub", "").startswith("pairset:"):
+                open_subs.setdefault(rec["sub"], set()).add(rec["layer"])
+        for p in self.ex.pending():
+            if p["sub"].startswith("pairset:"):
+                open_subs.setdefault(p["sub"], set()).add(p["layer"])
+        for bk in self.ledger.baskets:
+            st = bk.get("state", "held")
+            if bk.get("repaired") and st == "held" and not bk.get("repair_state"):
+                continue                                    # sets from before v2: handled then
+            sub = f"pairset:{bk['id']}"
+            if st == "held" and not bk.get("repair_state"):
+                if now - bk.get("ts", now) < PAIR_TTL_S + 10:
+                    continue
+                legs = self.ledger.basket_fills(bk)
+                if len(legs) != bk["legs"] or max(l[3] for l in legs) - min(l[3] for l in legs) < MIN_QTY:
+                    bk["repaired"] = True                   # even (or nothing filled): nothing to repair
+                    continue
+                full, short = max(legs, key=lambda l: l[3]), min(legs, key=lambda l: l[3])
+                if bk["legs"] == 2 and full[4] is not None and not self.ex.is_frozen(short[1]):
+                    limit, qty = bots.tick_down(1 - full[4]), int(full[3] - short[3])
+                    if limit >= 0.01:
+                        def rec(results, bk=bk, leg=short[0]):
+                            for _, _, ok, d in results:
+                                if ok and d.get("orderId") is not None:
+                                    with self.ledger.lock:
+                                        bk.setdefault("repairs", {}).setdefault(leg, []).append(str(d["orderId"]))
+                        self.ex.place([(f"PAIR {bk['race']}", sub, "repair", (short[1], short[2], "buy", limit, qty))],
+                                      ttl_s=PAIR_TTL_S, on_done=rec)
+                        bk.update(repair_state="complete", repair_t=now, state="repair")
+                        self.event("REPAIR", f"{bk['race']}: 1/3 complete the short leg {short[2].upper()} {qty:,} @ <= {limit:.3f}")
+                        continue
+                bk.update(repair_state="unwind_due", repair_t=now, state="repair")
+                continue
+            rs = bk.get("repair_state")
+            if not rs or rs == "done" or "repair" in open_subs.get(sub, set()) or now - bk.get("repair_t", now) < 10:
+                continue                                    # 2: wait until REST shows the repair order gone
+            legs = self.ledger.basket_fills(bk)
+            spread = max(l[3] for l in legs) - min(l[3] for l in legs) if legs else 0
+            if spread < MIN_QTY:
+                bk.update(repair_state="done", state="held", repaired=True)
+                self.event("REPAIR", f"{bk['race']}: set complete after repair")
+                continue
+            if rs in ("complete", "unwind_due"):
+                full = max(legs, key=lambda l: l[3])
+                excess = int(full[3] - min(l[3] for l in legs))
+                have = full[2]
+                if full[4] is not None and not self.ex.is_frozen(full[1]):
+                    close = "no" if have == "yes" else "yes"
+                    px = bots.tick_down(1 - full[4])
+                    def rec_u(results, bk=bk, leg=full[0]):
+                        for _, _, ok, d in results:
+                            if ok and d.get("orderId") is not None:
+                                with self.ledger.lock:
+                                    bk.setdefault("unwinds", {}).setdefault(leg, []).append(str(d["orderId"]))
+                    self.ex.place([(f"PAIR {bk['race']}", sub, "repair", (full[1], close, "buy", px, excess))], ttl_s=PAIR_TTL_S,
+                                  on_done=rec_u)
+                    self.event("REPAIR", f"{bk['race']}: 3/3 unwind the long leg's excess {excess:,} at its average {full[4]:.3f}")
+                bk.update(repair_state="unwind", repair_t=now)
+                continue
+            if rs == "unwind":                              # 4: what is left goes to the recycler
+                full = max(legs, key=lambda l: l[3])
+                excess = full[3] - min(l[3] for l in legs)
+                sign = 1 if full[2] == "yes" else -1
+                self.ledger.split_sub(full[1], sub, "inventory", sign * excess)
+                bk.update(repair_state="done", state="held", repaired=True)
+                self.event("REPAIR", f"{bk['race']}: residue {excess:,.0f} handed to the recycler (inventory)")
 
     # ------------------------------------------------------------------------------------------------ stop / outage
     def pull_at_risk(self, limit_s=60):
@@ -714,7 +1240,7 @@ class Engine:
                 t = time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S"))
             except ValueError:
                 continue
-            if t >= since:
+            if t + 1 > since:                               # fill times have 1 s resolution
                 out.append(f)
         return out
 
@@ -952,8 +1478,8 @@ class Engine:
         t0 = min(since.values()) if isinstance(since, dict) and since else (since if not isinstance(since, dict) else time.time())
         for f in self.fills_since(t0):
             l = self.strategy_of(f["bot"], f["layer"])
-            if isinstance(since, dict) and time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S")) < since.get(l, t0):
-                continue
+            if isinstance(since, dict) and time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S")) + 1 <= since.get(l, t0):
+                continue                                    # fill times have 1 s resolution
             r = row(l)
             r["fills"] += 1
             r["shares"] += f["qty"]

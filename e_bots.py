@@ -9,8 +9,9 @@ Prices: SIG books are YES-normalized; an order's price is in its own side (a NO 
 """
 import math
 
-from a_config import (TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_EXIT_EDGE, MB_TOUCH_PM_EDGE, MB_TOUCH_NOTIONAL,
-                      MB_TAKE_EDGE, MB_TAKE_NOTIONAL, MB_LADDER, MB_MIN_PX, MB_MAX_PX)
+from a_config import (TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, RECYCLE_BID_EDGE,
+                      RECYCLE_REST_EDGE, RECYCLE_TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_EDGE, MM_U_MULT, MM_NOTIONAL, MM_TTL_S,
+                      LADDER_LEVELS, LADDER_TTL_S, TAKE_EDGE, TAKE_U_MULT, TAKE_NOTIONAL, TAKE_TTL_S)
 
 EPS = 1e-9
 
@@ -111,9 +112,11 @@ class PositionBot:
         active = [px for px, q in alloc.items() if q > 0]
         if left > 0 and active:
             alloc[min(active)] += left
-        out = [want(side, "sell", px, q, px, px, QTY_TOL, "exit") for px, q in alloc.items() if q >= MIN_QTY]
+        out = [want(side, "sell", px, q, px, px, QTY_TOL, "exit", sub="manual") for px, q in alloc.items() if q >= MIN_QTY]
         if held < self.max_add * self.ref:
-            out += [want(side, "buy", px, n / px, px, px, QTY_TOL, "add") for px, n in self.adds if n / px >= MIN_QTY]
+            out += [want(side, "buy", px, n / px, px, px, QTY_TOL, "add", sub="manual") for px, n in self.adds if n / px >= MIN_QTY]
+        if s.get("recycle") and s.get("fair") is not None:      # D1: the share released to the recycler
+            out += recycle_wants(s["recycle"], s["fair"], s.get("bid"), s.get("ask"), s.get("kappa", 0.0), s.get("own", ()))
         self.ladder = [dict(px=px, yes_px=self._yes(px), qty=alloc.get(px, 0),
                             state="skipped" if px in skipped else "resting" if alloc.get(px, 0) >= MIN_QTY else "filled-out")
                        for px, _ in self.exits]
@@ -129,14 +132,69 @@ class PositionBot:
 
 # =================================================================================================== E3. MarketBot
 
+def s_of(p):
+    """Price scale (plan_review A5): 1 near 0.5, 0.3 at the extremes."""
+    p = min(max(p, 0.0), 1.0)
+    return max(0.3, 2 * math.sqrt(p * (1 - p)))
+
+
+def roc_of(fair_side, px):
+    """Return on capital of buying a side at px when it is worth fair_side (A3)."""
+    return (fair_side - px) / px if px > 0 else 0.0
+
+
+def roc_size(notional, roc):
+    """A3: size scales with ROC, clipped to 0.5x..2x of the base notional."""
+    return notional * min(2.0, max(0.5, roc / ROC_REF))
+
+
+def tick_up(p):
+    return round(math.ceil(p / TICK - EPS) * TICK, 3)
+
+
+def recycle_wants(subs, fair, bid, ask, kappa, own=()):
+    """Recycler (night plan §5.1, A2) for holding sub-books {sub: signed YES shares}: sell into the SIG bid while it is
+    >= fair_side + 0.5c (marketable), else rest an exit at max(fair_side + 1c, best ask - 1 tick); never below
+    fair_side - kappa. Each sell is the complement BUY at 1 - price (positions net on SIG). I4: our own resting orders
+    (own) are not the market: we never sell into our own bid, and never undercut our own ask (we keep its price)."""
+    out, sf = [], {"yes": fair, "no": 1 - fair}
+    for sub, h in sorted(subs.items()):
+        if abs(h) < MIN_QTY:
+            continue
+        have = "yes" if h > 0 else "no"
+        close = "no" if have == "yes" else "yes"
+        bid_h, ask_h = side_book(bid, ask, have)
+        own_ask = {round(1 - o["price"], 3) for o in own if o["action"] == "buy" and o["side"] == close} | \
+                  {round(o["price"], 3) for o in own if o["action"] == "sell" and o["side"] == have}
+        own_bid = {round(o["price"], 3) for o in own if o["action"] == "buy" and o["side"] == have}
+        if bid_h is not None and round(bid_h, 3) in own_bid:
+            bid_h = None
+        keep = ask_h is not None and round(ask_h, 3) in own_ask
+        if bid_h is not None and bid_h >= sf[have] + RECYCLE_BID_EDGE - EPS:
+            sell, ttl, band = bid_h, RECYCLE_TAKE_TTL_S, 0.005
+        else:
+            best = ask_h if keep else (ask_h - TICK) if ask_h is not None else 0
+            sell, ttl, band = max(sf[have] + RECYCLE_REST_EDGE, best), RECYCLE_REST_TTL_S, 0.01
+        px = tick_down(1 - max(sell, sf[have] - kappa))
+        if MB_MIN_PX <= px <= MB_MAX_PX:
+            out.append(want(close, "buy", px, int(abs(h)), px - band, px, 2 * QTY_TOL, "recycle", qmax=int(abs(h)), sub=sub,
+                            ttl=ttl, reduce=True))
+    return out
+
+
 class MarketBot:
-    """One per market. Every price is checked against Polymarket (the probability) AND the SIG book (where we trade).
-      exit    holding inventory -> offer it back at max(PM fair + EXIT_EDGE, SIG best ask of that side - 1 tick),
-              never more shares than held, never below PM fair
-      take    the SIG ask has gapped >= TAKE_EDGE through PM fair -> buy the gap with a marketable limit at fair - TAKE_EDGE
-      touch   (focus markets) join/improve the SIG best bid, only if that is below the SIG mid AND below PM fair - TOUCH_EDGE
-      ladder  (focus markets) resting bids at PM fair - each distance: big market orders that sweep the book fill them
-    Adds only on the side we hold (or when flat), only when the account risk check allows, and not right after a fill."""
+    """One per market. Every order is a canonical BUY (a sell of the held side is the complement buy at 1 - price), so
+    positions net cleanly on SIG (A1). Layers (each gated by its flag in data/overrides.json, via s["layers"]):
+      recycle  (recycler) each holding sub-book ('inventory', 'recycle:*'): sell into the SIG bid while it is >= fair_side
+               + 0.5c (marketable), else rest an exit at max(fair_side + 1c, best ask - 1 tick); never below fair_side - kappa
+      mm       (MM v2, A4) two-sided at fair -/+ e(p), e = max(2c, 1.5u) * s(p), +/-1c inventory skew at MARKET_MAX_POS,
+               ROC filter on entries; the side that reduces the 'mm' sub-book is always quoted (A2 floor)
+      ladder   (A5) deep bids at min(ref_side - off_k, fair_side - 2c*s(p)), off_k = (10c, 20c) * s(p), anchored to SIG's own
+               30-min median mid; never at or above the side's best ask; TTL 4 h; re-placed only when the target moves > off/2
+      rebound  (A1/A5) each ladder tranche sub-book is closed by the complement buy at 1 - max(ref_side - 0.3d, fair_side -
+               kappa, fill + 1c); the news guard (engine) hands a tranche to the recycler when fair falls > off/2
+      take     (sniper / A9) buy a SIG ask that gapped >= max(4c*s(p), 1.5u) below fair (TTL 5 min)
+    Entries need ROC >= ROC_MIN and room in the market cap; exits, rebounds and the reducing MM side are exempt."""
     kind = "market"
 
     def __init__(self, ex, market):
@@ -145,57 +203,100 @@ class MarketBot:
         self.status, self.fair, self.orders = "init", None, []
 
     def plan(self, s):
-        fair, inv = s["fair"], s["pos"]
-        self.fair = fair
-        if fair is None:
-            self.status, self.orders = "no Polymarket fair (missing or wide)", []
+        f, L, k = s["fair"], s.get("layers", {}), s.get("kappa", 0.0)
+        self.fair = f
+        if f is None:
+            self.status, self.orders = "no fair (Polymarket missing, wide or stale)", []
             return []
-        sf = {"yes": fair, "no": 1 - fair}
-        expo = exposure(fair, inv)
-        held = {"yes": max(expo, 0), "no": max(-expo, 0)}
+        sf, u = {"yes": f, "no": 1 - f}, s.get("u") or 0.0
+        subs = s.get("subs", {})
+        entries_ok = not s.get("paused")
+        blocked = s.get("blocked", set())
+        room = dict(s.get("room", {"yes": MARKET_MAX_POS, "no": MARKET_MAX_POS}))
         out = []
-        # exit: buying the opposite side closes what we hold
-        if abs(inv) >= MIN_QTY:
-            have = "yes" if inv > 0 else "no"
-            close = "no" if have == "yes" else "yes"
-            ask_have = side_book(s["bid"], s["ask"], have)[1]
-            sell_at = max(sf[have] + MB_EXIT_EDGE, (ask_have - TICK) if ask_have is not None else 0)
-            px = tick_down(1 - sell_at)
-            if MB_MIN_PX <= px <= MB_MAX_PX:
-                out.append(want(close, "buy", px, abs(inv), px - 0.01, sf[close] - TICK / 2, 2 * QTY_TOL, "exit", qmax=abs(inv)))
-        # adds
-        if s["add_ok"]:
+
+        def add_entry(side, px, notional, layer, lo, hi, ttl, sub=None, qtol=2 * QTY_TOL):
+            if not entries_ok or side in blocked or not MB_MIN_PX <= px <= MB_MAX_PX:
+                return
+            r = roc_of(sf[side], px)
+            if r < ROC_MIN - EPS:
+                return
+            n = min(roc_size(notional, r), room[side])
+            q = int(n / px)
+            if q < MIN_QTY:
+                return
+            room[side] -= q * px
+            out.append(want(side, "buy", px, q, lo, hi, qtol, layer, sub=sub, ttl=ttl, roc=round(r, 4)))
+
+        def reduce_buy(have, sell_px, qty, layer, sub, ttl, band=0.01):
+            """Close `qty` of a holding on `have` by buying the complement at 1 - sell_px (never below fair - kappa)."""
+            sell_px = max(sell_px, sf[have] - k)
+            px = tick_down(1 - sell_px)
+            if qty >= MIN_QTY and MB_MIN_PX <= px <= MB_MAX_PX:
+                close = "no" if have == "yes" else "yes"
+                out.append(want(close, "buy", px, int(qty), px - band, px, 2 * QTY_TOL, layer, qmax=int(qty), sub=sub, ttl=ttl, reduce=True))
+
+        # recycler: every holding sub-book released to it
+        if L.get("recycler"):
+            out += recycle_wants({k2: v for k2, v in subs.items() if k2 == "inventory" or k2.startswith("recycle:")},
+                                 f, s["bid"], s["ask"], k, s.get("own", ()))
+
+        # market maker v2
+        if L.get("mm"):
+            mm = subs.get("mm", 0)
+            e = max(MM_EDGE, MM_U_MULT * u) * s_of(f)
+            skew = 0.01 * max(-1.0, min(1.0, exposure(f, mm) / MARKET_MAX_POS))
             for side in ("yes", "no"):
-                if (inv > 0 and side == "no") or (inv < 0 and side == "yes") or s["cooldown"].get(side):
-                    continue
-                bid, ask = side_book(s["bid"], s["ask"], side)
-                mid = None if bid is None or ask is None else (bid + ask) / 2
-                levels = []
-                p = tick_down(sf[side] - MB_TAKE_EDGE)
-                if ask is not None and ask <= p + EPS:
-                    levels.append(("take", p, MB_TAKE_NOTIONAL, p - 0.01, p))
-                if s["focus"]:
-                    if bid is not None and mid is not None:
-                        p = tick_down(min(bid + TICK, mid - TICK, sf[side] - MB_TOUCH_PM_EDGE))
-                        if p >= bid - EPS:
-                            levels.append(("touch", p, MB_TOUCH_NOTIONAL, p - TICK, min(p + TICK, sf[side] - 0.01)))
-                    for d, n in MB_LADDER:
-                        p = tick_down(sf[side] - d)
-                        levels.append(("ladder", p, n, p - 0.01, min(p + 0.01, sf[side] - d + 0.01)))
-                room, seen = MARKET_MAX_POS - held[side], set()
-                for layer, p, n, lo, hi in levels:
-                    if p in seen or not MB_MIN_PX <= p <= MB_MAX_PX or room < MIN_QTY * p:
-                        continue
-                    seen.add(p)
-                    q = int(min(n, room) / p)
-                    if q >= MIN_QTY:
-                        room -= q * p
-                        out.append(want(side, "buy", p, q, lo, hi, 2 * QTY_TOL, layer))
+                target = sf[side] - e - (skew if side == "yes" else -skew)
+                bid_s, ask_s = side_book(s["bid"], s["ask"], side)
+                if ask_s is not None:
+                    target = min(target, ask_s - TICK)            # rest, never take
+                px = tick_down(target)
+                reducing = (side == "no" and mm >= MIN_QTY) or (side == "yes" and mm <= -MIN_QTY)
+                if reducing:
+                    have = "yes" if side == "no" else "no"
+                    reduce_buy(have, 1 - px, abs(mm), "mm", "mm", MM_TTL_S)
+                else:
+                    add_entry(side, px, MM_NOTIONAL, "mm", px - 0.01, max(px, min(px + TICK, sf[side] - e / 2)), MM_TTL_S, sub="mm")
+
+        # deep ladders and their rebounds
+        ref = s.get("ref")
+        if L.get("ladder") and ref is not None:
+            for side in ("yes", "no"):
+                ref_side = ref if side == "yes" else 1 - ref
+                bid_s, ask_s = side_book(s["bid"], s["ask"], side)
+                sp = s_of(sf[side])
+                for i, (base, notional) in enumerate(LADDER_LEVELS):
+                    off = max(0.015, base * sp)
+                    px = tick_down(min(ref_side - off, sf[side] - 0.02 * sp))
+                    if ask_s is not None and px >= ask_s - EPS:
+                        continue                                    # at/above the ask it's a take, not a ladder
+                    sub = (s.get("ladder_ids") or {}).get((side, i))
+                    add_entry(side, px, notional, "ladder", px - off / 2, min(px + off / 2, sf[side] - 0.02 * sp),
+                              LADDER_TTL_S, sub=sub, qtol=0.5)
+        for t in s.get("tranches", []):                             # rebounds run even when entries are paused
+            q = subs.get(t["sub"], 0)
+            if abs(q) < MIN_QTY or t.get("state") == "news":
+                continue
+            bought = "yes" if q > 0 else "no"
+            d = t["ref_side"] - t["avg"]
+            rebound = tick_up(max(t["ref_side"] - 0.3 * d, sf[bought] - k, t["avg"] + 0.01))
+            reduce_buy(bought, rebound, abs(q), "rebound", t["sub"], LADDER_TTL_S)
+
+        # takes: SIG asks that gapped far below fair (sniper layer; A9 attack)
+        if L.get("sniper"):
+            for side in ("yes", "no"):
+                bid_s, ask_s = side_book(s["bid"], s["ask"], side)
+                need = max(TAKE_EDGE * s_of(sf[side]), TAKE_U_MULT * u)
+                px = tick_down(sf[side] - need)
+                if ask_s is not None and ask_s <= px + EPS:
+                    add_entry(side, px, s.get("take_notional", TAKE_NOTIONAL), "take", px - 0.01, px, TAKE_TTL_S, sub="inventory")
+
         self.orders = out
         layers = sorted({w["layer"] for w in out})
-        self.status = ((f"holding {'YES' if inv > 0 else 'NO'} {abs(inv):,.0f}" if abs(inv) >= MIN_QTY else "flat")
-                       + (f" · {', '.join(layers)}" if layers else " · nothing to do")
-                       + ("" if s["add_ok"] else " · no new risk (account limit)"))
+        net = sum(subs.values())
+        self.status = ((f"holding {'YES' if net > 0 else 'NO'} {abs(net):,.0f}" if abs(net) >= MIN_QTY else "flat")
+                       + (f" · {', '.join(layers)}" if layers else " · nothing to do") + ("" if entries_ok else " · new risk paused"))
         return out
 
     def urgency(self, o):

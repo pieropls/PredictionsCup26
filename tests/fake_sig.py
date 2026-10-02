@@ -122,6 +122,14 @@ class FakeSIG:
                     reads_last_min=0, writes_last_min=self.WRITES_PER_MIN - self.writes_left(), read_limit=100, write_limit=30,
                     last_ok=time.time())
 
+    def leaderboard(self, limit=20, offset=0):
+        rows = [dict(rank=i + 1, username=f"leader-{i + 1}", profileId=str(i), pnl=500_000.0 - 10_000 * i, tradesCount=100 + i,
+                     volume=1.0, roi=1.0) for i in range(30)]
+        return dict(leaderboard=rows[offset:offset + limit], total=700, myRank=585)
+
+    def recent_markets(self, limit=20):
+        return list(reversed(self.markets))[:limit]
+
     def pnl(self):
         return dict(period="all", totalAccountValue=93000.0, totalHoldingsValue=9000.0, unrealizedPnl=-6000.0, roi=-7.0)
 

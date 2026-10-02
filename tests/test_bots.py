@@ -42,49 +42,117 @@ class PositionBotTests(unittest.TestCase):
         self.assertLessEqual(sum(x["qty"] for x in out) + 3242, 5000)
 
 
+def mb_state(**kw):
+    s = dict(fair=0.50, u=0.005, bid=0.48, ask=0.52, ref=None, kappa=0.0, subs={}, layers={}, paused=False, blocked=set(),
+             room={"yes": 3000, "no": 3000}, tranches=[], ladder_ids={}, take_notional=150)
+    s.update(kw)
+    return s
+
+
+def sell_px(w):
+    """A reducing complement buy at p sells the held side at 1 - p."""
+    return round(1 - w["px"], 3)
+
+
 class MarketBotTests(unittest.TestCase):
-    def bot(self):
-        return bots.MarketBot("1", dict(race="X", party="D"))
+    def setUp(self):
+        self.b = bots.MarketBot("1060", dict(race="MA Gov", party="R", title="t"))
 
-    def test_exit_is_capped_in_shares_and_never_crosses_zero(self):
-        # Codex 5.1 repro: fair 0.90, +100 YES must never become a 1,125-share NO buy
-        w = self.bot().plan(snap(pos=100, fair=0.90, bid=0.88, ask=0.92, add_ok=False))
-        self.assertEqual([(x["layer"], x["side"], x["qty"], x["qmax"]) for x in w], [("exit", "no", 100, 100)])
+    def test_recycler_sells_into_a_bid_above_fair_else_rests_above_fair(self):
+        # holding 1,000 NO (fair NO 0.50); NO bid = 1 - YES ask = 0.51 >= 0.505 -> sell into it: buy YES @ 0.49
+        ws = self.b.plan(mb_state(subs={"inventory": -1000}, layers={"recycler": True}, bid=0.47, ask=0.49))
+        self.assertEqual([(w["side"], w["px"], w["qty"], w["layer"], w["sub"], w["ttl"]) for w in ws],
+                         [("yes", 0.49, 1000, "recycle", "inventory", 300)])
+        # NO bid 0.48 < 0.505: rest at max(fair + 1c, NO ask - 1 tick) = max(0.51, 0.515) -> buy YES @ 0.485
+        ws = self.b.plan(mb_state(subs={"inventory": -1000}, layers={"recycler": True}, bid=0.48, ask=0.52))
+        self.assertEqual([(w["px"], w["ttl"]) for w in ws], [(0.485, 1800)])
+        self.assertGreaterEqual(sell_px(ws[0]), 0.51 - 1e-9)
 
-    def test_exit_price_takes_the_better_of_fair_and_sig_book(self):
-        w = self.bot().plan(snap(pos=100, fair=0.50, bid=0.55, ask=0.60, add_ok=False))
-        self.assertEqual(w[0]["px"], 0.405)            # sell YES at 0.595 (SIG ask - tick) rather than 0.51 (PM + 1c)
+    def test_recycler_never_undercuts_or_hits_its_own_orders(self):
+        # our resting exit (buy YES @ 0.485 = sell NO @ 0.515) IS the NO best ask (YES bid 0.485): keep it, don't step down
+        s = mb_state(subs={"inventory": -1000}, layers={"recycler": True}, bid=0.485, ask=0.52,
+                     own=[dict(side="yes", action="buy", price=0.485, layer="recycle")])
+        self.assertEqual([w["px"] for w in self.b.plan(s)], [0.485])
+        # the NO bid 0.51 (>= fair + 0.5c) is our own MM NO bid: not a buyer to sell into
+        s = mb_state(subs={"inventory": -1000}, layers={"recycler": True}, bid=0.47, ask=0.49,
+                     own=[dict(side="no", action="buy", price=0.51, layer="mm")])
+        self.assertEqual([w["ttl"] for w in self.b.plan(s)], [1800], "rests instead")
 
-    def test_no_adds_on_the_closing_side(self):
-        w = self.bot().plan(snap(pos=200, fair=0.5, bid=0.40, ask=0.60))
-        self.assertFalse([x for x in w if x["side"] == "no" and x["layer"] != "exit"])
+    def test_A2_no_reducing_order_below_fair_minus_kappa(self):
+        for kappa in (0.0, 0.01, 0.02, 0.03):
+            for fair in (0.05, 0.3, 0.5, 0.8, 0.97):
+                for bid, ask in ((fair - 0.10, fair - 0.05), (fair - 0.02, fair + 0.02), (fair + 0.03, fair + 0.06)):
+                    bid, ask = max(0.005, round(bid, 3)), min(0.995, round(ask, 3))
+                    for subs in ({"inventory": -500}, {"inventory": 500}, {"mm": 400}, {"mm": -400}, {"tranche:x": 300}):
+                        tr = [dict(sub="tranche:x", ref_side=min(0.99, fair + 0.05), avg=max(0.01, fair - 0.10), state="open")]
+                        ws = self.b.plan(mb_state(fair=fair, bid=bid, ask=ask, kappa=kappa, subs=subs, tranches=tr,
+                                                  layers={"recycler": True, "mm": True, "ladder": True}, ref=fair))
+                        for w in ws:
+                            if w.get("reduce"):
+                                have = "no" if w["side"] == "yes" else "yes"
+                                fs = fair if have == "yes" else 1 - fair
+                                self.assertGreaterEqual(sell_px(w), fs - kappa - 1e-9, (kappa, fair, bid, ask, subs, w))
 
-    def test_take_only_when_sig_ask_gapped_through_pm(self):
-        self.assertIn(("take", "yes", 0.46), layers(self.bot().plan(snap(fair=0.50, bid=0.40, ask=0.45, focus=False))))
-        self.assertNotIn("take", [x[0] for x in layers(self.bot().plan(snap(fair=0.50, bid=0.40, ask=0.47, focus=False)))])
+    def test_A3_roc_filter_rejects_expensive_side_accepts_cheap_side(self):
+        # MM entries: a 2c edge on NO at 0.95 is 2.1% ROC (rejected); on YES at 0.10 it is 25% (accepted)
+        ws = self.b.plan(mb_state(fair=0.97, u=0.0, bid=0.90, ask=0.995, layers={"mm": True}))
+        self.assertFalse([w for w in ws if w["side"] == "yes"], "YES at ~0.96: ROC ~1%, rejected")
+        ws = self.b.plan(mb_state(fair=0.12, u=0.0, bid=0.05, ask=0.20, layers={"mm": True}))
+        yes = [w for w in ws if w["side"] == "yes"]
+        self.assertTrue(yes and yes[0]["roc"] >= 0.04, ws)
+        self.assertEqual(bots.roc_of(0.97, 0.95) < 0.04, True)
+        self.assertEqual(bots.roc_of(0.12, 0.10) >= 0.04, True)
 
-    def test_touch_only_below_sig_mid_and_pm(self):
-        w = layers(self.bot().plan(snap(fair=0.60, bid=0.40, ask=0.50)))
-        self.assertIn(("touch", "yes", 0.405), w)       # improve 0.40 by a tick; below SIG mid 0.45 and PM 0.585
-        w = layers(self.bot().plan(snap(fair=0.41, bid=0.40, ask=0.50)))
-        self.assertNotIn("touch", [x[0] for x in w if x[1] == "yes"])   # PM - 1.5c = 0.395 is below the SIG bid: don't join
+    def test_mm_quotes_both_sides_around_fair_and_never_crosses(self):
+        ws = self.b.plan(mb_state(fair=0.50, u=0.005, bid=0.40, ask=0.60, layers={"mm": True}))
+        q = {w["side"]: w["px"] for w in ws}
+        self.assertEqual(q, {"yes": 0.48, "no": 0.48})              # e = max(2c, 0.75c) * s(0.5)=1 -> 2c each side
+        ws = self.b.plan(mb_state(fair=0.50, u=0.005, bid=0.40, ask=0.47, layers={"mm": True}))
+        self.assertLess({w["side"]: w["px"] for w in ws}["yes"], 0.47, "a bid never at/above the ask")
 
-    def test_ladder_and_focus(self):
-        self.assertIn(("ladder", "yes", 0.4), layers(self.bot().plan(snap(fair=0.50))))
-        self.assertNotIn("ladder", [x[0] for x in layers(self.bot().plan(snap(fair=0.50, focus=False)))])
+    def test_mm_reducing_side_always_quoted_even_when_paused_and_skewed(self):
+        ws = self.b.plan(mb_state(fair=0.50, subs={"mm": 3000}, layers={"mm": True}, paused=True))
+        self.assertEqual([(w["side"], w["qty"], w["reduce"]) for w in ws], [("no", 3000, True)], "only the reducing NO bid")
+        ws = self.b.plan(mb_state(fair=0.50, subs={"mm": 3000}, layers={"mm": True}))
+        q = {w["side"]: w["px"] for w in ws}
+        self.assertEqual(q["no"], 0.485, "long YES: the NO bid is skewed up by ~1.5c x share of the cap")
 
-    def test_no_risk_no_adds_and_cooldown(self):
-        self.assertEqual(self.bot().plan(snap(fair=0.5, add_ok=False)), [])
-        self.assertFalse([x for x in self.bot().plan(snap(fair=0.5, cooldown={"yes": True})) if x["side"] == "yes"])
+    def test_ladder_anchors_to_sig_ref_gated_by_fair(self):
+        # A5 AK replay: ref 0.745, PM fair 0.785, s(0.785) ~ 0.82: YES levels at min(0.745 - off, 0.785 - 1.6c)
+        b = bots.MarketBot("1057", dict(race="AK Gov", party="D", title="t"))
+        ws = b.plan(mb_state(fair=0.785, u=0.005, bid=0.74, ask=0.75, ref=0.745, layers={"ladder": True},
+                             ladder_ids={("yes", 0): "tranche:a", ("yes", 1): "tranche:b", ("no", 0): "tranche:c", ("no", 1): "tranche:d"}))
+        yes = sorted((w["px"] for w in ws if w["side"] == "yes"), reverse=True)
+        self.assertEqual(yes, [0.66, 0.58])
+        self.assertTrue(all(w["sub"].startswith("tranche:") and w["ttl"] == 4 * 3600 for w in ws))
+        self.assertFalse(b.plan(mb_state(fair=0.785, ref=None, layers={"ladder": True})), "no ref yet: no ladder")
 
-    def test_per_market_cap(self):
-        w = self.bot().plan(snap(pos=6000, fair=0.5, bid=0.4, ask=0.6))
-        self.assertFalse([x for x in w if x["side"] == "yes"])
+    def test_A5_rebound_replay_with_and_without_kappa(self):
+        """AK 11:00 sweep: ref 0.745, fair 0.785; YES fills at 0.70/0.65/0.60 rebound at max(ref - 0.3d, fair - k, fill + 1c)."""
+        b = bots.MarketBot("1057", dict(race="AK Gov", party="D", title="t"))
+        out = {}
+        for kappa in (0.0, 0.06):
+            tr = [dict(sub=f"tranche:{p}", ref_side=0.745, avg=p, state="open") for p in (0.70, 0.65, 0.60)]
+            ws = b.plan(mb_state(fair=0.785, bid=0.60, ask=0.62, kappa=kappa, subs={t["sub"]: 200 for t in tr}, tranches=tr))
+            out[kappa] = sorted((round(sell_px(w), 3) for w in ws if w["layer"] == "rebound"), reverse=True)
+        self.assertEqual(out[0.0], [0.785, 0.785, 0.785], "kappa 0: they rest at fair")
+        self.assertEqual(out[0.06], [0.735, 0.725, 0.725], "kappa 6c: ref - 0.3d = 0.7315 (ticked up), then the A2 floor 0.725")
 
-    def test_oversized_resting_exit_is_cancelled(self):
-        w = self.bot().plan(snap(pos=100, fair=0.90, bid=0.88, ask=0.92, add_ok=False))
-        big = dict(id="1", ex="1", side="no", action="buy", price=w[0]["px"], qty=140.0)
-        self.assertEqual([o["id"] for o in bots.reconcile(w, [big])[1]], ["1"])
+    def test_take_only_far_below_fair(self):
+        ws = self.b.plan(mb_state(fair=0.50, u=0.005, bid=0.40, ask=0.47, layers={"sniper": True}))
+        self.assertFalse(ws, "3c gap < 4c: no take")
+        ws = self.b.plan(mb_state(fair=0.50, u=0.005, bid=0.40, ask=0.45, layers={"sniper": True}))
+        self.assertEqual([(w["side"], w["px"], w["layer"]) for w in ws], [("yes", 0.46, "take")])
+
+    def test_paused_or_blocked_side_gets_no_entries(self):
+        ws = self.b.plan(mb_state(layers={"mm": True}, paused=True))
+        self.assertEqual(ws, [])
+        ws = self.b.plan(mb_state(layers={"mm": True}, blocked={"yes"}))
+        self.assertEqual({w["side"] for w in ws}, {"no"})
+
+    def test_market_cap_room(self):
+        ws = self.b.plan(mb_state(layers={"mm": True}, room={"yes": 0.0, "no": 3000}))
+        self.assertEqual({w["side"] for w in ws}, {"no"})
 
 
 class PairBotTests(unittest.TestCase):

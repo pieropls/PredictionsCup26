@@ -60,7 +60,7 @@ sys.modules["b_sig"] = new_fake()                         # f_engine.api is repl
 pmf = types.ModuleType("c_polymarket")
 TITLE = re.compile(r"Will the (\w+) Party win the (.+?)\??$")
 pmf.race_party = lambda t: (lambda m: (m.group(2), m.group(1)[0]) if m else None)(TITLE.match(t.strip()))
-FAIR, SHIFT = {AK: 0.785, RI: 0.965}, [0.0]
+FAIR, SHIFT = {AK: 0.785, RI: 0.965, "1059": 0.93, "1060": 0.07}, [0.0]   # MA Gov legs: the NO set is EV-positive
 
 
 def market_map(sig):
@@ -68,6 +68,10 @@ def market_map(sig):
         mp = json.load(fh)
     for m in mp:
         m.setdefault("pm_ids", [m.pop("pm_id")] if "pm_id" in m else [])
+    have = {m["ex"] for m in mp}
+    for ex in FAIR:                                       # like PM_EXTRA in production (AK is a candidate sum)
+        if ex not in have:
+            mp.append(dict(ex=ex, race="r", party="D", mid="0", pm_ids=["x"]))
     return mp
 
 
@@ -80,11 +84,22 @@ def fairs(mp):
             if b is None or a is None:
                 continue
             f = min(0.98, max(0.02, (b + a) / 2 + 0.004 + SHIFT[0]))
-        out[m["ex"]] = (round(f - 0.005, 4), round(f + 0.005, 4))
+        out[m["ex"]] = (round(f - 0.005, 4), round(f + 0.005, 4), 50_000.0)
     return out
 
 
-pmf.market_map, pmf.fairs = market_map, fairs
+NEW_MAPS = {}                                             # sniper tests: title -> map entry
+
+
+def map_one(sm, events=None):
+    return NEW_MAPS.get(sm["title"])
+
+
+import importlib.util  # noqa: E402
+_spec = importlib.util.spec_from_file_location("real_c_polymarket", os.path.join(ROOT, "c_polymarket.py"))
+_real_pm = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_real_pm)
+pmf.market_map, pmf.fairs, pmf.map_one, pmf.FairTracker = market_map, fairs, map_one, _real_pm.FairTracker
 sys.modules["c_polymarket"] = pmf
 
 import d_ledger  # noqa: E402
@@ -100,7 +115,8 @@ def read_json(path):
         return json.load(fh)
 
 
-ALL_ON = {l: dict(state="full") for l in ("position", "recycler", "mm", "ladder", "pairs", "sniper", "leaders")}
+ALL_ON = {l: dict(state="full") for l in ("position", "mm", "ladder", "pairs", "sniper", "leaders")}   # recycler: own tests (D1)
+RECYCLER_ON = dict(position=dict(state="full"), recycler=dict(state="full"))
 
 
 def fresh_data(layers=ALL_ON):
@@ -114,9 +130,12 @@ def fresh_data(layers=ALL_ON):
 
 
 def engine(fake, only=None):
-    """A new engine process on the same data folder (ledger.json as of its last save, journal from disk)."""
+    """A new engine process on the same data folder (ledger.json as of its last save, journal from disk). Fair follows
+    the fake Polymarket at once (the A6 smoothing and jump confirmation have their own test)."""
     f_engine.api = fake
-    return f_engine.Engine(only)
+    eng = f_engine.Engine(only)
+    eng.ft.half_life, eng.ft.jump = 1e-9, 9.0
+    return eng
 
 
 def drain(eng, rounds=400):
@@ -206,9 +225,11 @@ class ScenarioTests(EngineCase):
         self.assertEqual(fake.canonicalized, [], "no sell was ever turned into an opposite buy")
         self.assertFalse([e for e in eng.events if e["kind"] == "PLACE" and "RI-GOV-D" in e["text"]], "no RI churn")
 
-        # market-bot inventory: holding 1,008 NO, the closing YES buys never exceed it (I2, enforced by the executor)
-        closing = [o for o in fake.open_orders() if o["ex"] == MA and o["side"] == "yes" and o["action"] == "buy"]
-        self.assertTrue(closing and sum(o["qty"] for o in closing) <= 1008, closing)
+        mm = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"]
+        self.assertGreater(len(mm), 50, "MM v2 quotes on the markets that pass the ROC filter")
+        for o in mm:                                      # every MM entry rests below fair by e(p) and below the ask
+            f = eng.side_fair(o["ex"], o["side"])
+            self.assertLess(o["price"], f - 0.005 + 1e-9, o)
 
         # pair sets went out atomically, with a TTL, and were recorded once SIG acked every leg
         sets = [c for c in fake.calls if c[0] == "multileg"]
@@ -220,7 +241,7 @@ class ScenarioTests(EngineCase):
             if "deferred 0" in eng.summary and "pair sets 0" in eng.summary and not eng.ex.queue:
                 break
         st = read_json(a_config.STATE_FILE)
-        self.assertLessEqual(st["risk"]["resting"], a_config.RISK_MAX_EXPOSURE)
+        self.assertGreaterEqual(st["risk"]["cash"] - st["risk"]["resting"], a_config.CASH_RESERVE, "hard cash floor")
         self.assertIn("executor", st)
         loop(eng, fake)
         self.assertEqual([c for c in fake.calls if c[0] != "multileg"], [], "identical loop: no churn")
@@ -584,6 +605,103 @@ class PayloadTests(EngineCase):
         eng.ledger.orders[oid]["filled"], eng.ledger.orders[oid]["cost"] = 50.0, 20.0
         s = eng.dash_state()
         self.assertTrue(s["pairs"]["sets"])
+
+
+class FairTrackerTests(unittest.TestCase):
+    def test_A6_ewma_and_confirmed_jumps(self):
+        ft = _real_pm.FairTracker()
+        ft.update({"1": (0.49, 0.51, 5000)}, 0.0)
+        self.assertAlmostEqual(ft.fair("1", 0.0), 0.50)
+        ft.update({"1": (0.50, 0.52, 5000)}, 20.0)            # 1c move: smoothed (half-life 20 s -> half way)
+        self.assertAlmostEqual(ft.fair("1", 20.0), 0.505)
+        ft.update({"1": (0.54, 0.56, 5000)}, 21.0)            # >= 1.5c jump: not acted on yet
+        self.assertAlmostEqual(ft.fair("1", 21.0), 0.505)
+        ft.update({"1": (0.54, 0.56, 5000)}, 24.0)            # still there after 3 s: not yet
+        self.assertAlmostEqual(ft.fair("1", 24.0), 0.505)
+        ft.update({"1": (0.54, 0.56, 5000)}, 26.5)            # persisted 5 s: fair jumps to it
+        self.assertAlmostEqual(ft.fair("1", 26.5), 0.55)
+        ft.update({"1": (0.60, 0.62, 5000)}, 30.0)            # a spike that reverts is never acted on
+        ft.update({"1": (0.54, 0.56, 5000)}, 36.0)
+        self.assertAlmostEqual(ft.fair("1", 36.0), 0.55, places=3)
+        ft.update({"1": (0.40, 0.50, 5000)}, 40.0)            # spread > 4c: no fair
+        self.assertIsNone(ft.fair("1", 40.0))
+        ft.update({"2": (0.49, 0.51, 500)}, 40.0)             # liquidity < 2k: no fair
+        self.assertIsNone(ft.fair("2", 40.0))
+        ft.update({"3": (0.49, 0.51, 5000)}, 40.0)
+        self.assertIsNone(ft.fair("3", 101.0), "stale > 60 s: no fair")
+
+
+class RecyclerTests(EngineCase):
+    def test_recycler_with_D1_frees_cash_and_keeps_I2(self):
+        fresh_data(layers=RECYCLER_ON)
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        for i in range(6):
+            loop(eng, fake)
+            for ex in (AK, MA):                           # I2 after every loop, while AK is re-sized
+                self.assertLessEqual(reducing(fake, ex), abs(fake.pos[ex]) + 1e-9, f"loop {i}: I2 on {ex}")
+        self.assertEqual(fake.canonicalized, [])
+        self.assertEqual(eng.ledger.sub(AK, "recycle:ak-d1"), -2756.0, "D1: 25% of 11,024 NO released to the recycler")
+        self.assertEqual(eng.ledger.sub(AK, "manual"), -8268.0)
+        self.assertEqual(resting(fake, AK, "sell"), [(0.4, 1945), (0.5, 1945), (0.6, 1945), (0.775, 2432)], "ladder on the other 75%")
+        self.assertIn((0.1, 3000), resting(fake, AK, "buy"), "spike bid kept")
+        # AK NO fair 0.215, SIG NO bid 0.24 >= 0.22: sell the D1 tranche into the bid = buy YES at 0.76
+        d1 = [o for o in fake.open_orders() if o["ex"] == AK and o["side"] == "yes" and o["id"] in eng.ledger.orders]
+        self.assertEqual([(o["price"], o["qty"]) for o in d1], [(0.76, 2756.0)])
+        self.assertEqual(eng.ledger.orders[d1[0]["id"]]["sub"], "recycle:ak-d1")
+        # MA R inventory: 1,008 NO at fair 0.93; NO bid 0.90 < 0.935: rest at max(0.94, NO ask - tick 0.92) -> buy YES 0.06
+        ma = [o for o in fake.open_orders() if o["ex"] == MA and o["id"] in eng.ledger.orders]
+        self.assertEqual([(o["side"], o["price"], o["qty"]) for o in ma], [("yes", 0.06, 1008.0)])
+        with open(a_config.NIGHT_LOG_FILE) as fh:
+            self.assertIn("D1 applied: 2,756 AK NO", fh.read())
+        # the D1 order fills: realized cash, the tranche sub-book empties, AK exits untouched
+        fake.fill(d1[0]["id"], 2756)
+        loop(eng, fake)
+        self.assertEqual(eng.ledger.sub(AK, "recycle:ak-d1"), 0.0)
+        f = [x for x in eng.ledger.fills if x["order"] == d1[0]["id"]][0]
+        self.assertGreaterEqual(1 - f["price"], 0.215 + 0.005 - 1e-9, "sold at >= fair + 0.5c (the recycler gate)")
+        self.assertEqual(resting(fake, AK, "sell"), [(0.4, 1945), (0.5, 1945), (0.6, 1945), (0.775, 2432)])
+        st = eng.ex.stats()
+        self.assertEqual(st["trims"].get("recycle", 0), 0, "no I2 trims hit")
+
+
+class ControllerTests(EngineCase):
+    def test_kill_rule_loss_stop_and_5xx_pause(self):
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)
+        loop(eng, fake)
+        mm = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"]
+        for o in mm[:12]:                                 # MM gets filled, then fair moves hard against every fill
+            fake.fill(o["id"], o["qty"])
+            FAIR[o["ex"]] = 0.02 if o["side"] == "yes" else 0.98
+        try:
+            loop(eng, fake)
+            loop(eng, fake)
+        finally:
+            for o in mm[:12]:
+                FAIR.pop(o["ex"], None)
+            FAIR.update({AK: 0.785, RI: 0.965, "1059": 0.93, "1060": 0.07})
+        self.assertEqual(eng.controls.state("mm"), "off")
+        self.assertIn("P&L at fair", eng.controls.layer("mm")["killed"]["reason"])
+        loop(eng, fake)
+        left = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"
+                and not jx.reduces(o["side"], "buy", fake.pos.get(o["ex"], 0))]
+        self.assertEqual(left, [], "a killed layer's entry quotes are pulled")
+        bot_loss = sum(eng.fill_pnl_fair(f) for f in eng.fills_since(time.time() - 86400))
+        if bot_loss < -a_config.LOSS_STOP:
+            self.assertTrue(eng.controls.paused, "D5 loss stop")
+        eng.controls.set_paused(False, "test")
+        from unittest import mock
+        bad = dict(read=dict(n=50, bad_rate=0.9), write=dict(n=0, bad_rate=0.0))
+        with mock.patch.object(fake, "health", return_value=bad, create=True):
+            eng.bad_since = time.time() - 601
+            loop(eng, fake)
+        self.assertTrue(eng.controls.paused, "SIG 5xx > 50% for 10 min pauses new risk")
+        with open(a_config.NIGHT_LOG_FILE) as fh:
+            log = fh.read()
+        self.assertIn("KILL layer mm", log)
+        self.assertIn("SIG 5xx/timeouts > 50% for 10 min", log)
 
 
 class ControlTests(EngineCase):
