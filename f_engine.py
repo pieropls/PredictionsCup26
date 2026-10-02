@@ -925,12 +925,18 @@ class Engine:
                 c.set_paused(False, "SIG recovered (< 10% errors)")
         # correlated-fill breaker: ladder + MM entry fills in >= 5 markets in 10 min, >= 80% one political direction
         recent = [f for f in self.fills_since(now - BREAKER_WINDOW_S) if f["layer"] in ("ladder", "mm") and f["action"] == "buy"]
+        lean = {}                                           # each market counts once, by its notional-weighted direction:
+        for f in recent:                                    # one busy market can't fake a correlated move
+            d = lean.setdefault(f["ex"], {})
+            p = self.pol(f["ex"], f["side"])
+            d[p] = d.get(p, 0.0) + f["qty"] * f["price"]
+        market_dir = {ex: max(d, key=d.get) for ex, d in lean.items()}
         for direction in ("D", "R"):
             if self.breaker.get(direction, 0) > now:
                 continue
-            ms = {f["ex"] for f in recent}
-            mine = [f for f in recent if self.pol(f["ex"], f["side"]) == direction]
-            if len(ms) >= BREAKER_MARKETS and recent and len(mine) / len(recent) >= BREAKER_SHARE - 1e-9:
+            ms = set(market_dir)
+            mine = [ex for ex, d in market_dir.items() if d == direction]
+            if len(ms) >= BREAKER_MARKETS and len(mine) / len(ms) >= BREAKER_SHARE - 1e-9:
                 self.breaker[direction] = now + BREAKER_PAUSE_S
                 night["breaker_trips_since_ladder"] = night.get("breaker_trips_since_ladder", 0) + 1
                 n = 0
@@ -939,7 +945,7 @@ class Engine:
                     if rec and rec["layer"] in ("ladder", "mm") and o["action"] == "buy" and self.pol(o["ex"], o["side"]) == direction \
                             and not jx.reduces(o["side"], "buy", self.book.get(o["ex"], {}).get("pos", 0)):
                         n += bool(self.ex.cancel(o, reason="breaker"))
-                msg = (f"BREAKER pro-{direction}: {len(mine)}/{len(recent)} ladder/MM fills in {len(ms)} markets within 10 min "
+                msg = (f"BREAKER pro-{direction}: {len(mine)}/{len(ms)} markets with ladder/MM fills leaned pro-{direction} within 10 min "
                        f"(news, not a sweep): {n} {direction}-side ladder/MM buys cancelled, entries that way paused 30 min")
                 self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
                 self.event("BREAKER", msg)

@@ -843,6 +843,28 @@ class BreakerTests(EngineCase):
                         "pro-R quotes continue")
 
 
+class BreakerCountTests(EngineCase):
+    def test_one_busy_market_cannot_trip_the_breaker(self):
+        fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)
+        loop(eng, fake)
+        mm = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"
+              and not jx.reduces(o["side"], "buy", fake.pos.get(o["ex"], 0))]
+        d = [o for o in mm if eng.pol(o["ex"], o["side"]) == "D"]
+        r = [o for o in mm if eng.pol(o["ex"], o["side"]) == "R"]
+        busy = d[0]
+        picks = [d[1], d[2], r[0], r[1]]                  # 5 markets: 3 lean D, 2 lean R (60%)
+        picks = [o for o in picks if o["ex"] != busy["ex"]]
+        for _ in range(8):                                # ... but one D market fills over and over
+            fake.fill(busy["id"], 10)
+        for o in picks:
+            fake.fill(o["id"], o["qty"])
+        loop(eng, fake)
+        self.assertEqual(eng.breaker, {}, "60% of markets is not a correlated move, however many fills one market has")
+
+
 class PairsTests(EngineCase):
     def setUp(self):
         super().setUp()
