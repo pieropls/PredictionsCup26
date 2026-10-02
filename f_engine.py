@@ -719,7 +719,10 @@ class Engine:
             levels += [(w["px"], w["qty"]) for w in self.fat_now.get(ex) or [] if w["side"] == side and round(w["px"], 3) not in have]
             _, would = intel.missed_value(e, levels)
             e["missed_value"] = round(max(0.0, would - caught_v), 2)
-            e["missed_why"] = "no level on that side" if not levels else "levels now resting would have caught it"
+            deep = e["p_lo"] if side == "yes" else round(1 - e["p_hi"], 3)
+            e["missed_why"] = (f"nothing resting or planned on {side.upper()}" if not levels else
+                               f"our {side.upper()} levels ({max(p for p, _ in levels):.3f} and below) were under the sweep's "
+                               f"deepest print ({deep:.3f})" if not would else "levels now resting would have caught it")
         e.update(captured_shares=round(caught_q), captured_value=round(caught_v, 2), had_orders=caught_q > 0)
         self.intel_write("events.jsonl", e)
         msg = (f"BIG EVENT {e['market']}: {e['shares']:,} shares at {e['p_lo']:.3f}-{e['p_hi']:.3f}"
@@ -2664,7 +2667,18 @@ class Engine:
                     self.night.line(f"NEW MARKET {self.name(ex)} covered {time.time() - t0:.0f} s after it was seen")
                     self.intel_write("new_markets.jsonl", dict(t=time.time(), ex=ex, market=self.name(ex), seen=t0,
                                                                 covered_s=round(time.time() - t0, 1)))
-        return dict(money=money, daily=daily, series=self.series_view(), capital=capital, strategies=self.strategies_view(stats),
+        strategies = self.strategies_view(stats)
+        if time.time() - self.intel_s.get("layers", 0) >= 60:    # today's layer P&L for the files-only daily report
+            self.intel_s["layers"] = time.time()
+            try:
+                os.makedirs(os.path.join(DATA, "intel"), exist_ok=True)
+                with open(os.path.join(DATA, "intel", "layers_today.json"), "w") as fh:
+                    json.dump(dict(date=time.strftime("%Y-%m-%d"), t=stamp(), layers={
+                        s["key"]: round((s["today"].get("realized") or 0) + (s["today"].get("unrealized_sig") or 0), 2)
+                        for s in strategies if s.get("today")}), fh)
+            except OSError:
+                pass
+        return dict(money=money, daily=daily, series=self.series_view(), capital=capital, strategies=strategies,
                     coverage=cov,
                     holdings=self.holdings_view(), activity=self.activity_view(), leader_thresholds=lm.get("thresholds"))
 

@@ -175,9 +175,9 @@ def fmt(x, sign=False):
     return f"{x:+,.0f}" if sign else f"{x:,.0f}"
 
 
-def leaders_study(rows, events, our_layers, now, day_s=86400):
+def leaders_study(rows, events, our_layers, now, day_s=86400, tape_from=None):
     """Markdown for docs/leaders/<date>.md. rows: leaders.csv dicts; events: big events (detect); our_layers:
-    {layer: P&L today at SIG marks}."""
+    {layer: P&L today at SIG marks}; tape_from: when the live tape collector's coverage starts (None: unknown)."""
     ser = leader_series(rows)
     t1 = max((s[-1][0] for s in ser.values() if s), default=now)
     t0 = t1 - day_s
@@ -214,7 +214,7 @@ def leaders_study(rows, events, our_layers, now, day_s=86400):
     look = {"mm": "High-volume market maker", "fatfinger": "Opening harvester", "sniper": "Opening harvester",
             "ladder": "Directional", "pairs": "High-frequency bot", "recycler": "—", "release": "—", "position": "—"}
     if our_layers:
-        L += ["", "Our layers today (SIG marks), next to the style each resembles:", "", "| Our layer | P&L today | Resembles |",
+        L += ["", "Our layers today so far (SIG marks, realized + unrealized change), next to the style each resembles:", "", "| Our layer | P&L today | Resembles |",
               "|---|---:|---|"]
         L += [f"| {k} | {fmt(v, True)} | {look.get(k, '—')} |" for k, v in sorted(our_layers.items(), key=lambda kv: -abs(kv[1] or 0))]
     # per account
@@ -229,7 +229,9 @@ def leaders_study(rows, events, our_layers, now, day_s=86400):
     # attribution
     L += ["", "## Attribution (inferred, not proof)", "",
           "A P&L jump ≥ 10k within 10 min, next to the big events (§4.3) within ±10 min: **likely counterparty**. "
-          "A jump with no event is trading we can't see (OTC-like flow, marks, or markets the tape collector hadn't read yet).", ""]
+          "A jump with no event is trading we can't see (OTC-like flow, marks, or markets the tape collector hadn't read yet)."
+          + (f" The live tape covers only since {dt.datetime.fromtimestamp(tape_from).strftime('%m-%d %H:%M')} PT: earlier jumps "
+             "can't be attributed yet." if tape_from else " The live tape collector has no data yet."), ""]
     n_j = 0
     for a in acct:
         for t0_, t1_, d in a["jumps"]:
@@ -237,7 +239,9 @@ def leaders_study(rows, events, our_layers, now, day_s=86400):
             evs.sort(key=lambda e: -(e.get("value") or 0))
             n_j += 1
             when = dt.datetime.fromtimestamp(t1_).strftime("%m-%d %H:%M")
-            if evs:
+            if not tape_from or t1_ < tape_from:
+                L.append(f"- {when} **{a['name']}** {fmt(d, True)}: before the live tape, can't attribute")
+            elif evs:
                 e = evs[0]
                 L.append(f"- {when} **{a['name']}** {fmt(d, True)}: likely counterparty of {e['market']} "
                          f"({e['shares']:,} at {e['p_lo']:.3f}–{e['p_hi']:.3f}, fair {e['fair']}, value {fmt(e.get('value'))})"
@@ -262,7 +266,7 @@ def leaders_study(rows, events, our_layers, now, day_s=86400):
                  f"{'–' if not o or s.get(10) is None else fmt(s[10] - o[1], True)} |")
     # copy list
     L += ["", "## Copy list (at most 5; each needs Piero's approval unless it is tier membership or a queue step-up)", ""]
-    L += [f"{i}. {c}" for i, c in enumerate(copy_list(acct, events, our_layers), 1)] or ["- nothing with enough evidence today"]
+    L += [f"{i}. {c}" for i, c in enumerate(copy_list(acct, events, our_layers, tape_from, t0), 1)] or ["- nothing with enough evidence today"]
     # public profiles
     L += ["", "## Public profiles (for Piero to check by hand)", "",
           "`/api/v1` has no endpoint that says whether a profile's trade history is public (the only per-user endpoint is "
@@ -271,7 +275,7 @@ def leaders_study(rows, events, our_layers, now, day_s=86400):
     return "\n".join(L) + "\n", acct
 
 
-def copy_list(acct, events, our_layers):
+def copy_list(acct, events, our_layers, tape_from=None, t0=None):
     """<= 5 concrete recommendations, each with its evidence (rules, not judgement)."""
     out = []
     others = [a for a in acct if not a["ours"]]
@@ -296,8 +300,12 @@ def copy_list(acct, events, our_layers):
                    f"(tier membership is applied automatically).")
     elif harv:
         d = sum(a["d_pnl"] for a in harv)
-        out.append(f"**Opening harvesters** made {fmt(d, True)} in the window with no big event on our tape: their gains come "
-                   f"from marks, not new fat-fingers. Keep the fat-finger levels for new markets and election night; don't add size.")
+        if tape_from and t0 and tape_from <= t0:
+            out.append(f"**Opening harvesters** made {fmt(d, True)} in the window with no big event on the tape: their gains come "
+                       f"from marks, not new fat-fingers. Keep the fat-finger levels for new markets and election night; don't add size.")
+        else:
+            out.append(f"**Opening harvesters** made {fmt(d, True)} in the window. The live tape doesn't cover the whole window yet, "
+                       f"so we can't tell new fat-fingers from marks; keep the fat-finger levels as they are.")
     hf = by.get("High-frequency bot", [])
     if hf:
         d = sum(a["d_pnl"] for a in hf)
@@ -474,6 +482,26 @@ def _iso(s):
 
 
 # ------------------------------------------------------------------------------------------------ daily job
+def layers_today(data):
+    """{layer: P&L today so far (realized + unrealized change, SIG marks)} from data/intel/layers_today.json, which the
+    engine refreshes every minute; {} when it is missing or from another day."""
+    try:
+        d = json.load(open(os.path.join(data, "intel", "layers_today.json")))
+    except (OSError, ValueError):
+        return {}
+    return d.get("layers") or {} if d.get("date") == dt.datetime.now().strftime("%Y-%m-%d") else {}
+
+
+def _tape_from(idir):
+    """When the live tape collector's coverage starts: its earliest saved print (None without one)."""
+    try:
+        first = sorted(f for f in os.listdir(os.path.join(idir, "trades")) if f.endswith(".jsonl"))[0]
+        with open(os.path.join(idir, "trades", first)) as fh:
+            return min(json.loads(l)["ts"] for l in fh if l.strip())
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def _jsonl(path, since=None, key="t"):
     out = []
     try:
@@ -535,18 +563,11 @@ def run_daily(data, docs, now, apply_tiers=True, day_s=86400):
     coverage = dict(pct=cov[-1]["pct"] if cov else None, samples=len(cov),
                     uncovered_minutes=sum(c.get("uncovered", 0) * min(10.0, (b["t"] - c["t"]) / 60) for c, b in zip(cov, cov[1:])))
     new_m = _jsonl(os.path.join(idir, "new_markets.jsonl"), since)
-    our_layers = {}
-    try:
-        today = list(csv.DictReader(open(os.path.join(data, "daily_pnl.csv"))))[-1]
-        for k in ("position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger"):
-            r, u = today.get(f"{k}_realized"), today.get(f"{k}_unrealized")
-            if r or u:
-                our_layers[k] = float(r or 0) + float(u or 0)
-    except (OSError, IndexError, ValueError):
-        pass
+    our_layers = layers_today(data)
     os.makedirs(os.path.join(docs, "leaders"), exist_ok=True)
     os.makedirs(os.path.join(docs, "daily"), exist_ok=True)
-    lmd, acct = leaders_study(rows, events, our_layers, now)
+    tape_from = _tape_from(idir)
+    lmd, acct = leaders_study(rows, events, our_layers, now, tape_from=tape_from)
     lpath = os.path.join(docs, "leaders", f"{date}.md")
     with open(lpath, "w") as fh:
         fh.write(lmd)
@@ -581,7 +602,7 @@ def run_daily(data, docs, now, apply_tiers=True, day_s=86400):
     if m_top:
         recs.append("**Missed value by market** (levels we'd have had resting): " + "; ".join(f"{names.get(ex, ex)} {fmt(v)}" for ex, v in m_top)
                     + ". These are in tier A from today; size changes need approval.")
-    recs += [f"(needs approval) {c}" for c in copy_list(acct, events, our_layers)[:3]]
+    recs += [f"(needs approval) {c}" for c in copy_list(acct, events, our_layers, tape_from, since)[:3]]
     md = daily_report(date, trades, events, fills, sb, coverage, new_m, recs, f"../leaders/{date}.md", names)
     dpath = os.path.join(docs, "daily", f"{date}.md")
     with open(dpath, "w") as fh:

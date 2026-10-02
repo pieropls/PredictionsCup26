@@ -151,7 +151,9 @@ class LeadersTests(unittest.TestCase):
         ev_t = (t0 + dt.timedelta(minutes=55)).timestamp()
         ev = [dict(t=ev_t, t_end=ev_t, ex="1", market="NH Senate D", shares=100_000, p_lo=0.055, p_hi=0.055, fair=0.875,
                    value=82_000.0, cost=94_500.0, kinds=["Max sweep"])]
-        md, acct = li.leaders_study(rows, ev, {"mm": 40.0}, now=t0.timestamp())
+        md, acct = li.leaders_study(rows, ev, {"mm": 40.0}, now=t0.timestamp(), tape_from=t0.timestamp())
+        early, _ = li.leaders_study(rows, ev, {}, now=t0.timestamp(), tape_from=ev_t + 3600)
+        self.assertIn("before the live tape, can't attribute", early)
         self.assertIn("likely counterparty of NH Senate D", md)
         self.assertIn("High-frequency bot", md)
         self.assertIn("## Copy list", md)

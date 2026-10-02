@@ -272,7 +272,8 @@ def main():
             import csv
             rows = list(csv.DictReader(open(os.path.join(C.DATA, "leaders.csv"))))
             evs = li._jsonl(os.path.join(C.DATA, "intel", "events.jsonl"), time.time() - 86400)
-            md, _ = li.leaders_study(rows, evs, {}, time.time())
+            md, _ = li.leaders_study(rows, evs, li.layers_today(C.DATA), time.time(),
+                                     tape_from=li._tape_from(os.path.join(C.DATA, "intel")))
             os.makedirs(os.path.join(docs, "leaders"), exist_ok=True)
             path = os.path.join(docs, "leaders", time.strftime("%Y-%m-%d") + ".md")
             open(path, "w").write(md)
