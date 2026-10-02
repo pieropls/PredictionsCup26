@@ -29,6 +29,7 @@ import b_sig as api
 import c_polymarket as pm
 import e_bots as bots
 import g_dashboard as dashboard
+import i_realtime as rt
 import j_executor as jx
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
                       RISK_MAX_EXPOSURE, CASH_RESERVE, POSITION_BOTS, POSITION_MAX_ADD, MANUAL_MARKETS, MB_PM_MAX_SPREAD,
@@ -310,6 +311,9 @@ class Engine:
         self.pilot_sets = {}
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
+        self.wake, self.rt_lock, self.rt_pending = threading.Event(), threading.Lock(), []   # realtime -> planner
+        self.sig_feed = self.pm_feed = None
+        self.latency = {k: [] for k in ("fill_to_queued", "pm_to_defend", "plan_cycle")}
         self.position_names = {b.name for b in self.bots if b.kind == "position"}
         if self.ex.recovered:
             self.event("AUDIT", f"{self.ex.recovered} orders acked after the last ledger save recovered from the journal as ours")
@@ -396,6 +400,7 @@ class Engine:
         # F1 read: Polymarket and every SIG read at the same time (each SIG read can take seconds under load)
         watched = set(self.owner) | {ex for pb in self.pairs for ex in pb.legs}
         self.controls.reload_if_changed()
+        events = self.take_rt()                             # P2: what woke us (fills, order updates, PM moves, resyncs)
         with ThreadPoolExecutor(max_workers=6) as pool:
             # open orders FIRST, then positions, in one worker: a fill between the two reads can then only make the
             # position look smaller than the orders imply (I2 capacity understated, never overstated)
@@ -416,6 +421,12 @@ class Engine:
             self.ft.update(got["fair"], now)                # A6: EWMA mid, jumps confirmed, wide/illiquid dropped
             self.fair = self.ft.fairs(now)
             self.fair_t = time.time()
+        if self.pm_feed and self.pm_feed.quotes:            # between REST polls: Polymarket's websocket quotes (P2)
+            ws = {ex: (b, a, (self.pm.get(ex) or (0, 0, 0))[2] if len(self.pm.get(ex) or ()) > 2 else 2000.0)
+                  for ex, (b, a, t) in list(self.pm_feed.quotes.items()) if t > self.fair_t - 60}
+            if ws:
+                self.ft.update(ws, time.time())
+                self.fair = self.ft.fairs(time.time())
         self.px_t = time.time()
         fresh = time.time() - self.fair_t <= PM_MAX_AGE_S
         if not fresh and any(b.kind == "market" for b in self.bots):
@@ -509,7 +520,12 @@ class Engine:
 
         # F3 submit: cancels to the cancel lane (owned orders only), placements to the queue (I2 trims at send time)
         room, n_cancel, n_place, deferred = self.ex.admit(), 0, 0, 0
+        placed_exs, cancelled_exs = set(), set()
         for _, _, _, b, cancels, places in plans:
+            if cancels:
+                cancelled_exs.add(b.ex)
+            if places:
+                placed_exs.add(b.ex)
             sub = "manual" if b.kind == "position" else "inventory"
             for o in cancels:
                 if o.get("id"):
@@ -539,9 +555,16 @@ class Engine:
             room -= len(places)
             n_place += len(places)
         self.t["orders"] = time.time() - t0
+        done = time.time()                                  # A7 latency budgets, measured from the realtime event
+        for t_ev, kind, exs in events:
+            if kind == "fills" and exs & placed_exs:
+                self.sample("fill_to_queued", done - t_ev)
+            if kind == "pm_move" and exs & cancelled_exs:
+                self.sample("pm_to_defend", done - t_ev)
         # F4 repair pair sets whose legs filled unevenly (runs whatever the pairs flag: repairs reduce risk)
         self.repair_baskets(now)
         self.t["loop"] = time.time() - now
+        self.sample("plan_cycle", self.t["loop"])
 
         # F5 record
         self.n += 1
@@ -560,6 +583,56 @@ class Engine:
                 job()
             except Exception as e:                          # side jobs must never stop trading
                 self.event("ERR", f"side job: {e!r}")
+
+    # ------------------------------------------------------------------------------------------------ realtime (P2)
+    def rt_event(self, kind, exs, t):
+        """From the realtime threads: mark markets dirty and wake the planner (REST is re-read before acting)."""
+        with self.rt_lock:
+            self.rt_pending.append((t, kind, set(exs)))
+            if kind == "pm_move" or kind in ("fills", "orders", "resync"):
+                if kind in ("fills", "orders", "resync"):
+                    self.rt_sig_t = t
+                else:
+                    self.rt_pm_t = t
+        self.wake.set()
+
+    def start_realtime(self):
+        """P2 feeds (live only): SIG user channel + Polymarket CLOB websocket for the mapped YES tokens."""
+        try:
+            self.sig_feed = rt.SigUserFeed(lambda: api._req("POST", "/realtime/token", json={}), self.rt_event,
+                                           log=lambda k, s: self.event(k, s))
+            self.sig_feed.start()
+        except Exception as e:
+            self.event("ERR", f"SIG realtime not started: {e!r}")
+        try:
+            toks = read_json(os.path.join(DATA, "clob_tokens.json"), {})
+            tokens = {m["ex"]: [toks[i][0] for i in m["pm_ids"] if toks.get(i)] for m in self.mp}
+            tokens = {ex: t for ex, t in tokens.items() if t and len(t) == len(next(m["pm_ids"] for m in self.mp if m["ex"] == ex))}
+            if tokens:
+                self.pm_feed = rt.PolyFeed(tokens, self.rt_event, log=lambda k, s: self.event(k, s))
+                self.pm_feed.start()
+        except Exception as e:
+            self.event("ERR", f"Polymarket realtime not started: {e!r}")
+
+    def take_rt(self):
+        """Realtime events since the last loop (oldest first)."""
+        with self.rt_lock:
+            out, self.rt_pending = self.rt_pending, []
+        return out
+
+    def latency_view(self):
+        """A7 budgets: p50/p90/max per path (seconds). cancel_to_sent comes from the executor."""
+        out = {}
+        for k, xs in list(self.latency.items()) + [("cancel_to_sent", list(getattr(self.ex, "cancel_lat", [])))]:
+            xs = sorted(xs)
+            out[k] = dict(n=len(xs), p50=xs[len(xs) // 2] if xs else None, p90=xs[int(len(xs) * 0.9)] if xs else None,
+                          max=xs[-1] if xs else None)
+        return out
+
+    def sample(self, key, v):
+        xs = self.latency.setdefault(key, [])
+        xs.append(round(v, 3))
+        del xs[:-500]
 
     # ------------------------------------------------------------------------------------------------ layers v2
     def pol(self, ex, side):
@@ -1281,6 +1354,7 @@ class Engine:
             f"leaderboard {(self.acct or {}).get('totalAccountValue', 0):,.0f} (SIG marks, not the score) · free cash {cash:,.0f} · "
             f"realized today {self.realized_today():+,.0f}",
             f"fills last hour: {', '.join(f'{k} {n}' for k, n in sorted(per.items())) or 'none'}",
+            "latency p50/p90 s: " + ", ".join(f"{k} {v['p50']}/{v['p90']} (n {v['n']})" for k, v in self.latency_view().items()),
             f"kills/rollbacks: {'; '.join(kills) or 'none'} · errors last hour {len(self.errors)} · loop {self.n}, "
             f"last {self.t.get('loop', 0):.0f} s · journal UNKNOWN {st['unknown']} · executor sent {st['sent_orders']}"])
         self.night.status([
@@ -1603,7 +1677,8 @@ class Engine:
                           kappa=k, kappa_src=why, leaderboard=a.get("totalAccountValue"), paused=c.paused,
                           read_only=bool(c.d.get("read_only")),
                           loss_stop=dict(pnl=round(bot_24h), limit=LOSS_STOP, tripped=bot_24h < -LOSS_STOP)),
-            health=dict(sig=api.health(), executor=st, loop_s=self.t.get("loop"), errors=len(self.errors),
+            health=dict(sig=api.health(), executor=st, loop_s=self.t.get("loop"), errors=len(self.errors), latency=self.latency_view(),
+                        realtime=dict(sig=getattr(self.sig_feed, "stats", None), pm=getattr(self.pm_feed, "stats", None)),
                         feeds={"SIG prices (REST)": self.px_t, "Polymarket": self.fair_t or None,
                                "SIG realtime": getattr(self, "rt_sig_t", None), "Polymarket realtime": getattr(self, "rt_pm_t", None)}),
             layers=layers, markets=markets, positions=positions,
@@ -1773,6 +1848,8 @@ def main():
             print(f"startup failed ({str(e)[:160]}); retrying in 30 s", flush=True)
             time.sleep(30)
     eng.ex.start()
+    if not api.DRY_RUN and "--no-realtime" not in sys.argv:
+        eng.start_realtime()
     dash = None
     try:
         app = dashboard.create_app(lambda: eng.last_state, EngineControls(eng), market_detail=eng.market_detail)
@@ -1790,8 +1867,13 @@ def main():
                 eng.step()
             except Exception as e:
                 eng.event("ERR", repr(e))
-            if loops is None or i < loops:
-                time.sleep(max(1.0, LOOP_S - (time.time() - t)))
+            if loops is None or i < loops:                  # a realtime event replans early, within the read budget:
+                eng.wake.wait(timeout=max(1.0, LOOP_S - (time.time() - t)))     # ~7 SIG reads a loop, 100 a minute
+                eng.wake.clear()
+                with eng.rt_lock:
+                    ours = any(k != "pm_move" for _, k, _ in eng.rt_pending)
+                gap = 2.0 if ours else 6.0                  # our fills/orders: 2 s apart; Polymarket moves only: 6 s
+                time.sleep(max(0.0, gap - (time.time() - t)))
     except KeyboardInterrupt:
         pass
     finally:

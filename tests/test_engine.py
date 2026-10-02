@@ -945,6 +945,26 @@ class PromotionTests(EngineCase):
             self.assertIn("layer mm: pilot -> full (engine: pilot gate passed", fh.read())
 
 
+class RealtimeTests(EngineCase):
+    def test_fill_event_wakes_the_planner_and_is_timed(self):
+        fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        for _ in range(3):
+            loop(eng, fake)
+        mm = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"
+              and o["ex"] not in POS]
+        fake.fill(mm[0]["id"], mm[0]["qty"])              # an MM entry fills: its reducing quote must go out
+        eng.rt_event("fills", {mm[0]["ex"]}, time.time())
+        self.assertTrue(eng.wake.is_set(), "the planner is woken")
+        loop(eng, fake)
+        lat = eng.latency_view()
+        self.assertEqual(lat["fill_to_queued"]["n"], 1)
+        self.assertLess(lat["fill_to_queued"]["p50"], 3.0, "A7: fill -> exit queued within 3 s")
+        self.assertGreaterEqual(lat["plan_cycle"]["n"], 4)
+        self.assertIn("latency", eng.dash_state()["health"])
+
+
 class ControlTests(EngineCase):
     def test_position_only_by_flags_places_only_the_exits(self):
         fresh_data(layers=dict(position=dict(state="full")))

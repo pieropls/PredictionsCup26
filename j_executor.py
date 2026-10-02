@@ -273,6 +273,7 @@ class Executor:
                     return n
                 c = self.cancels.pop(0)
                 self.cancels_on_wire += 1
+                self.cancel_lat = (getattr(self, "cancel_lat", []) + [round(self.clock() - c["created"], 3)])[-500:]
             key = str(uuid.uuid4())
             self.journal.open(key, "cancel", [("executor", "", "cancel", (c["ex"], "", "cancel", 0, 0))])
             try:
