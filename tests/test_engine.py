@@ -788,6 +788,32 @@ class CapTests(EngineCase):
         self.assertEqual(k, 0.0, f"ladder bids don't lock cash: kappa stays 0 ({why})")
 
 
+class RequoteCapTests(EngineCase):
+    def test_requote_cancels_are_capped_and_never_doubled(self):
+        fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)
+        loop(eng, fake)
+        mm0 = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"]
+        self.assertGreater(len(mm0), 40)
+        SHIFT[0] = -0.01                                  # fair down 1c: every MM quote leaves its keep band
+        fake.calls.clear()
+        loop(eng, fake)
+        cancels = [eng.ledger.orders[c[1]] for c in fake.calls if c[0] == "cancel"]
+        urgent = [r for r in cancels if eng.owner[r["ex"]].urgency(r) > 0]
+        self.assertEqual(len(eng.requotes), a_config.REQUOTE_CANCELS_PER_MIN, "non-urgent requote cancels capped per minute")
+        self.assertEqual(len(cancels) - len(urgent), a_config.REQUOTE_CANCELS_PER_MIN, "picked-off quotes (at/above fair) always go")
+        self.assertIn("deferred", eng.summary)
+        self.assertNotIn("deferred 0 ", eng.summary, "the rest wait for the next minute")
+        for e_ in {o["ex"] for o in fake.open_orders() if o["id"] in eng.ledger.orders}:
+            mine = [o for o in fake.open_orders() if o["ex"] == e_ and o["id"] in eng.ledger.orders
+                    and eng.ledger.orders[o["id"]]["layer"] == "mm"]
+            for side in ("yes", "no"):
+                self.assertLessEqual(len([o for o in mine if o["side"] == side and not jx.reduces(side, "buy", fake.pos.get(e_, 0))]), 1,
+                                     f"one MM quote per side on {e_}: a deferred cancel defers its replacement")
+
+
 class BreakerTests(EngineCase):
     def test_correlated_fills_trip_the_breaker(self):
         fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="full")))

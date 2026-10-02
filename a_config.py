@@ -92,6 +92,7 @@ PM_MIN_LIQUIDITY = 2_000        # A6: no fair when Polymarket liquidity is below
 REF_WINDOW_S, REF_MIN_SAMPLES, REF_MAX_SPREAD = 1800, 6, 0.10       # ladder anchor: 30-min median SIG mid
 BREAKER_WINDOW_S, BREAKER_MARKETS, BREAKER_SHARE, BREAKER_PAUSE_S = 600, 5, 0.8, 1800   # §4.5 correlated-fill breaker
 MM_PILOT_MARKETS, LADDER_PILOT_MARKETS, PILOT_S = 10, 40, 2 * 3600
+REQUOTE_CANCELS_PER_MIN = 20    # A9: MM/ladder requote cancels per minute (one per write); picked-off quotes always go
 
 # A6. pair bots: one per race. NO on every party pays >= legs-1; YES on every party pays 1 unless an outsider wins ---
 PAIR_ENABLED = True

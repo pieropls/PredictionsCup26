@@ -39,7 +39,7 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       DASHBOARD_URL_FILE, STATE_EVERY_S, LAYER_CAPS, KAPPA_FROM_OCT30, LOSS_STOP, MARKET_MAX_POS,
                       LADDER_LEVELS, LADDER_CAPACITY_SHARE, TAKE_NOTIONAL, REF_WINDOW_S, REF_MIN_SAMPLES, REF_MAX_SPREAD,
                       BREAKER_WINDOW_S, BREAKER_MARKETS, BREAKER_SHARE, BREAKER_PAUSE_S, MM_PILOT_MARKETS,
-                      LADDER_PILOT_MARKETS, PILOT_S)
+                      LADDER_PILOT_MARKETS, PILOT_S, REQUOTE_CANCELS_PER_MIN)
 from d_ledger import Ledger, stamp, write_atomic
 
 
@@ -312,6 +312,7 @@ class Engine:
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
         self.wake, self.rt_lock, self.rt_pending = threading.Event(), threading.Lock(), []   # realtime -> planner
+        self.requotes = []                                  # times of MM/ladder requote cancels (A9 cap)
         self.sig_feed = self.pm_feed = None
         self.latency = {k: [] for k in ("fill_to_queued", "pm_to_defend", "plan_cycle")}
         self.position_names = {b.name for b in self.bots if b.kind == "position"}
@@ -524,19 +525,30 @@ class Engine:
         # F3 submit: cancels to the cancel lane (owned orders only), placements to the queue (I2 trims at send time)
         room, n_cancel, n_place, deferred = self.ex.admit(), 0, 0, 0
         placed_exs, cancelled_exs = set(), set()
+        self.requotes = [t for t in self.requotes if t > time.time() - 60]
         for _, _, _, b, cancels, places in plans:
             if cancels:
                 cancelled_exs.add(b.ex)
             if places:
                 placed_exs.add(b.ex)
             sub = "manual" if b.kind == "position" else "inventory"
-            for o in cancels:
+            held_back = False
+            live = self.market_layers(b.ex) if b.kind == "market" and not self.controls.paused else {}
+            for o in cancels:                               # a requote (layer still on here) is capped; a pull is not
+                if o.get("id") and o.get("layer") in ("mm", "ladder") and live.get(o["layer"]) and b.urgency(o) <= 0:
+                    if len(self.requotes) >= REQUOTE_CANCELS_PER_MIN:   # A9: requote cancels capped; one still at or
+                        held_back = True                                # above fair (being picked off) always goes
+                        continue
+                    self.requotes.append(time.time())
                 if o.get("id"):
                     n_cancel += self.ex.cancel(o, reason=b.name)
                 else:                                       # a queued order no longer wanted: drop it before it's sent
                     self.ex.drop_queued(lambda bot, sb, layer, od, o=o, b=b: bot == b.name and od[0] == o["ex"] and
                                         od[1] == o["side"] and od[2] == o["action"] and abs(od[3] - o["price"]) < 1e-9)
             places = [w for w in places if not self.ex.is_frozen(b.ex)]
+            if held_back:                                   # its old quotes stay for now: no doubled quotes
+                places = [w for w in places if w["layer"] not in ("mm", "ladder")]
+                deferred += 1
             if not places:
                 continue
             if b.kind != "position" and len(places) > room:
