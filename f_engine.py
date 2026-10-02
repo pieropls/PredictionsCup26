@@ -308,7 +308,7 @@ class Engine:
         self.pm, self.px_t, self.state_t, self.alerts = {}, None, 0.0, []
         self.ft, self.mids, self.mids_t = pm.FairTracker(), read_json(os.path.join(DATA, "mids.json"), {}), 0.0
         self.breaker, self.bad_since, self.tranche_view, self.used, self.ladder_quota = {}, None, {}, {}, 0
-        self.pilot_sets = {}
+        self.pilot_sets, self.sweep_rank = {}, {}
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
         self.wake, self.rt_lock, self.rt_pending = threading.Event(), threading.Lock(), []   # realtime -> planner
@@ -493,7 +493,8 @@ class Engine:
             mine.setdefault(p["bot"], []).append(dict(p, id=None, price=p["price"]))
         plans = []
         self.ladder_quota = int(LADDER_CAPACITY_SHARE * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60)
-        for b in self.bots:
+        for b in sorted(self.bots, key=lambda b: (b.kind != "position", -self.sweep_rank.get(b.ex, (0, 0))[0],
+                                                  -self.sweep_rank.get(b.ex, (0, 0))[1])):   # §5.3: most sweeps first
             s = self.bot_snapshot(b, pos, rows, kappa, cash, used)
             s["own"] = [o for o in mine.get(b.name, []) if o.get("id")]   # I4: our resting orders aren't the market
             wants = self.gate(b, b.plan(s))
@@ -825,6 +826,7 @@ class Engine:
         vol = sorted(mk, key=lambda ex: -(stats.get(ex, {}).get("volume") or 0))
         swp = sorted(mk, key=lambda ex: (-(stats.get(ex, {}).get("sweeps") or 0), -(stats.get(ex, {}).get("volume") or 0)))
         self.pilot_sets = {"mm": set(vol[:MM_PILOT_MARKETS]), "ladder": set(swp[:LADDER_PILOT_MARKETS])} if stats else {}
+        self.sweep_rank = {ex: (v.get("sweeps") or 0, v.get("volume") or 0) for ex, v in stats.items()}
 
     def controller(self, now):
         """Night plan §4.4-4.5 and §5 gates, every loop: per-layer kill rules, pilot promotions, the D5 loss stop, the
@@ -1027,6 +1029,16 @@ class Engine:
             msg = f"NEW MARKET {m['title']} (ex {ex}) mapped to Polymarket {mp['pm_ids']}: sniper armed, then MM/ladders"
             self.event("NEW", msg)
             self.night.line(msg)
+
+    def d1_status(self, b):
+        """D1 (AK): the share released to the recycler, and where it stands."""
+        night = self.controls.d.get("night", {})
+        if b.name != "AK-GOV-D" or not night.get("d1_done"):
+            return None
+        q = abs(self.ledger.sub(b.ex, "recycle:ak-d1"))
+        sold = sum(f["qty"] for f in self.ledger.fills if f["ex"] == b.ex and f["layer"] == "recycle")
+        return dict(qty=q, state=(f"selling: {q:,.0f} left" if q >= 10 else "sold") + f" · {sold:,.0f} sold into the bid since "
+                    f"{str(night['d1_done'])[11:16]}")
 
     def basket_residue(self, bk):
         legs = self.ledger.basket_fills(bk)
@@ -1655,7 +1667,7 @@ class Engine:
             if b.kind == "position":
                 positions.append(dict(name=b.name, market=b.market["title"], side=b.side, held=abs(self.book.get(b.ex, {}).get("pos", 0)),
                                       manual=abs(self.ledger.sub(b.ex, "manual")), ladder=b.ladder, status=b.status,
-                                      tranche=getattr(self, "d1_view", {}).get(b.name)))
+                                      tranche=self.d1_status(b)))
         sets, used, locked = [], 0.0, 0.0
         for bk in self.ledger.baskets[-200:]:
             legs = self.ledger.basket_fills(bk)
