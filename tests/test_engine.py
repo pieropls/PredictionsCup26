@@ -845,6 +845,28 @@ class PairsTests(EngineCase):
         self.assertIn(bk["state"], ("unwinding", "unwound"))
         self.assertTrue(any(e["kind"] == "UNWIND" for e in eng.events))
 
+    def test_uneven_unwind_leaves_residue_to_the_recycler(self):
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        bk = self.ma_set(eng, fake)
+        for oid in bk["orders"]:
+            fake.fill(oid, bk["qty"])
+        loop(eng, fake)
+        fake.px["1059"], fake.px["1060"] = (0.92, 0.93, 0.93), (0.06, 0.07, 0.07)
+        loop(eng, fake)
+        un = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "unwind"]
+        self.assertEqual(len(un), 2)
+        fake.fill(un[0]["id"], un[0]["qty"])              # one leg unwinds fully, the other not at all
+        fake.book.pop(int(un[1]["id"]))                   # ... and expires
+        bk["unwind_t"] -= a_config.PAIR_TTL_S + 20
+        eng.ex.recent.clear()
+        loop(eng, fake)
+        self.assertEqual(bk["state"], "closed")
+        other = eng.ledger.orders[un[1]["id"]]["ex"]
+        self.assertEqual(eng.ledger.sub(other, f"pairset:{bk['id']}"), 0, "the un-hedged leg left the set")
+        self.assertLess(eng.ledger.sub(other, "inventory"), 0, "... to inventory (recycler)")
+        self.assertTrue(any("one-leg residue to the recycler" in e["text"] for e in eng.events))
+
     @staticmethod
     def ledger_matched(eng, bk):
         return eng.ledger.matched(bk)

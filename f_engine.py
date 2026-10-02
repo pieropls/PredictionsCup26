@@ -1159,6 +1159,27 @@ class Engine:
                                    f"(~{qty * margin:,.0f} SIG once every leg fills)")
         return shots, start - budget
 
+    def settle_unwind(self, bk):
+        """An early unwind is placed atomically but its legs fill independently. Once its orders are gone: what is left
+        even stays a set ('held', it can unwind again); a leg's excess over the others is one-leg exposure and goes to
+        'inventory', where the recycler sells it at >= fair (A12.4 step 4)."""
+        legs = self.ledger.basket_fills(bk)
+        if not legs:
+            bk["state"] = "closed"
+            return
+        low = min(l[3] for l in legs)
+        moved = []
+        for oid, ex, side, held, avg in legs:
+            extra = held - low
+            if extra >= 1:
+                self.ledger.split_sub(ex, f"pairset:{bk['id']}", "inventory", extra if side == "yes" else -extra)
+                moved.append(f"{self.name(ex)} {side.upper()} {extra:,.0f}")
+        bk["state"] = "held" if low >= MIN_QTY else "closed"
+        if moved:
+            self.event("UNWIND", f"{bk['race']}: unwind filled unevenly; one-leg residue to the recycler: {', '.join(moved)}")
+        elif bk["state"] == "closed":
+            self.event("UNWIND", f"{bk['race']}: set fully unwound (edge realized, capital freed)")
+
     def adopted(self, entry, ids):
         """A pair set whose atomic write had an UNKNOWN outcome and that the audit found on SIG: record it as a set
         (with repair tracking), as if its write had been acked."""
@@ -1196,6 +1217,10 @@ class Engine:
                 open_subs.setdefault(p["sub"], set()).add(p["layer"])
         for bk in self.ledger.baskets:
             st = bk.get("state", "held")
+            if st in ("unwinding", "unwound") and now - bk.get("unwind_t", now) >= PAIR_TTL_S + 10 and \
+                    "unwind" not in open_subs.get(f"pairset:{bk['id']}", set()):
+                self.settle_unwind(bk)                      # its legs fill independently: even it up afterwards
+                continue
             if bk.get("repaired") and st == "held" and not bk.get("repair_state"):
                 continue                                    # sets from before v2: handled then
             sub = f"pairset:{bk['id']}"
