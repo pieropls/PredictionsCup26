@@ -969,6 +969,32 @@ class SniperTests(EngineCase):
         self.assertTrue(any("no confident Polymarket match" in a for a in eng.alerts))
 
 
+class TakeCapTests(EngineCase):
+    def test_sniper_cap_is_per_race(self):
+        fresh_data(layers=dict(position=dict(state="full"), sniper=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)
+        pb = next(p for p in eng.pairs if len(p.legs) == 2 and not set(p.legs) & set(POS))
+        d, r = pb.legs
+        for ex, side_fair in ((d, 0.70), (r, 0.30)):      # both legs gapped: buying D YES and R NO is one bet
+            FAIR[ex] = side_fair
+            fake.px[ex] = (round(side_fair - 0.10, 3), round(side_fair - 0.08, 3), side_fair - 0.09) if ex == d else \
+                          (round(side_fair + 0.08, 3), round(side_fair + 0.10, 3), side_fair + 0.09)
+        try:
+            for _ in range(6):
+                loop(eng, fake)
+                for o in [o for o in fake.open_orders() if o["ex"] in (d, r) and o["id"] in eng.ledger.orders]:
+                    fake.fill(o["id"], o["qty"])          # the gap refills: every take fills
+                eng.ex.recent.clear()                     # a minute passes between takes
+        finally:
+            FAIR.pop(d, None)
+            FAIR.pop(r, None)
+        spent = sum(f["qty"] * f["price"] for f in eng.ledger.fills if f["ex"] in (d, r) and f["layer"] == "take")
+        self.assertGreater(spent, 500)
+        self.assertLessEqual(spent, eng.cap("sniper", "per_market") + 1e-6, "one race, one per-market cap")
+
+
 class LeadersTests(EngineCase):
     def test_logger_and_marks_check(self):
         fresh_data(layers=dict(position=dict(state="full"), leaders=dict(state="full")))

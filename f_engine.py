@@ -755,9 +755,9 @@ class Engine:
                     tranches=self.tranche_view.get(b.ex, []),
                     ladder_ids={(sd, i): self.ledger.ladder_id(b.ex, sd, i) for sd in ("yes", "no") for i in range(len(LADDER_LEVELS))}
                     if self.market_layers(b.ex).get("ladder") else {},
-                    take_notional=max(0.0, self.cap("sniper", "per_market") - used["sniper_market"].get(b.ex, 0.0)) if
+                    take_notional=max(0.0, self.cap("sniper", "per_market") - self.race_takes(b.ex, used)) if
                     time.time() - self.new_markets.get(b.ex, 0) < 1800 else
-                    min(TAKE_NOTIONAL, max(0.0, self.cap("sniper", "per_market") - used["sniper_market"].get(b.ex, 0.0))))
+                    min(TAKE_NOTIONAL, max(0.0, self.cap("sniper", "per_market") - self.race_takes(b.ex, used))))
 
     def bucket_usage(self):
         """What each capital bucket uses now (SIG): resting entry buys at full notional, filled inventory at cost."""
@@ -808,6 +808,10 @@ class Engine:
                      ("sniper", "per_market"): max(u["sniper_market"].values(), default=0.0)}
         return u
 
+    def race_takes(self, ex, used):
+        race = (self.meta.get(ex) or {}).get("race")
+        return sum(v for e_, v in used["sniper_market"].items() if (self.meta.get(e_) or {}).get("race") == race)
+
     def admit(self, b, places, used, cash):
         """The risk gate for new entries (night plan §4.2), in place order: hard cash floor for MM/takes, the layer's
         bucket, the ladder's per-side cash cover and its share of SIG capacity. Reducing orders always pass."""
@@ -821,8 +825,10 @@ class Engine:
                 continue
             if l == "mm" and used["mm"] >= self.cap("mm", "inventory"):
                 continue                                    # the MM bucket is inventory at cost (§4.2); resting = the floor
-            if l == "take" and (used["sniper_day"] + n > self.cap("sniper", "per_day")
-                                or used["sniper_market"].get(b.ex, 0.0) + n > self.cap("sniper", "per_market")):
+            race = (self.meta.get(b.ex) or {}).get("race")
+            race_used = sum(v for ex, v in used["sniper_market"].items() if (self.meta.get(ex) or {}).get("race") == race)
+            if l == "take" and (used["sniper_day"] + n > self.cap("sniper", "per_day")      # the per-market cap also holds
+                                or race_used + n > self.cap("sniper", "per_market")):       # per race: D YES + R NO is one bet
                 continue
             if l == "ladder":
                 side = self.pol(b.ex, w["side"])
