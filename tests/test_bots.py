@@ -78,6 +78,16 @@ class MarketBotTests(unittest.TestCase):
                      own=[dict(side="no", action="buy", price=0.51, layer="mm")])
         self.assertEqual([w["ttl"] for w in self.b.plan(s)], [1800], "rests instead")
 
+    def test_recycler_sells_mm_holdings_into_a_bid_above_fair_and_skips_wrong_sign_subs(self):
+        # holding 400 NO in the MM sub-book; NO bid 0.51 >= NO fair 0.50 + 0.5c: sell into it
+        ws = self.b.plan(mb_state(subs={"mm": -400}, layers={"recycler": True}, bid=0.47, ask=0.49))
+        self.assertEqual([(w["side"], w["px"], w["qty"], w["layer"], w["sub"]) for w in ws], [("yes", 0.49, 400, "recycle", "mm")])
+        # ... but no resting recycler exit for MM holdings when the bid is below fair (the MM rests its own)
+        self.assertEqual(self.b.plan(mb_state(subs={"mm": -400}, layers={"recycler": True}, bid=0.48, ask=0.52)), [])
+        # an inventory sub-book of the opposite sign to the net position is an audit residue: not recycled
+        ws = self.b.plan(mb_state(subs={"inventory": 380, "pairset:x": -1379}, layers={"recycler": True}, bid=0.47, ask=0.49))
+        self.assertEqual(ws, [])
+
     def test_A2_no_reducing_order_below_fair_minus_kappa(self):
         for kappa in (0.0, 0.01, 0.02, 0.03):
             for fair in (0.05, 0.3, 0.5, 0.8, 0.97):
@@ -149,6 +159,20 @@ class MarketBotTests(unittest.TestCase):
         self.assertEqual(ws, [])
         ws = self.b.plan(mb_state(layers={"mm": True}, blocked={"yes"}))
         self.assertEqual({w["side"] for w in ws}, {"no"})
+
+    def test_day2_roc_minimums(self):
+        # a YES MM bid with ~5% ROC: accepted at 4%, rejected at 6% (free cash below its target)
+        s = dict(fair=0.42, u=0.0, bid=0.30, ask=0.60, layers={"mm": True})
+        ws = self.b.plan(mb_state(**s))
+        yes = [w for w in ws if w["side"] == "yes"]
+        self.assertTrue(yes and 0.04 <= yes[0]["roc"] < 0.06, ws)
+        self.assertFalse([w for w in self.b.plan(mb_state(roc_min=0.06, **s)) if w["side"] == "yes"])
+        # a favourite we already hold (fair 0.97, holding YES): 6% even at the normal 4%
+        s2 = dict(fair=0.97, u=0.08, bid=0.80, ask=0.995, layers={"mm": True})   # wide PM: e ~4.1c, ROC ~4.4%
+        free = [w for w in self.b.plan(mb_state(held=0, **s2)) if w["side"] == "yes"]
+        held = [w for w in self.b.plan(mb_state(held=500, subs={"inventory": 500}, **s2)) if w["side"] == "yes"]
+        self.assertTrue(free and free[0]["roc"] < 0.06, free)
+        self.assertEqual(held, [])
 
     def test_market_cap_room(self):
         ws = self.b.plan(mb_state(layers={"mm": True}, room={"yes": 0.0, "no": 3000}))

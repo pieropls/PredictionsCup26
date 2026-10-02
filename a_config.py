@@ -79,6 +79,7 @@ PM_EXTRA = {
 
 # A5b. strategy layers v2 (night plan §4-5; plan_review A2-A6, A9) -----------------------------------------------------
 ROC_MIN, ROC_REF = 0.04, 0.08   # D4: entries need edge/price >= 4%; size scales with roc / 8%, clipped 0.5x..2x
+ROC_MIN_TIGHT = 0.06            # day 2 §3.4: while free cash is below its target; also MM on a held side with fair >= 0.95
 RECYCLE_BID_EDGE = 0.005        # recycler: sell into the SIG bid while it is >= fair_side + this
 RECYCLE_REST_EDGE = 0.01        # ... else rest an exit at max(fair_side + this, best ask - 1 tick)
 RECYCLE_TAKE_TTL_S, RECYCLE_REST_TTL_S = 300, 1800
@@ -117,6 +118,8 @@ KAPPA_FROM_OCT30 = 0.03         # D3: capital discount from Oct 30 (election-nig
 LOSS_STOP = 2_000               # D5: bot-owned P&L at fair, rolling 24 h
 OPPORTUNITY_RESERVE = 10_000    # day 2 §3.2: on top of the floor; only fat-finger fills, new-market snipes, >= 8c takes use it
 AK_RELEASE = 0.50               # D1 + D1b (day 2 §1): share of the original AK NO position released to the recycler
+RELEASE_EVERY_S, RELEASE_MARKETS = 30, 3   # release layer (day 2 §3.3): plan every 30 s, <= 3 markets (= order-book reads)
+RELEASE_PILOT_TARGET = 10_000   # pilot: free cash above the floor; full follows the schedule (20k Oct 5, 30k Oct 20, 40k Nov 3)
 
 # A7. files ---------------------------------------------------------------------------------------------------------
 DATA = os.environ.get("SIG_DATA") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")   # releases share it

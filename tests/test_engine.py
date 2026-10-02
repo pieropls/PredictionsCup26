@@ -850,6 +850,86 @@ class CashGlitchTests(EngineCase):
         self.assertLessEqual(eng.committed(), 500 + 1e-6, "admission used the minimum of the last 3 cash reads")
 
 
+class ReserveTests(EngineCase):
+    def test_opportunity_reserve_tiers(self):
+        fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="full"), sniper=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + a_config.OPPORTUNITY_RESERVE + 500)
+        eng = engine(fake)
+        for _ in range(3):
+            loop(eng, fake)
+        self.assertLessEqual(eng.committed(), 500 + 1e-6, "MM may only commit cash above floor + reserve")
+        b = next(b for b in eng.bots if b.kind == "market" and b.ex in eng.fair and b.ex not in POS)
+        f = eng.side_fair(b.ex, "yes")
+        big = dict(layer="take", side="yes", px=round(f - 0.09, 3), qty=10_000, sub="sniper")
+        small = dict(layer="take", side="yes", px=round(f - 0.05, 3), qty=10_000, sub="sniper")
+        for w in (big, small):
+            w.update(lo=w["px"] - 0.01, hi=w["px"])
+            w["qty"] = int(3000 / w["px"])
+        used = eng.bucket_usage()
+        cash = min(eng.cash_hist)
+        self.assertEqual(len(eng.admit(b, [dict(small)], dict(used, committed=used["committed"]), cash)), 0,
+                         "an ordinary take can't dip into the reserve")
+        self.assertEqual(len(eng.admit(b, [dict(big)], dict(used, committed=used["committed"]), cash)), 1,
+                         "a take >= 8c through fair may use the reserve, down to the floor")
+        # cash falls under floor + reserve: MM quotes are pulled (non-reserve first)
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 2000)
+        for _ in range(4):
+            loop(eng, fake)
+        mm_left = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"
+                   and not jx.reduces(o["side"], "buy", fake.pos.get(o["ex"], 0))]
+        self.assertEqual(mm_left, [], "no MM entry quotes while cash is below floor + reserve")
+
+
+class ReleaseTests(EngineCase):
+    def test_release_sells_cheap_to_free_holdings_into_the_bid(self):
+        fresh_data(layers=dict(position=dict(state="full"), recycler=dict(state="full"), release=dict(state="pilot")))
+        fake = new_fake(writes_per_min=10_000)
+        probe = engine(fake)
+        loop(probe, fake)
+        ex = mid_market(probe)                            # a mid-priced market: selling YES into the bid costs ~2%
+        fresh_data(layers=dict(position=dict(state="full"), recycler=dict(state="full"), release=dict(state="pilot")))
+        fake = new_fake(writes_per_min=10_000)
+        fake.pos[ex] = 2000
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 1000)
+        eng = engine(fake)
+        eng.ft.half_life = 1e-9
+        loop(eng, fake)
+        eng.release_t = 0
+        loop(eng, fake)
+        side, bid = "yes", fake.px[ex][0]
+        cost = eng.cost_to_free(ex, side)
+        self.assertTrue(0 <= cost <= eng.release_max_cost(), cost)
+        rel = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "release"]
+        self.assertEqual([(o["ex"], o["side"], o["price"]) for o in rel], [(ex, "no", round(1 - bid, 3))], "sell YES at the bid")
+        self.assertLessEqual(sum(o["qty"] for o in rel), 1000, "<= top-of-book depth (fake: 1,000)")
+        self.assertFalse([o for o in fake.open_orders() if o["ex"] in (AK, RI, MA) and o["id"] in eng.ledger.orders
+                          and eng.ledger.orders[o["id"]]["layer"] == "release"], "manual and > 3% holdings are kept")
+        rec = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders
+               and eng.ledger.orders[o["id"]]["layer"] == "recycle"]
+        self.assertLessEqual(sum(o["qty"] for o in rec) + sum(o["qty"] for o in rel), 2000, "the recycler steps aside (I2)")
+        fake.fill(rel[0]["id"], rel[0]["qty"])
+        loop(eng, fake)
+        r = eng.released_today_view()
+        self.assertAlmostEqual(r["sig"], rel[0]["qty"] * bid, places=2)
+        self.assertTrue(0 <= r["avg_cost"] <= 0.031, r)
+        with open(a_config.NIGHT_LOG_FILE) as fh:
+            pass
+        self.assertTrue(any(e["kind"] == "RELEASE" for e in eng.events))
+
+    def test_release_off_does_nothing(self):
+        fresh_data(layers=dict(position=dict(state="full"), recycler=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 1000)
+        eng = engine(fake)
+        loop(eng, fake)
+        loop(eng, fake)
+        self.assertEqual(eng.release_now, {})
+
+
 class BreakerTests(EngineCase):
     def test_correlated_fills_trip_the_breaker(self):
         fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="full")))

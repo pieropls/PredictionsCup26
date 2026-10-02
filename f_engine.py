@@ -40,7 +40,7 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       LADDER_LEVELS, LADDER_CAPACITY_SHARE, TAKE_NOTIONAL, REF_WINDOW_S, REF_MIN_SAMPLES, REF_MAX_SPREAD,
                       BREAKER_WINDOW_S, BREAKER_MARKETS, BREAKER_SHARE, BREAKER_PAUSE_S, MM_PILOT_MARKETS,
                       LADDER_PILOT_MARKETS, PILOT_S, REQUOTE_CANCELS_PER_MIN, BREAKER_FAIR_MOVE, AK_RELEASE,
-                      OPPORTUNITY_RESERVE)
+                      OPPORTUNITY_RESERVE, ROC_MIN, ROC_MIN_TIGHT, RELEASE_EVERY_S, RELEASE_MARKETS, RELEASE_PILOT_TARGET)
 from d_ledger import Ledger, stamp, write_atomic
 
 
@@ -71,7 +71,7 @@ def host_id():
 
 
 # ====================================================================================================== controls
-LAYERS = ["position", "recycler", "mm", "ladder", "pairs", "sniper", "leaders"]
+LAYERS = ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "leaders"]
 LAYER_STATES = ("off", "pilot", "full")
 
 
@@ -310,6 +310,7 @@ class Engine:
         self.ft, self.mids, self.mids_t = pm.FairTracker(), read_json(os.path.join(DATA, "mids.json"), {}), 0.0
         self.breaker, self.bad_since, self.tranche_view, self.used, self.ladder_quota = {}, None, {}, {}, 0
         self.pilot_sets, self.sweep_rank = {}, {}
+        self.release_now, self.release_t, self.depth_cache = {}, 0.0, {}
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
         self.wake, self.rt_lock, self.rt_pending = threading.Event(), threading.Lock(), []   # realtime -> planner
@@ -365,8 +366,9 @@ class Engine:
         return max(0.0, qty - closes) * price
 
     MARKET_LAYERS = {"exit": "recycler", "recycle": "recycler", "take": "sniper", "touch": "mm", "mm": "mm",
-                     "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs"}
-    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair"}
+                     "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs",
+                     "release": "release", "fatfinger": "fatfinger"}
+    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release"}
 
     def gate(self, b, wants):
         """Layer flags (data/overrides.json): a want survives only if its layer is on and allowed on this market. Pause
@@ -475,6 +477,11 @@ class Engine:
         self.controller(now)
         kappa, _ = self.kappa()
         used = self.bucket_usage()
+        try:
+            self.release_now = self.release_plan(cash, now)
+        except Exception as err:                            # never let it stop the loop
+            self.release_now = {}
+            self.event("ERR", f"release plan: {err!r}")
         engine_ex = {b.ex for b in self.bots if b.kind == "market"} | {ex for pb in self.pairs for ex in pb.legs}
         filled = sum(self.risk(ex, pos.get(ex, 0)) for ex in engine_ex)
         self.risk_view = dict(filled=round(filled), resting=round(used["committed"]), cash=round(cash),
@@ -483,7 +490,7 @@ class Engine:
 
         # F2a pairs first: unwinds and repairs always; new sets only with the pairs layer on and new risk allowed
         t0 = time.time()
-        shots, spent = self.run_pairs(now, min(budget, self.cap("pairs", "capital") - used["pairs"]), kappa) \
+        shots, spent = self.run_pairs(now, min(budget - OPPORTUNITY_RESERVE, self.cap("pairs", "capital") - used["pairs"]), kappa) \
             if self.controls.on("pairs") else (0, 0.0)
         self.t["pairs"] = time.time() - t0
         t0 = time.time()
@@ -751,7 +758,10 @@ class Engine:
                 rec = self.ledger.orders.get(o["id"])
                 if rec and rec["layer"] not in self.REDUCING and not (rec["layer"] == "mm" and jx.reduces(o["side"], "buy", q)):
                     held[o["side"]] += o["qty"] * o["price"]
+        free = cash - CASH_RESERVE                          # §3.4: below the free-cash target, entries need ROC >= 6%
+        rel = self.release_now.get(b.ex)
         return dict(fair=f, u=self.ft.u.get(b.ex), bid=bid, ask=ask, ref=self.ref(b.ex), kappa=kappa,
+                    roc_min=ROC_MIN_TIGHT if free < self.release_target()[0] else ROC_MIN, held=q, release=rel,
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
                     room={sd: max(0.0, MARKET_MAX_POS - held[sd]) for sd in ("yes", "no")},
@@ -824,7 +834,8 @@ class Engine:
                 out.append(w)
                 continue
             n, l = w["qty"] * w["px"], w["layer"]
-            if l in ("mm", "take") and cash - used["committed"] - n < CASH_RESERVE:
+            need = CASH_RESERVE if self.reserve_ok(b.ex, w) else CASH_RESERVE + OPPORTUNITY_RESERVE    # §3.2 two tiers
+            if l in ("mm", "take", "fatfinger") and cash - used["committed"] - n < need:
                 continue
             if l == "mm" and used["mm"] >= self.cap("mm", "inventory"):
                 continue                                    # the MM bucket is inventory at cost (§4.2); resting = the floor
@@ -835,14 +846,14 @@ class Engine:
                 continue
             if l == "ladder":
                 side = self.pol(b.ex, w["side"])
-                cover = max(0.0, cash - CASH_RESERVE - used["committed"])
+                cover = max(0.0, cash - CASH_RESERVE - OPPORTUNITY_RESERVE - used["committed"])   # ladders: above the reserve
                 if (self.ladder_quota <= 0 or used["ladder_filled"] >= self.cap("ladder", "filled")
                         or used["ladder_resting"] + n > self.cap("ladder", "resting") or used["ladder_side"][side] + n > cover):
                     continue
                 self.ladder_quota -= 1
                 used["ladder_resting"] += n
                 used["ladder_side"][side] += n
-            if l in ("mm", "take"):
+            if l in ("mm", "take", "fatfinger"):
                 used["committed"] += n
             if l == "take":
                 used["sniper_day"] += n
@@ -881,7 +892,7 @@ class Engine:
                 c.kill(l, f"{hit[0]['rule']}: {hit[0]['value']}")
                 self.alerts.append(f"{time.strftime('%H:%M')} layer {l} killed: {hit[0]['rule']} ({hit[0]['value']})")
         # promotions (pilot -> full) and pilot extensions
-        for l in ("mm", "ladder", "pairs"):
+        for l in ("mm", "ladder", "pairs", "release"):
             if c.state(l) != "pilot":
                 continue
             st, age = stats.get(l, {}), now - since[l]
@@ -902,6 +913,15 @@ class Engine:
                 elif now - night.get(f"{l}_ext", 0) >= PILOT_S:
                     night[f"{l}_ext"] = now
                     self.night.line(f"layer ladder stays pilot: {trims} I2 trims, {trips} breaker trips (review)")
+            if l == "release":
+                a_ = self.acct or {}
+                free = (a_.get("totalAccountValue") or 0) - (a_.get("totalHoldingsValue") or 0) - CASH_RESERVE
+                r = self.released_today_view()
+                trims = self.ex.trims.get("release", 0) - night.get("release_trims0", 0)
+                if (free >= RELEASE_PILOT_TARGET or age >= PILOT_S) and trims == 0 and (r["avg_cost"] is None or
+                                                                                   r["avg_cost"] <= self.release_max_cost() + 0.005):
+                    ok, why = True, (f"pilot target reached (free cash {free:,.0f})" if free >= RELEASE_PILOT_TARGET else "2 h pilot") + \
+                        f", freed {r['sig']:,.0f} at {(r['avg_cost'] or 0) * 100:.1f}% average cost, no I2 trims"
             if l == "pairs":
                 done = [bk for bk in self.ledger.baskets if bk.get("ts", 0) >= since[l] and bk.get("state") in ("held", "unwound", "done")
                         and self.ledger.matched(bk) > 0 and not self.basket_residue(bk)]
@@ -972,28 +992,124 @@ class Engine:
         quotes stay, so it can slip: cancel resting entries, lowest ROC first, until the deficit is covered (admission
         keeps them from coming back until cash recovers)."""
         a = self.acct or {}
-        cash = min(getattr(self, "cash_hist", None) or [(a.get("totalAccountValue") or 0) - (a.get("totalHoldingsValue") or 0)])
-        deficit = self.committed() + CASH_RESERVE - cash
-        if deficit <= 0 or not a:
+        if not a:
             return 0
-        cands = []
+        cash = min(getattr(self, "cash_hist", None) or [(a.get("totalAccountValue") or 0) - (a.get("totalHoldingsValue") or 0)])
+        cands, res_n, other_n = [], 0.0, 0.0
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
-            if not rec or o["action"] != "buy" or rec["layer"] not in ("mm", "take") or o["id"] in self.ex.cancelling or \
+            if not rec or o["action"] != "buy" or rec["layer"] not in ("mm", "take", "fatfinger") or o["id"] in self.ex.cancelling or \
                     jx.reduces(o["side"], "buy", self.book.get(o["ex"], {}).get("pos", 0)):
                 continue
             f = self.side_fair(o["ex"], o["side"])
-            cands.append((bots.roc_of(f, o["price"]) if f is not None else -1.0, o))
+            r = self.reserve_ok(o["ex"], dict(layer=rec["layer"], side=o["side"], px=o["price"]))
+            n_ = o["qty"] * o["price"]
+            res_n, other_n = res_n + (n_ if r else 0), other_n + (0 if r else n_)
+            cands.append((bots.roc_of(f, o["price"]) if f is not None else -1.0, r, o))
+        # tier 2: entries that may not use the opportunity reserve must fit above floor + reserve; tier 1: all above floor
+        deficit_other = other_n + CASH_RESERVE + OPPORTUNITY_RESERVE - cash
+        deficit_all = res_n + other_n + CASH_RESERVE - cash
         freed, n = 0.0, 0
-        for _, o in sorted(cands, key=lambda t: t[0]):
-            if freed >= deficit:
+        for _, r, o in sorted(cands, key=lambda t: (t[1], t[0])):     # non-reserve entries first, lowest ROC first
+            if freed >= max(deficit_all, 0) and (r or freed >= max(deficit_other, 0)):
                 break
             if self.ex.cancel(o, reason="cash floor"):
                 freed += o["qty"] * o["price"]
                 n += 1
         if n:
-            self.event("FLOOR", f"cash floor short by {deficit:,.0f}: {n} lowest-ROC entry quotes cancelled ({freed:,.0f} SIG)")
+            self.event("FLOOR", f"cash short of floor + reserve by {max(deficit_other, deficit_all):,.0f}: {n} lowest-ROC entry quotes "
+                                f"cancelled ({freed:,.0f} SIG)")
         return n
+
+    RELEASE_SUBS = ("inventory", "mm", "sniper")            # never: pair sets, manual (AK/RI), ladder tranches, fresh fat-finger
+
+    def bid_depth(self, ex, side, now):
+        """Shares at the best SIG bid of `side` (order book read, cached 60 s)."""
+        c = self.depth_cache.get(ex)
+        if not c or now - c[0] > 60:
+            bids, asks = api.orderbook(ex, depth=1)
+            c = self.depth_cache[ex] = (now, bids, asks)
+        _, bids, asks = c
+        if side == "yes":
+            return bids[0][1] if bids else 0.0
+        return asks[0][1] if asks else 0.0
+
+    def release_plan(self, cash, now):
+        """Day 2 §3.3: while free cash (above the floor) is below target, sell holdings into the SIG bid in order of cost to
+        free (fair - bid) / bid, cheapest first, while that cost <= RELEASE_MAX_COST; a limit at the bid, sized <= the top of
+        book. Planned every 30 s for at most 3 markets (3 order-book reads); the bots place it (layer 'release')."""
+        st = self.controls.state("release")
+        if st == "off" or self.controls.paused and False:
+            return {}
+        if now - self.release_t < RELEASE_EVERY_S and self.release_now:
+            return {ex: r for ex, r in self.release_now.items() if ex in self.book}
+        self.release_t = now
+        target = self.release_target()[0] if st == "full" else min(RELEASE_PILOT_TARGET, self.release_target()[0])
+        pending = sum(o["qty"] * (1 - o["price"]) for o in self.open
+                      if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "release")
+        need = target - (cash - CASH_RESERVE) - pending
+        if need <= 0:
+            return {}
+        maxc, cands = self.release_max_cost(), []
+        for ex, b in self.book.items():
+            q = b["pos"]
+            if not q or ex not in self.owner or self.owner[ex].kind != "market" or self.ex.is_frozen(ex):
+                continue
+            side = "yes" if q > 0 else "no"
+            ctf = self.cost_to_free(ex, side)
+            if ctf is None or ctf < 0 or ctf > maxc:        # a bid above fair is the recycler's job
+                continue
+            subs = self.ledger.subbooks.get(ex, {})
+            avail = sum(abs(v) for k, v in subs.items() if k in self.RELEASE_SUBS and v * q > 0)
+            if avail >= MIN_QTY:
+                cands.append((ctf, ex, side, avail))
+        plan = {}
+        for ctf, ex, side, avail in sorted(cands):
+            if need <= 0 or len(plan) >= RELEASE_MARKETS:
+                break
+            bid = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
+            depth = self.bid_depth(ex, side, now)
+            qty = int(min(avail, depth, need / bid))
+            if qty < MIN_QTY:
+                continue
+            subs, left, split = self.ledger.subbooks.get(ex, {}), qty, {}
+            for k in self.RELEASE_SUBS:
+                v = subs.get(k, 0)
+                if left > 0 and v * (1 if side == "yes" else -1) > 0:
+                    take = int(min(abs(v), left))
+                    if take >= MIN_QTY:
+                        split[k] = take
+                        left -= take
+            if split:
+                plan[ex] = dict(side=side, px=bid, cost=round(ctf, 4), subs=split)
+                need -= sum(split.values()) * bid
+        if plan:
+            self.event("RELEASE", "; ".join(f"{self.name(ex)} {r['side'].upper()} {sum(r['subs'].values()):,} @ {r['px']:.3f} "
+                                             f"(cost {r['cost'] * 100:.1f}%)" for ex, r in plan.items()))
+        return plan
+
+    def released_today_view(self):
+        """Cash the release layer freed today and its average cost vs fair."""
+        today = time.strftime("%Y-%m-%d")
+        sig, w = 0.0, 0.0
+        for f in self.ledger.fills:
+            if f["layer"] == "release" and f["t"][:10] == today and f["action"] == "buy":
+                sale = 1 - f["price"]                       # a complement buy at p sells the held side at 1 - p
+                held_fair = None if f.get("fair") is None else 1 - f["fair"]
+                sig += sale * f["qty"]
+                if held_fair is not None and sale > 0:
+                    w += (held_fair - sale) / sale * sale * f["qty"]
+        return dict(sig=round(sig, 2), avg_cost=round(w / sig, 4) if sig else None)
+
+    def reserve_ok(self, ex, w):
+        """Day 2 §3.2: only these may spend the opportunity reserve (down to the floor): fat-finger levels, sniper takes on
+        a new market (< 30 min old), and takes >= 8c through fair."""
+        if w.get("layer") == "fatfinger":
+            return True
+        if w.get("layer") != "take":
+            return False
+        f = self.side_fair(ex, w["side"])
+        return time.time() - self.new_markets.get(ex, 0) < 1800 or (f is not None and f - w["px"] >= 0.08 - 1e-9)
 
     def apply_d1(self):
         """D1 / D1b (night plan §1, day 2 §1): release a cumulative AK_RELEASE share of the original AK NO position to the
@@ -2027,12 +2143,12 @@ class Engine:
         out = [dict(key=k, label=labels[k], sig=round(buckets.get(k, [0, 0])[0], 2), fair=round(buckets.get(k, [0, 0])[1], 2)) for k in order]
         out.append(dict(key="cash", label="Cash", sig=money["cash"], fair=money["cash"]))
         committed = self.committed()
-        reserve_used = getattr(self, "reserve_used", 0.0)
+        reserve_used = max(0.0, min(float(OPPORTUNITY_RESERVE), CASH_RESERVE + OPPORTUNITY_RESERVE - (money["cash"] - committed)))
         tgt, tdate = self.release_target()
-        rel = getattr(self, "released_today", dict(sig=0.0, avg_cost=None))
+        rel = self.released_today_view()
         return dict(cash=money["cash"], holdings_sig=money["holdings_sig"], holdings_fair=round(money["fair"]["account"] - money["cash"], 2),
                     floor=CASH_RESERVE, reserve=OPPORTUNITY_RESERVE, reserve_used=round(reserve_used, 2), committed=round(committed, 2),
-                    free_to_trade=round(money["cash"] - CASH_RESERVE - OPPORTUNITY_RESERVE + reserve_used - committed, 2),
+                    free_to_trade=round(money["cash"] - CASH_RESERVE - OPPORTUNITY_RESERVE - committed, 2),
                     target=tgt, target_date=tdate, released_today=rel, buckets=out)
 
     def release_target(self):
@@ -2166,6 +2282,11 @@ class Engine:
         """The kill rules of a layer (night_plan §4.4) with their current values."""
         if layer in ("position", "leaders"):
             return []
+        if layer == "release":                              # it sells below fair by design: judge its cost, not its P&L
+            r = self.released_today_view()
+            mx = self.release_max_cost() + 0.01
+            return [dict(rule=f"average cost <= {mx * 100:.0f}%", value="-" if r["avg_cost"] is None else f"{r['avg_cost'] * 100:.1f}%",
+                         hit=r["avg_cost"] is not None and r["avg_cost"] > mx)]
         full = max((LAYER_CAPS.get(layer, {}).get(k, (0, 0, 0))[1] for k in LAYER_CAPS.get(layer, {})), default=0)
         lim = -max(300.0, 0.03 * full)
         pnl, n, mo = st.get("pnl_fair", 0.0), st.get("fills", 0), st.get("markout30")

@@ -9,7 +9,7 @@ Prices: SIG books are YES-normalized; an order's price is in its own side (a NO 
 """
 import math
 
-from a_config import (TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, RECYCLE_BID_EDGE,
+from a_config import (TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, ROC_MIN_TIGHT, RECYCLE_BID_EDGE,
                       RECYCLE_REST_EDGE, RECYCLE_TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_EDGE, MM_U_MULT, MM_NOTIONAL, MM_TTL_S,
                       LADDER_LEVELS, LADDER_TTL_S, TAKE_EDGE, TAKE_U_MULT, TAKE_NOTIONAL, TAKE_TTL_S)
 
@@ -152,7 +152,7 @@ def tick_up(p):
     return round(math.ceil(p / TICK - EPS) * TICK, 3)
 
 
-def recycle_wants(subs, fair, bid, ask, kappa, own=()):
+def recycle_wants(subs, fair, bid, ask, kappa, own=(), take_only=False):
     """Recycler (night plan §5.1, A2) for holding sub-books {sub: signed YES shares}: sell into the SIG bid while it is
     >= fair_side + 0.5c (marketable), else rest an exit at max(fair_side + 1c, best ask - 1 tick); never below
     fair_side - kappa. Each sell is the complement BUY at 1 - price (positions net on SIG). I4: our own resting orders
@@ -172,6 +172,8 @@ def recycle_wants(subs, fair, bid, ask, kappa, own=()):
         keep = ask_h is not None and round(ask_h, 3) in own_ask
         if bid_h is not None and bid_h >= sf[have] + RECYCLE_BID_EDGE - EPS:
             sell, ttl, band = bid_h, RECYCLE_TAKE_TTL_S, 0.005
+        elif take_only:                                     # other layers' holdings: only sell into a bid above fair
+            continue
         else:
             best = ask_h if keep else (ask_h - TICK) if ask_h is not None else 0
             sell, ttl, band = max(sf[have] + RECYCLE_REST_EDGE, best), RECYCLE_REST_TTL_S, 0.01
@@ -219,7 +221,11 @@ class MarketBot:
             if not entries_ok or side in blocked or not MB_MIN_PX <= px <= MB_MAX_PX:
                 return
             r = roc_of(sf[side], px)
-            if r < ROC_MIN - EPS:
+            rmin = s.get("roc_min", ROC_MIN)
+            held = s.get("held", sum(subs.values()))
+            if layer == "mm" and sf[side] >= 0.95 and ((side == "yes" and held > 0) or (side == "no" and held < 0)):
+                rmin = max(rmin, ROC_MIN_TIGHT)         # §3.4: no more cheap-return favourites we already hold
+            if r < rmin - EPS:
                 return
             n = min(roc_size(notional, r), room[side])
             q = int(n / px)
@@ -236,10 +242,23 @@ class MarketBot:
                 close = "no" if have == "yes" else "yes"
                 out.append(want(close, "buy", px, int(qty), px - band, px, 2 * QTY_TOL, layer, qmax=int(qty), sub=sub, ttl=ttl, reduce=True))
 
-        # recycler: every holding sub-book released to it
+        # release (day 2 §3.3): sell the planned shares into the SIG bid; the recycler steps aside for those shares
+        rel = s.get("release") or {}
+        if rel:
+            have, close = rel["side"], ("no" if rel["side"] == "yes" else "yes")
+            px = round(1 - rel["px"], 3)
+            for sub, q in rel["subs"].items():
+                out.append(want(close, "buy", px, q, px - 0.005, px, 2 * QTY_TOL, "release", qmax=q, sub=sub, ttl=RECYCLE_TAKE_TTL_S,
+                                reduce=True))
+            subs = {k2: (v - (rel["subs"].get(k2, 0) if v > 0 else -rel["subs"].get(k2, 0))) for k2, v in subs.items()}
+        # recycler: every holding sub-book released to it, plus a bid above fair for MM / sniper holdings; only sub-books
+        # on the same side as the net position (an audit residue of the other sign is not shares we hold)
         if L.get("recycler"):
-            out += recycle_wants({k2: v for k2, v in subs.items() if k2 == "inventory" or k2.startswith("recycle:")},
+            net = sum(subs.values())
+            out += recycle_wants({k2: v for k2, v in subs.items() if (k2 == "inventory" or k2.startswith("recycle:")) and v * net > 0},
                                  f, s["bid"], s["ask"], k, s.get("own", ()))
+            out += recycle_wants({k2: v for k2, v in subs.items() if k2 in ("mm", "sniper") and v * net > 0},
+                                 f, s["bid"], s["ask"], k, s.get("own", ()), take_only=True)
 
         # market maker v2
         if L.get("mm"):
