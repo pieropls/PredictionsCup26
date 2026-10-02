@@ -1990,8 +1990,10 @@ def main():
             if loops is None or i < loops:                  # a realtime event replans early, within the read budget:
                 eng.wake.wait(timeout=max(1.0, LOOP_S - (time.time() - t)))     # ~7 SIG reads a loop, 100 a minute
                 eng.wake.clear()
-                busy = api.health(60)["reads_last_min"] > 80    # near SIG's 100 reads/min: space the replans out
-                gap = 6.0 if busy else 2.0                  # else 2 s: fill -> exit <= 3 s, PM move -> defend <= 2 s (A7)
+                reads = api.health(60)["reads_last_min"]    # ~8 SIG reads a loop; SIG allows 100 a minute
+                with eng.rt_lock:
+                    ours = any(k != "pm_move" for _, k, _ in eng.rt_pending)
+                gap = 10.0 if reads >= 75 else 6.0 if reads >= 60 or not ours else 2.0   # own fills: 2 s (A7) while cheap
                 time.sleep(max(0.0, gap - (time.time() - t)))
     except KeyboardInterrupt:
         pass
