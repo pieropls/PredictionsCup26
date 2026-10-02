@@ -851,6 +851,18 @@ class CashGlitchTests(EngineCase):
 
 
 class ReserveTests(EngineCase):
+    def test_queued_exit_is_not_committed(self):
+        fresh_data(layers=dict(position=dict(state="full")))
+        fake = new_fake()
+        eng = engine(fake)
+        loop(eng, fake)
+        ex, pos = MA, eng.book[MA]["pos"]                 # MA Gov R: market-bot inventory (NO 1,008)
+        exit_side = "no" if pos > 0 else "yes"           # buying the other side reduces the holding
+        eng.ex.place([("t", "mm", "mm", (ex, exit_side, "buy", 0.5, 100))])
+        self.assertEqual(eng.committed(), 0.0, "a queued exit is not an entry")
+        eng.ex.place([("t", "mm", "mm", (ex, "yes" if exit_side == "no" else "no", "buy", 0.5, 100))])
+        self.assertAlmostEqual(eng.committed(), 50.0, msg="a queued entry is")
+
     def test_opportunity_reserve_tiers(self):
         fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="full"), sniper=dict(state="full")))
         fake = new_fake(writes_per_min=10_000)

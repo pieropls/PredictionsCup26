@@ -5,6 +5,9 @@
                 duplicate revision is ignored; a gap (previousRevision > last accepted), `resyncRequired`, a (re)connect or
                 a token refresh means "resync": the engine re-reads REST before acting. The token is refreshed every 3 h.
                 (Market channels deliver nothing (RECAP §11, 9.1): SIG books stay on REST /exchanges/prices.)
+                Day 2 §6 probe (13:51-13:56 PT, join + setAuth + private, the token's only channel): 5 `notification`
+                order_filled broadcasts for 4 fills, 0 `account_batch`. SIG sends no account batches now, so a
+                notification wakes the loop and REST /portfolio/fills (read every loop, <= 10 s apart) is the fill feed.
   PolyFeed      Polymarket's CLOB market websocket for the mapped YES tokens (clobTokenIds[0], only where outcomes[0] is
                 "Yes"): best bid/ask per token, summed per SIG market like c_polymarket.fairs(); the engine feeds them to its
                 FairTracker between REST polls and replans a market when its Polymarket mid moves >= 1.5c.
@@ -85,9 +88,12 @@ class SigUserFeed:
         connect = self.connect or (lambda u: websockets.connect(u, max_size=2 ** 23))
         async with connect(url) as ws:
             self.ws = ws
-            await ws.send(json.dumps({"topic": f"realtime:{topic}", "event": "phx_join", "ref": "1",
-                                      "payload": {"config": {"broadcast": {"self": False}, "presence": {"key": ""}, "private": True},
+            await ws.send(json.dumps({"topic": f"realtime:{topic}", "event": "phx_join", "ref": "1", "join_ref": "1",
+                                      "payload": {"config": {"broadcast": {"ack": False, "self": False}, "presence": {"key": ""},
+                                                             "postgres_changes": [], "private": True},
                                                   "access_token": tok["token"]}}))
+            await ws.send(json.dumps({"topic": f"realtime:{topic}", "event": "access_token", "ref": "2", "join_ref": "1",
+                                      "payload": {"access_token": tok["token"]}}))     # supabase-js setAuth()
             self.connected_t = self.clock()
             self.connection_lost()                          # (re)connected: resync from REST before acting
             beat = self.clock()

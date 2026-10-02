@@ -31,6 +31,7 @@ ENGINE_HOST = os.environ.get("SIG_ENGINE_HOST", "MacBookPino")   # the ONE machi
 
 # A2. engine loop and SIG limits (100 reads + 30 writes / min per account; SIG processes orders slowly under load) ----
 LOOP_S = 15
+FILL_POLL_S = 10                # day 2 §6: SIG sends no account_batch -> REST fills at least every 10 s
 WRITES_PER_MIN = 25
 BATCH_SIZE = 20                 # orders per batch write
 MAX_PLACE_PER_LOOP = 60         # new orders per loop

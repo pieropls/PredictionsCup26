@@ -44,7 +44,7 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       OPPORTUNITY_RESERVE, ROC_MIN, ROC_MIN_TIGHT, RELEASE_EVERY_S, RELEASE_MARKETS, RELEASE_PILOT_TARGET,
                       FAT_LEVELS, FAT_SIZES, FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP, FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S,
                       FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S, FAT_MOVE, FAT_CAPACITY_SHARE, FAT_BOOK_READS, QTY_TOL,
-                      FAT_REFRESH_MAX_H)
+                      FAT_REFRESH_MAX_H, FILL_POLL_S)
 from d_ledger import Ledger, stamp, write_atomic
 
 
@@ -2055,8 +2055,9 @@ class Engine:
             if rec and o["action"] == "buy" and rec["layer"] in self.FLOOR_LAYERS and not jx.reduces(
                     o["side"], "buy", self.book.get(o["ex"], {}).get("pos", 0)):
                 out += o["qty"] * o["price"]
-        for p in self.ex.pending():
-            if p["action"] == "buy" and p["layer"] in self.FLOOR_LAYERS:
+        for p in self.ex.pending():                         # queued / in flight: same rule (an exit is not an entry)
+            if p["action"] == "buy" and p["layer"] in self.FLOOR_LAYERS and not jx.reduces(
+                    p["side"], "buy", self.book.get(p["ex"], {}).get("pos", 0)):
                 out += p["qty"] * p["price"]
         return out
 
@@ -2750,7 +2751,7 @@ def main():
             except Exception as e:
                 eng.event("ERR", repr(e))
             if loops is None or i < loops:                  # a realtime event replans early, within the read budget:
-                eng.wake.wait(timeout=max(1.0, LOOP_S - (time.time() - t)))     # ~7 SIG reads a loop, 100 a minute
+                eng.wake.wait(timeout=max(1.0, min(LOOP_S, FILL_POLL_S) - (time.time() - t)))   # fills read <= 10 s apart (§6)
                 eng.wake.clear()
                 reads = api.health(60)["reads_last_min"]    # ~8 SIG reads a loop; SIG allows 100 a minute
                 with eng.rt_lock:
