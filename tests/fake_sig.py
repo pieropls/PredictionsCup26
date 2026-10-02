@@ -109,7 +109,13 @@ class FakeSIG:
     def prices(self, exs):
         return {str(e): self.px.get(str(e), (None, None, None)) for e in exs}
 
+    spare = True                                          # the read governor (b_sig.spare_reads): tests can tighten it
+
+    def spare_reads(self, keep=30):
+        return self.spare
+
     def orderbook(self, ex, depth=10):
+        self.book_reads = getattr(self, "book_reads", 0) + 1
         b, a, _ = self.px.get(str(ex), (None, None, None))
         return ([(b, 1000.0)] if b is not None else [], [(a, 1000.0)] if a is not None else [])
 

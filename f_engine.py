@@ -1153,6 +1153,8 @@ class Engine:
         # queue reads: oldest first, a few per loop
         stale = [ex for ex in exs if now - (self.fat_book.get(ex) or (0,))[0] > FAT_QUEUE_S and self.fat_eligible(ex)]
         for ex in stale[:FAT_BOOK_READS]:
+            if not api.spare_reads():                       # §6: fills and exits first; the queue read waits
+                break
             try:
                 bids, asks = api.orderbook(ex, depth=50)
                 mine = collections.Counter()                # I4: our own resting orders are not the queue
@@ -1264,6 +1266,8 @@ class Engine:
         """Shares at the best SIG bid of `side` (order book read, cached 60 s)."""
         c = self.depth_cache.get(ex)
         if not c or now - c[0] > 60:
+            if not api.spare_reads():                       # §6: no spare read now -> no release this market this time
+                return 0.0
             bids, asks = api.orderbook(ex, depth=1)
             c = self.depth_cache[ex] = (now, bids, asks)
         _, bids, asks = c
@@ -1379,7 +1383,7 @@ class Engine:
 
     def log_leaders(self, now):
         """Every 10 min (night plan §5.6): the top 20 and our own row -> data/leaders.csv (2 reads)."""
-        if now - self.leaders_t < 600 or not self.controls.on("leaders"):
+        if now - self.leaders_t < 600 or not self.controls.on("leaders") or not api.spare_reads():
             return
         self.leaders_t = now
         try:
@@ -1437,7 +1441,7 @@ class Engine:
         """Sniper (night plan §5.5): every 60 s, the 20 newest tournament markets (1 read). A market not seen before is
         mapped to Polymarket strictly; without a confident match: alert, no trade. With one: it gets a MarketBot, and its
         first plans take asks far below fair (sniper caps), then MM and ladders pick it up."""
-        if now - self.scan_t < 60 or not (self.controls.on("sniper") or self.controls.on("fatfinger")):
+        if now - self.scan_t < 60 or not (self.controls.on("sniper") or self.controls.on("fatfinger")) or not api.spare_reads(15):
             return
         self.scan_t = now
         if now - getattr(self, "remap_t", 0) >= 600 and self.unmapped_new:      # retry unmapped new markets every 10 min
@@ -1564,7 +1568,7 @@ class Engine:
                 if now - pb.last_shot >= PAIR_COOLDOWN_S and not any(self.ex.is_frozen(ex) for ex in pb.legs):
                     cands.append((e_, side, pb))
         for e_, side, pb in sorted(cands, key=lambda c: -c[0]):
-            if shots >= PAIR_MAX_SHOTS or self.ex.admit() < 2:
+            if shots >= PAIR_MAX_SHOTS or self.ex.admit() < 2 or not api.spare_reads(20):
                 break
             pb.last_shot = now
             books, key = {}, "bids" if side == "no" else "asks"

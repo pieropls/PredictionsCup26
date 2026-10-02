@@ -1204,6 +1204,17 @@ class FatFingerTests(EngineCase):
         self.assertEqual([p for p, _ in (yb or ya)], [0.05 if side == "yes" else 0.95], "only the rival is left in the queue")
         self.assertEqual(sorted(px for _, px, _ in eng.fat_levels(ex, side, eng.side_fair(ex, side), 1.0, "A")), [0.055, 0.08, 0.12])
 
+    def test_optional_reads_wait_for_spare_budget(self):
+        fake, eng = self.rig()
+        fake.spare = False                                # SIG reads near the limit: the loop's own reads only
+        fake.book_reads = 0
+        self.settle(eng, fake, 4)
+        self.assertEqual(fake.book_reads, 0, "no queue, depth or pair book reads without spare budget")
+        self.assertTrue(self.fat_orders(eng, fake), "levels still go out, at the level price, without a queue read")
+        fake.spare = True
+        self.settle(eng, fake, 2)
+        self.assertGreater(fake.book_reads, 0)
+
     def test_max_sweep_fills_best_price_first_and_logs_value(self):
         fake, eng = self.rig()
         self.settle(eng, fake)

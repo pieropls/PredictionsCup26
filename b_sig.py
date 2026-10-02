@@ -91,6 +91,18 @@ def health(window_s=600):
     return out
 
 
+def reads_last_min():
+    now = time.time()
+    return sum(1 for x in list(_calls) if x[1] == "read" and x[0] >= now - 60)
+
+
+def spare_reads(keep=30):
+    """Day 2 §6: optional reads (queue and depth reads, pair books, the market scan, leaders) go only while >= keep of
+    SIG's 100 reads a minute are left, so the loop's own reads (orders, positions, fills, prices: fills and exits) never
+    hit a 429."""
+    return reads_last_min() <= 100 - keep
+
+
 def writes_left():
     with _wlock:
         while _writes and _writes[0] < time.time() - 60:
