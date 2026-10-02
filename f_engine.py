@@ -45,7 +45,9 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       OPPORTUNITY_RESERVE, ROC_MIN, ROC_MIN_TIGHT, RELEASE_EVERY_S, RELEASE_MARKETS, RELEASE_PILOT_TARGET,
                       FAT_LEVELS, FAT_SIZES, FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP, FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S,
                       FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S, FAT_MOVE, FAT_CAPACITY_SHARE, FAT_BOOK_READS, QTY_TOL,
-                      FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN,
+                      FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, DUMP_MIN_FAIR, DUMP_MIN_REF, DUMP_OFFSETS,
+                      DUMP_REF_GAP, DUMP_COST, DUMP_MIN_SIDE_COST, DUMP_QUEUE_S, DUMP_BOOK_READS, DUMP_REBOUND_MIN, DUMP_HOLD_S,
+                      DUMP_NEWS_DROP, DUMP_BREAKER_MARKETS, DUMP_BREAKER_FAIR, DUMP_PILOT_SIDES, DUMP_PILOT_S, DUMP_REARM_S,
                       INTEL_READS, INTEL_REVISIT_S, INTEL_DAILY_HOUR, HEADLINE_RACES)
 from d_ledger import Ledger, stamp, write_atomic
 
@@ -77,7 +79,7 @@ def host_id():
 
 
 # ====================================================================================================== controls
-LAYERS = ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "leaders"]
+LAYERS = ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "leaders"]
 LAYER_STATES = ("off", "pilot", "full")
 
 
@@ -321,6 +323,8 @@ class Engine:
         self.release_now, self.release_t, self.depth_cache = {}, 0.0, {}
         self.fat_book, self.fat_anchor, self.fat_block, self.fair_hist, self.fat_now = {}, {}, {}, {}, {}
         self.fat_sent = collections.deque(maxlen=5000)      # placement times (pilot gate: write usage)
+        self.dump_now, self.dump_book, self.dump_block, self.dump_view, self.dump_ref = {}, {}, {}, {}, {}   # afternoon D-A
+        self.dump_quota, self.dump_pilot, self.cross_log = 0, None, {}
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
@@ -380,8 +384,8 @@ class Engine:
 
     MARKET_LAYERS = {"exit": "recycler", "recycle": "recycler", "take": "sniper", "touch": "mm", "mm": "mm",
                      "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs",
-                     "release": "release", "fatfinger": "fatfinger"}
-    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release"}
+                     "release": "release", "fatfinger": "fatfinger", "dump": "dump", "dumpexit": "dump"}
+    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit"}
 
     def gate(self, b, wants):
         """Layer flags (data/overrides.json): a want survives only if its layer is on and allowed on this market. Pause
@@ -483,8 +487,10 @@ class Engine:
         self.fill_retry = {t_: n for t_, n in self.fill_retry.items() if t_ > now - 120}
         self.ledger.markouts(self.side_mid)
         try:
-            self.fat_fill_events([f for f in self.ledger.fills[-200:] if f["order"] in self.new_fill_orders]) \
-                if getattr(self, "new_fill_orders", None) else None
+            if getattr(self, "new_fill_orders", None):
+                new_f = [f for f in self.ledger.fills[-200:] if f["order"] in self.new_fill_orders]
+                self.fat_fill_events(new_f)
+                self.dump_fill_events(new_f)
         except Exception as err:
             self.event("ERR", f"fat-finger events: {err!r}")
         self.ledger.init_subbooks(pos, self.manual_ex)
@@ -509,6 +515,10 @@ class Engine:
         cash = min(self.cash_hist)                          # one glitchy read can't open the gates (06:12: +10.7k for a loop)
         self.update_mids(now)
         self.track_tranches(now)
+        try:
+            self.track_dumps(now)
+        except Exception as err:
+            self.event("ERR", f"dump tranches: {err!r}")
         self.controller(now)
         kappa, _ = self.kappa()
         used = self.bucket_usage()
@@ -522,6 +532,12 @@ class Engine:
         except Exception as err:
             self.fat_now = {}
             self.event("ERR", f"fat-finger plan: {err!r}")
+        try:
+            self.dump_now = self.dump_plan(now, cash, used)
+        except Exception as err:
+            self.dump_now = {}
+            self.event("ERR", f"dump plan: {err!r}")
+        self.dump_quota = int(0.15 * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60)
         self.fat_quota = int(FAT_CAPACITY_SHARE * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60)
         engine_ex = {b.ex for b in self.bots if b.kind == "market"} | {ex for pb in self.pairs for ex in pb.legs}
         filled = sum(self.risk(ex, pos.get(ex, 0)) for ex in engine_ex)
@@ -563,6 +579,7 @@ class Engine:
                             w["qmax"] = min(w["qmax"], w["qty"])
                 wants = [w for w in wants if w["qty"] >= MIN_QTY]
             kept, cancels, places = bots.reconcile(wants, mine.get(b.name, []))
+            places = self.no_self_cross(b, places, cancels)
             if b.kind == "market":
                 places = self.admit(b, places, used, cash)
             if b.kind == "position":                                # foreign sells (placed by hand) share the holding
@@ -851,7 +868,7 @@ class Engine:
                                off=max(0.015, base * bots.s_of(f if f is not None else 0.5)))
                 self.event("TRANCHE", f"{self.name(ex)}: ladder fill -> tranche {sub} {side.upper()} {abs(q):,.0f}")
         for sub, t in tr.items():
-            if t["state"] != "open":
+            if t["state"] != "open" or t.get("kind") == "dump":
                 continue
             ex, q = t["ex"], self.ledger.subbooks.get(t["ex"], {}).get(sub, 0)
             if abs(q) < 1:
@@ -908,7 +925,8 @@ class Engine:
         rel = self.release_now.get(b.ex)
         return dict(fair=f, u=self.ft.u.get(b.ex), bid=bid, ask=ask, ref=self.ref(b.ex), kappa=kappa,
                     roc_min=ROC_MIN_TIGHT if free < self.release_target()[0] else ROC_MIN, roc_hold=ROC_HOLD_MIN, held=q, release=rel,
-                    fatfinger=self.fat_now.get(b.ex) or [],
+                    fatfinger=self.fat_now.get(b.ex) or [], dump=self.dump_now.get(b.ex) or [],
+                    dump_tranches=self.dump_view.get(b.ex, []),
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
                     room={sd: max(0.0, MARKET_MAX_POS - held[sd]) for sd in ("yes", "no")},
@@ -922,7 +940,7 @@ class Engine:
     def bucket_usage(self):
         """What each capital bucket uses now (SIG): resting entry buys at full notional, filled inventory at cost."""
         u = dict(committed=0.0, mm=0.0, ladder_filled=0.0, ladder_resting=0.0, ladder_side={"D": 0.0, "R": 0.0, "other": 0.0},
-                 sniper_market={}, sniper_day=0.0, pairs=0.0, fat_resting=0.0, fat_filled=0.0)
+                 sniper_market={}, sniper_day=0.0, pairs=0.0, fat_resting=0.0, fat_filled=0.0, dump_resting=0.0)
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
             if not rec or o["action"] != "buy" or rec["bot"] in self.position_names:
@@ -937,6 +955,8 @@ class Engine:
                 u["sniper_market"][o["ex"]] = u["sniper_market"].get(o["ex"], 0.0) + n
             elif l == "fatfinger":
                 u["fat_resting"] += n
+            elif l == "dump":
+                u["dump_resting"] += n
         for ex, books in self.ledger.subbooks.items():
             for sub, v in books.items():
                 if sub.startswith("fatfinger:"):
@@ -954,6 +974,8 @@ class Engine:
                 u["sniper_market"][p["ex"]] = u["sniper_market"].get(p["ex"], 0.0) + n
             elif l == "fatfinger":
                 u["fat_resting"] += n
+            elif l == "dump":
+                u["dump_resting"] += n
         for ex, books in self.ledger.subbooks.items():
             q = books.get("mm", 0)
             f = self.fair.get(ex)
@@ -972,7 +994,7 @@ class Engine:
             if bk.get("state", "held") in ("held", "repair"):
                 u["pairs"] += sum(l[3] * (l[4] or 0) for l in self.ledger.basket_fills(bk))
         self.used = {("mm", "inventory"): u["mm"], ("ladder", "filled"): u["ladder_filled"], ("ladder", "resting"): u["ladder_resting"],
-                     ("fatfinger", "resting"): u["fat_resting"], ("fatfinger", "filled"): u["fat_filled"],
+                     ("fatfinger", "resting"): u["fat_resting"], ("fatfinger", "filled"): u["fat_filled"], ("dump", "resting"): u["dump_resting"],
                      ("pairs", "capital"): u["pairs"], ("sniper", "per_day"): u["sniper_day"],
                      ("sniper", "per_market"): max(u["sniper_market"].values(), default=0.0)}
         return u
@@ -1003,6 +1025,16 @@ class Engine:
                 self.fat_quota -= 1
                 self.fat_sent.append(time.time())
                 used["fat_resting"] += n
+                out.append(w)
+                continue
+            if l == "dump":                                 # afternoon D-A: a full fill of the side's levels + its fat-finger
+                funded = max(0.0, min(float(OPPORTUNITY_RESERVE), cash - CASH_RESERVE - used["committed"]))   # levels fits
+                worst = sum(x["qty"] * x["px"] for x in (self.dump_now.get(b.ex) or []) + (self.fat_now.get(b.ex) or [])
+                            if x["side"] == w["side"])
+                if self.dump_quota <= 0 or used["dump_resting"] + n > self.cap("dump", "resting") or worst > funded:
+                    continue
+                self.dump_quota -= 1
+                used["dump_resting"] += n
                 out.append(w)
                 continue
             need = CASH_RESERVE if self.reserve_ok(b.ex, w) else CASH_RESERVE + OPPORTUNITY_RESERVE    # §3.2 two tiers
@@ -1063,7 +1095,7 @@ class Engine:
                 c.kill(l, f"{hit[0]['rule']}: {hit[0]['value']}")
                 self.alerts.append(f"{time.strftime('%H:%M')} layer {l} killed: {hit[0]['rule']} ({hit[0]['value']})")
         # promotions (pilot -> full) and pilot extensions
-        for l in ("mm", "ladder", "pairs", "release", "fatfinger"):
+        for l in ("mm", "ladder", "pairs", "release", "fatfinger", "dump"):
             if c.state(l) != "pilot":
                 continue
             st, age = stats.get(l, {}), now - since[l]
@@ -1106,6 +1138,16 @@ class Engine:
                     night[f"{l}_ext"] = now
                     self.night.line(f"layer fatfinger stays pilot: {len(close)} fills within 25c of fair, {trims} I2 trims, "
                                     f"{thr} HTTP 429s, {late} placements last hour (review)")
+            if l == "dump" and age >= DUMP_PILOT_S:         # afternoon D-A: 4 h pilot on 15 tier-A sides -> full
+                trims = self.ex.trims.get("dump", 0)
+                short = self.cash_short is not None and self.cash_short["t"] >= since[l]
+                thr = api.health(DUMP_PILOT_S).get("throttled", 0)
+                n_f = sum(1 for f in self.fills_since(since[l]) if f["layer"] == "dump")
+                if trims == 0 and not short and thr == 0:
+                    ok, why = True, f"4 h pilot: {n_f} dump fills, no I2 trims, no CASH SHORT, no HTTP 429s"
+                elif now - night.get(f"{l}_ext", 0) >= DUMP_PILOT_S:
+                    night[f"{l}_ext"] = now
+                    self.night.line(f"layer dump stays pilot: {trims} I2 trims, cash short {short}, {thr} HTTP 429s (review)")
             if l == "pairs":
                 done = [bk for bk in self.ledger.baskets if bk.get("ts", 0) >= since[l] and bk.get("state") in ("held", "unwound", "done")
                         and self.ledger.matched(bk) > 0 and not self.basket_residue(bk)]
@@ -1384,6 +1426,254 @@ class Engine:
                 self.event("BREAKER", msg)
                 self.night.line(msg)
 
+    # ------------------------------------------------------------------------------------------------ dump catcher (D-A)
+    def dump_pilot_sides(self, now):
+        """The DUMP_PILOT_SIDES eligible sides of the markets with the largest dumps: value at a wrong price on the tape
+        (TAPE_STUDY by market + live big events), recomputed every 30 min; written to data/intel/dump_pilot.json."""
+        if self.dump_pilot and now - self.dump_pilot[0] < 1800:
+            return self.dump_pilot[1]
+        val = collections.Counter()
+        try:
+            by_title = {m["title"]: ex for ex, m in self.meta.items()}
+            for title, v in (read_json(os.path.join(DATA, "tape", "summary.json"), {}).get("by_market") or {}).items():
+                if title in by_title:
+                    val[by_title[title]] += v.get("value", 0)
+        except Exception:
+            pass
+        for ev in intel._jsonl(os.path.join(DATA, "intel", "events.jsonl"), now - 7 * 86400):
+            val[ev["ex"]] += ev.get("value") or 0
+        tier_a = self.fat_tiers()
+        sides = []
+        for ex, v in val.most_common():
+            if ex in tier_a or not tier_a:
+                sides += [(ex, side) for side, _, _ in self.dump_eligible(ex)]
+            if len(sides) >= DUMP_PILOT_SIDES:
+                break
+        sides = sides[:DUMP_PILOT_SIDES]
+        self.dump_pilot = (now, set(sides))
+        try:
+            with open(os.path.join(DATA, "intel", "dump_pilot.json"), "w") as fh:
+                json.dump(dict(t=stamp(), sides=[dict(ex=ex, side=sd, market=self.name(ex), value=round(val[ex])) for ex, sd in sides]), fh, indent=1)
+        except OSError:
+            pass
+        return self.dump_pilot[1]
+
+    def dump_eligible(self, ex):
+        """[(side, fair_side, ref_side)]: mapped sides with fair_side >= 0.90 and SIG 30-min ref_side >= 0.80, no manual."""
+        b = self.owner.get(ex)
+        f, r = self.fair.get(ex), self.ref(ex)
+        if b is None or b.kind != "market" or ex in self.manual_ex or f is None or r is None:
+            return []
+        return [(side, fs, rs) for side, fs, rs in (("yes", f, r), ("no", 1 - f, 1 - r)) if fs >= DUMP_MIN_FAIR and rs >= DUMP_MIN_REF]
+
+    def dump_levels(self, ex, side, fs, rs, cost):
+        """[(i, price, shares)]: fair_side - 0.07 / 0.12 / 0.20, each <= ref_side - 0.04, one tick above the best rival bid
+        at or below the level (and above the next deeper level), resting below the side's best ask; cost split evenly."""
+        book = self.dump_book.get(ex)
+        bids = []
+        if book:
+            _, yb, ya = book
+            bids = [p for p, _ in yb] if side == "yes" else [round(1 - p, 3) for p, _ in ya]
+        ask_s = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[1]
+        lv = [bots.tick_down(min(fs - off, rs - DUMP_REF_GAP)) for off in DUMP_OFFSETS]
+        out, used = [], set()
+        for i, lvl in enumerate(lv):
+            deeper = lv[i + 1] if i + 1 < len(lv) else 0.0
+            rivals = [p for p in bids if deeper < p <= lvl + 1e-9]
+            px = bots.tick_down(min(lvl, max(rivals) + TICK)) if rivals else lvl
+            if ask_s is not None:
+                px = min(px, bots.tick_down(ask_s - TICK))  # rest, never take
+            if px < 0.01 or px in used:
+                continue
+            used.add(px)
+            q = int(cost / len(DUMP_OFFSETS) / px)
+            if q >= MIN_QTY:
+                out.append((i, px, q))
+        return out
+
+    def dump_plan(self, now, cash, used):
+        """{ex: [want-spec]} for the dump catcher (afternoon D-A), with its queue reads, news guard and per-side reserve fit."""
+        if not self.controls.on("dump"):
+            return {}
+        st = self.controls.state("dump")
+        tier_a = self.fat_tiers()
+        pilot = self.dump_pilot_sides(now) if st == "pilot" else None
+        cands = []
+        for b in self.bots:
+            if b.kind != "market":
+                continue
+            r = self.ref(b.ex)
+            if r is not None:
+                self.dump_ref[b.ex] = r                     # the pre-dump reference for the next loop's fills
+            for side, fs, rs in self.dump_eligible(b.ex):
+                if pilot is None or (b.ex, side) in pilot:
+                    cands.append((b.ex, side, fs, rs))
+        stale = sorted({ex for ex, _, _, _ in cands if now - (self.dump_book.get(ex) or (0,))[0] > DUMP_QUEUE_S},
+                       key=lambda ex: (self.dump_book.get(ex) or (0,))[0])
+        for ex in stale[:DUMP_BOOK_READS]:
+            if not api.spare_reads():
+                break
+            try:
+                bids, asks = api.orderbook(ex, depth=50)
+            except Exception as err:
+                self.event("ERR", f"dump queue read {self.name(ex)}: {str(err)[:80]}")
+                break
+            mine = collections.Counter()                    # I4: our own resting orders are not the queue
+            for o in self.open:
+                if o["ex"] == ex:
+                    k, p = self.yes_quote(o["side"], o["action"], o["price"])
+                    mine[("b" if k == "bid" else "a", round(p, 3))] += o["qty"]
+            def strip(rows, k):
+                out = []
+                for p, q in rows:
+                    cut = min(q, mine[(k, round(p, 3))])
+                    mine[(k, round(p, 3))] -= cut
+                    if q - cut > QTY_TOL:
+                        out.append((p, q - cut))
+                return out
+            self.dump_book[ex] = (now, strip(bids, "b"), strip(asks, "a"))
+        # news guard: fair_side down > 5c within 10 min pulls that side's levels for 30 min
+        for ex in {c[0] for c in cands}:
+            h = [x for x in self.fair_hist.get(ex, []) if x[0] >= now - FAT_NEWS_WINDOW_S]
+            f = self.fair.get(ex)
+            if f is None:
+                continue
+            h.append((now, f))
+            self.fair_hist[ex] = h
+            for side in ("yes", "no"):
+                cur = f if side == "yes" else 1 - f
+                top = max((v if side == "yes" else 1 - v) for _, v in h)
+                if top - cur > DUMP_NEWS_DROP:
+                    if self.dump_block.get((ex, side), 0) < now:
+                        self.event("NEWS", f"{self.name(ex)} {side.upper()} fair fell {top - cur:.2f} in 10 min: dump levels pulled 30 min")
+                    self.dump_block[(ex, side)] = now + FAT_NEWS_HOLD_S
+        funded = max(0.0, min(float(OPPORTUNITY_RESERVE), cash - CASH_RESERVE - used["committed"]))
+        recent_fill = {(f["ex"], f["side"]) for f in self.fills_since(now - DUMP_REARM_S) if f["layer"] == "dump"}
+        resting = {}
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"])
+            if rec and rec.get("layer") == "dump":
+                resting.setdefault((o["ex"], o["side"]), set()).add(round(o["price"], 3))
+        plan = {}
+        for ex, side, fs, rs in cands:
+            key = (ex, side)
+            if self.dump_block.get(key, 0) > now or self.breaker.get(("dump", self.pol(ex, side)), 0) > now or self.ex.is_frozen(ex):
+                continue
+            fat_worst = sum(x["qty"] * x["px"] for x in (self.fat_now.get(ex) or []) if x["side"] == side)
+            cost = min(DUMP_COST["A" if ex in tier_a else "B"], funded - fat_worst)
+            if cost < DUMP_MIN_SIDE_COST:
+                continue
+            for i, px, q in self.dump_levels(ex, side, fs, rs, cost):
+                if key in recent_fill and round(px, 3) not in resting.get(key, set()):
+                    continue                                # re-arm a filled side only after 10 min
+                plan.setdefault(ex, []).append(dict(side=side, px=px, qty=q, sub=f"dump:{ex}:{side}:{i}", level=i))
+        return plan
+
+    def track_dumps(self, now):
+        """Dump fills become tranches: rebound sell at max(pre-dump SIG ref_side - 1 tick, fill + 5c), the A2 exception
+        for this layer; after 24 h an unsold tranche goes to inventory (normal A2 rules)."""
+        tr, self.dump_view = self.ledger.tranches, {}
+        for ex, books in list(self.ledger.subbooks.items()):
+            for sub, q in list(books.items()):
+                if not sub.startswith("dump:") or abs(q) < 1 or (sub in tr and tr[sub].get("state") == "open"):
+                    continue
+                side = "yes" if q > 0 else "no"
+                r = self.dump_ref.get(ex, self.ref(ex))
+                tr[sub] = dict(ex=ex, side=side, kind="dump", pre_ref_side=None if r is None else (r if side == "yes" else 1 - r),
+                               t=stamp(), ts=now, state="open")
+                self.event("DUMP", f"{self.name(ex)}: dump fill -> tranche {sub} {side.upper()} {abs(q):,.0f}, pre-dump ref "
+                                   f"{tr[sub]['pre_ref_side'] if tr[sub]['pre_ref_side'] is None else round(tr[sub]['pre_ref_side'], 3)}")
+        for sub, t in tr.items():
+            if t.get("kind") != "dump" or t["state"] != "open":
+                continue
+            ex = t["ex"]
+            q = self.ledger.subbooks.get(ex, {}).get(sub, 0)
+            if abs(q) < 1:
+                t["state"] = "closed"
+                self.event("DUMP", f"{self.name(ex)}: tranche {sub} sold (round trip done)")
+                continue
+            if now - t.get("ts", now) > DUMP_HOLD_S:
+                self.ledger.move_sub(ex, sub, "inventory")
+                t["state"] = "aged"
+                self.event("DUMP", f"{self.name(ex)}: rebound for {sub} not filled in 24 h: {abs(q):,.0f} shares to inventory")
+                continue
+            avg = self.ledger.tranche_avg(sub, "dump")
+            if avg is None:
+                continue
+            pre = t.get("pre_ref_side")
+            rebound = bots.tick_up(max(avg + DUMP_REBOUND_MIN, (pre - TICK) if pre is not None else 0.0))
+            self.dump_view.setdefault(ex, []).append(dict(sub=sub, rebound=min(rebound, 0.99), avg=avg))
+
+    def dump_fill_events(self, fills):
+        for f in fills:
+            if f["layer"] != "dump" or f["action"] != "buy":
+                continue
+            fv = self.side_fair(f["ex"], f["side"])
+            msg = (f"DUMP FILL {self.name(f['ex'])}: bought {f['qty']:,.0f} {f['side'].upper()} at {f['price']:.3f}"
+                   + ("" if fv is None else f" (fair {fv:.3f}, edge {(fv - f['price']) * f['qty']:+,.0f} at fair)"))
+            self.event("DUMP", msg)
+            self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+            self.night.line(msg)
+        now = time.time()
+        recent = [f for f in self.fills_since(now - BREAKER_WINDOW_S) if f["layer"] == "dump" and f["action"] == "buy"]
+        for direction in ("D", "R"):
+            fs = [f for f in recent if self.pol(f["ex"], f["side"]) == direction]
+            moved = [f["fair"] - self.side_fair(f["ex"], f["side"]) for f in fs
+                     if f.get("fair") is not None and self.side_fair(f["ex"], f["side"]) is not None]
+            if len({f["ex"] for f in fs}) >= DUMP_BREAKER_MARKETS and moved and sum(moved) / len(moved) >= DUMP_BREAKER_FAIR \
+                    and self.breaker.get(("dump", direction), 0) < now:
+                self.breaker[("dump", direction)] = now + BREAKER_PAUSE_S
+                n = 0
+                for o in self.open:
+                    rec = self.ledger.orders.get(o["id"])
+                    if rec and rec["layer"] == "dump" and self.pol(o["ex"], o["side"]) == direction:
+                        n += bool(self.ex.cancel(o, reason="dump breaker"))
+                msg = (f"DUMP BREAKER pro-{direction}: dump fills in {len({f['ex'] for f in fs})} markets within 10 min and Polymarket "
+                       f"moved {sum(moved) / len(moved) * 100:+.1f}c against them (news): {n} {direction}-side dump bids pulled 30 min")
+                self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+                self.event("BREAKER", msg)
+                self.night.line(msg)
+
+    # ------------------------------------------------------------------------------------------------ I4 self-cross guard
+    @staticmethod
+    def yes_quote(side, action, px):
+        """An order in YES terms: ('bid' | 'ask', YES price). A NO buy at p is a YES ask at 1 - p."""
+        return ("bid" if (side == "yes") == (action == "buy") else "ask", px if side == "yes" else round(1 - px, 3))
+
+    def self_cross(self, w, own):
+        """The first of our own orders `w` would trade against (I4: no self-trades), or None."""
+        k, p = self.yes_quote(w["side"], w.get("action", "buy"), w["px"])
+        for o in own:
+            k2, p2 = self.yes_quote(o["side"], o["action"], o["price"])
+            if k != k2 and ((k == "bid" and p >= p2 - 1e-9) or (k == "ask" and p <= p2 + 1e-9)):
+                return o
+        return None
+
+    def no_self_cross(self, b, places, cancels):
+        """I4 for every placement: drop a want that would trade against one of our own resting / queued orders. When an
+        exit (reducing want) meets one of our own entries, the entry is cancelled so the exit goes next loop."""
+        going = {o.get("id") for o in cancels if o.get("id")} | set(self.ex.cancelling)
+        own = [o for o in self.open if o["ex"] == b.ex and o["id"] not in going] + \
+              [p for p in self.ex.pending() if p["ex"] == b.ex]
+        if not own:
+            return places
+        out = []
+        for w in places:
+            o = self.self_cross(w, own)
+            if o is None:
+                out.append(w)
+                continue
+            rec = self.ledger.orders.get(o.get("id") or "") or {}
+            if (w["layer"] in self.REDUCING or w.get("reduce")) and o.get("id") and rec and rec.get("bot") not in self.position_names \
+                    and not (rec.get("layer") in self.REDUCING) and not jx.reduces(o["side"], o["action"], self.book.get(b.ex, {}).get("pos", 0)):
+                self.ex.cancel(o, reason="self-cross: an exit needs this price", front=True)
+            k = (b.ex, w["side"], w["layer"])
+            if time.time() - self.cross_log.get(k, 0) > 600:
+                self.cross_log[k] = time.time()
+                self.event("I4", f"{self.name(b.ex)}: {w['layer']} {w.get('action', 'buy')} {w['side'].upper()} @ {w['px']:.3f} not sent: "
+                                 f"it would trade with our own {o['action']} {o['side'].upper()} @ {o['price']:.3f}")
+        return out
+
     CATCHERS = ("fatfinger", "dump")                       # resting catch levels whose fills are paid from the reserve
 
     def cash_short_check(self, raw, catch_open, now):
@@ -1547,7 +1837,7 @@ class Engine:
     def reserve_ok(self, ex, w):
         """Day 2 §3.2: only these may spend the opportunity reserve (down to the floor): fat-finger levels, sniper takes on
         a new market (< 30 min old), and takes >= 8c through fair."""
-        if w.get("layer") == "fatfinger":
+        if w.get("layer") in ("fatfinger", "dump"):
             return True
         if w.get("layer") != "take":
             return False
@@ -2423,6 +2713,7 @@ class Engine:
               "pairs": ("Pair sets", "Buys every side of a race when the set costs less than it pays"),
               "sniper": ("Sniper", "Buys big gaps below fair, and new markets"),
               "fatfinger": ("Fat-finger catcher", "Cheap bids that catch wrong-side panic orders"),
+              "dump": ("Dump catcher", "Bids 7-20c under fair on favourites; sells the rebound for a round trip"),
               "leaders": ("Leaderboard logger", "Records the top accounts every 10 minutes")}
 
     @staticmethod
@@ -2431,7 +2722,7 @@ class Engine:
         if sub == "manual":
             return "position"
         for pre, layer in (("recycle:", "recycler"), ("tranche:", "ladder"), ("pairset:", "pairs"), ("fatfinger", "fatfinger"),
-                           ("release", "release")):
+                           ("dump:", "dump"), ("release", "release")):
             if sub.startswith(pre):
                 return layer
         return {"mm": "mm", "sniper": "sniper", "inventory": "inventory"}.get(sub, "inventory")
@@ -2519,7 +2810,7 @@ class Engine:
         new = [r for r in rows if not r["partial"] and r["date"] not in have]
         if not new or api.DRY_RUN:
             return
-        layers = ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger"]
+        layers = ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump"]
         head = ["date", "account_sig", "account_fair", "cash", "holdings_sig", "realized", "unrealized_change", "pnl_sig", "pnl_fair"]
         head += [f"{l}_{k}" for l in layers for k in ("realized", "unrealized")]
         with open(path, "a", newline="") as fh:
@@ -2606,9 +2897,9 @@ class Engine:
                 bk[0] += share * mark
                 bk[1] += share * (fv if fv is not None else mark)
         labels = {"manual": "AK / RI manual positions", "mm": "Market-maker inventory", "ladder": "Ladder tranches", "pairs": "Pair sets",
-                  "sniper": "Sniper / takes", "fatfinger": "Fat-finger catches", "release": "Being released",
+                  "sniper": "Sniper / takes", "fatfinger": "Fat-finger catches", "dump": "Dump catches (rebound pending)", "release": "Being released",
                   "inventory": "Older inventory (recycler)"}
-        order = ["manual", "mm", "ladder", "pairs", "sniper", "fatfinger", "release", "inventory"]
+        order = ["manual", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "release", "inventory"]
         out = [dict(key=k, label=labels[k], sig=round(buckets.get(k, [0, 0])[0], 2), fair=round(buckets.get(k, [0, 0])[1], 2)) for k in order]
         out.append(dict(key="cash", label="Cash", sig=money["cash"], fair=money["cash"]))
         committed = self.committed()
@@ -2662,7 +2953,7 @@ class Engine:
 
     def release_ok(self, ex, side, owner, ctf):
         """Would the release layer sell this holding now? (§3.3; the layer itself decides; this is the dashboard badge)."""
-        return ctf is not None and 0 <= ctf <= self.release_max_cost() and self.sub_layer(owner) not in ("pairs", "position", "fatfinger")
+        return ctf is not None and 0 <= ctf <= self.release_max_cost() and self.sub_layer(owner) not in ("pairs", "position", "fatfinger", "dump")
 
     def release_max_cost(self):
         d = time.strftime("%m-%d")
@@ -2692,7 +2983,7 @@ class Engine:
             last[self.strategy_of(f["bot"], f["layer"])] = f"{f['t'][11:16]} " + self.fill_sentence(f).split(" ", 1)[1] \
                 if " " in self.fill_sentence(f) else ""
         out = []
-        for l in ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "leaders"]:
+        for l in ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "leaders"]:
             label, what = self.LABELS[l]
             v = self.controls.layer(l)
             t_, a_ = pt.get(l, {}), pa.get(l, {})

@@ -259,14 +259,14 @@ PAGE = r"""<!doctype html>
 <style>
 :root{color-scheme:light;--bg:#f4f4f1;--card:#fff;--ink:#0b0b0b;--ink2:#52514e;--mute:#6b6a65;--line:#e4e3dc;--axis:#c3c2b7;--acc:#2a78d6;
 --good:#006300;--bad:#b42323;--warn:#8a5300;--chip:#efeee9;--neutral:#aaa8a0;--warnbg:#fff5dd;--badbg:#fdeceb;--shadow:rgba(0,0,0,.14);
---s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#4a3aa7;--s8:#e34948;
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#4a3aa7;--s8:#e34948;--s9:#0e8fa3;
 --st-good:#0ca30c;--st-warn:#fab219;--st-crit:#d03b3b}
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){color-scheme:dark;--bg:#0d0d0d;--card:#1a1a19;--ink:#fff;--ink2:#c3c2b7;--mute:#9a988f;
 --line:#2c2c2a;--axis:#4a4a45;--acc:#3987e5;--good:#3cc23c;--bad:#f07272;--warn:#f5b83d;--chip:#262624;--neutral:#62615b;--warnbg:#2a2210;--badbg:#2e1616;
---shadow:rgba(0,0,0,.5);--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767}}
+--shadow:rgba(0,0,0,.5);--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--s9:#2bb3c8}}
 :root[data-theme=dark]{color-scheme:dark;--bg:#0d0d0d;--card:#1a1a19;--ink:#fff;--ink2:#c3c2b7;--mute:#9a988f;
 --line:#2c2c2a;--axis:#4a4a45;--acc:#3987e5;--good:#3cc23c;--bad:#f07272;--warn:#f5b83d;--chip:#262624;--neutral:#62615b;--warnbg:#2a2210;--badbg:#2e1616;
---shadow:rgba(0,0,0,.5);--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767}
+--shadow:rgba(0,0,0,.5);--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;--s9:#2bb3c8}
 *{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line);padding:8px 16px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
@@ -346,11 +346,11 @@ try { S = JSON.parse(document.getElementById("data").textContent || "{}") || {};
 const ui = {tab: "overview", shown: null, cache: {}, basis: "sig", hsort: {k: "value_sig", dir: -1}, hq: "", hl: "", hr: false, hall: false, al: "", aq: "", aall: false,
   page: 0, q: "", layer: "", haspos: false, mis: "", ev: "", evq: "", open: null, detail: null, updated: Date.now(), connected: false, errors: [], theme: "auto"};
 const TABS = {overview: "Overview", leaders: "Leaders", controls: "Controls"};
-const LAYERS = ["recycler", "mm", "ladder", "pairs", "sniper", "position", "leaders"];          // controls (engine layer names)
-const ORDER = ["position", "mm", "ladder", "pairs", "sniper", "fatfinger", "recycler", "release"];  // colour slots 1..8, fixed per layer
-const SLOT = {position: 1, manual: 1, mm: 2, ladder: 3, pairs: 4, sniper: 5, fatfinger: 6, recycler: 7, inventory: 7, release: 8};
+const LAYERS = ["recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "position", "leaders"];   // controls
+const ORDER = ["position", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "recycler", "release"];  // colour slots, fixed per layer
+const SLOT = {position: 1, manual: 1, mm: 2, ladder: 3, pairs: 4, sniper: 5, fatfinger: 6, recycler: 7, inventory: 7, release: 8, dump: 9};
 const NAMES = {position: "Position exits (AK, RI)", manual: "AK / RI manual positions", recycler: "Recycler", inventory: "Older inventory (recycler)",
-  release: "Capital release", mm: "Market maker", ladder: "Deep ladders", pairs: "Pair sets", sniper: "Sniper", fatfinger: "Fat-finger catcher",
+  release: "Capital release", mm: "Market maker", ladder: "Deep ladders", pairs: "Pair sets", sniper: "Sniper", fatfinger: "Fat-finger catcher", dump: "Dump catcher",
   leaders: "Leaderboard logger", cash: "Cash", "old engine": "Old engine"};
 const FILTERS = new Set(["hq", "b-hlopts", "hr", "b-alopts", "aq", "b-evkinds", "evq", "q", "lf", "hp", "mis"]);
 const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];

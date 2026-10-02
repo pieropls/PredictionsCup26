@@ -118,6 +118,7 @@ LAYER_CAPS = {
     "sniper": {"per_market": (1_000, 3_000, 3_000), "per_day": (10_000, 10_000, 10_000)},
     "fatfinger": {"resting": (8_000, 300_000, 400_000), "filled": (30_000, 30_000, 40_000)},  # resting = policy (no cash lock);
                                                                                                # afternoon D-B: 40k -> 300k
+    "dump": {"resting": (120_000, 150_000, 200_000)},          # afternoon D-A: resting cost (policy); fills bounded by the reserve
 }
 # fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
 FAT_LEVELS = [0.12, 0.08, 0.05]
@@ -133,6 +134,19 @@ INTEL_DAILY_HOUR = 7                      # docs/daily + docs/leaders + tier A r
 HEADLINE_RACES = ["U.S. Senate", "U.S. House", "Rhode Island Senate", "Oklahoma Senate", "Massachusetts Governor",
                   "New Hampshire Senate", "Minnesota Senate"]   # always fat-finger tier A (morning_plan 1.4)
 FAT_BOOK_READS = 3              # queue reads (order books) per loop
+# dump catcher (afternoon D-A): big players dumping size 7-20c under fair on favourites; buy it, sell the rebound
+DUMP_MIN_FAIR, DUMP_MIN_REF = 0.90, 0.80   # sides with Polymarket fair_side >= 0.90 and SIG 30-min ref_side >= 0.80
+DUMP_OFFSETS = [0.07, 0.12, 0.20]          # levels at fair_side - these, each also <= ref_side - DUMP_REF_GAP
+DUMP_REF_GAP = 0.04
+DUMP_COST = {"A": 8_000, "B": 2_000}       # SIG cost of a full fill of all three levels, per side (split evenly)
+DUMP_MIN_SIDE_COST = 300                   # a side whose reserve room is below this gets no levels
+DUMP_TTL_S, DUMP_QUEUE_S, DUMP_BOOK_READS = 6 * 3600, 1800, 2
+DUMP_REBOUND_MIN = 0.05                    # rebound sell at max(pre-dump ref_side - 1 tick, fill + 5c): A2 exception
+DUMP_HOLD_S = 24 * 3600                    # an unsold rebound tranche goes to inventory (normal A2 rules) after this
+DUMP_NEWS_DROP = 0.05                      # Polymarket fair_side drop > 5c in 10 min -> that side's levels pulled 30 min
+DUMP_BREAKER_MARKETS, DUMP_BREAKER_FAIR = 3, 0.01   # >= 3 markets filled in 10 min, same political side, PM >= 1c against
+DUMP_PILOT_SIDES, DUMP_PILOT_S = 15, 4 * 3600
+DUMP_REARM_S = 600
 KAPPA_FROM_OCT30 = 0.03         # D3: capital discount from Oct 30 (election-night cash)
 LOSS_STOP = 2_000               # D5: bot-owned P&L at fair, rolling 24 h
 OPPORTUNITY_RESERVE = 25_000    # afternoon §2 (was 10k): on top of the floor; dump + fat-finger fills, snipes, >= 8c takes

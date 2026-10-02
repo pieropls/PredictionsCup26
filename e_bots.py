@@ -9,7 +9,7 @@ Prices: SIG books are YES-normalized; an order's price is in its own side (a NO 
 """
 import math
 
-from a_config import (TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, ROC_MIN_TIGHT, RECYCLE_BID_EDGE,
+from a_config import (TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, ROC_MIN_TIGHT, DUMP_TTL_S, RECYCLE_BID_EDGE,
                       RECYCLE_REST_EDGE, RECYCLE_TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_EDGE, MM_U_MULT, MM_NOTIONAL, MM_TTL_S,
                       LADDER_LEVELS, LADDER_TTL_S, TAKE_EDGE, TAKE_U_MULT, TAKE_NOTIONAL, TAKE_TTL_S, FAT_TTL_S)
 
@@ -238,9 +238,11 @@ class MarketBot:
             room[side] -= q * px
             out.append(want(side, "buy", px, q, lo, hi, qtol, layer, sub=sub, ttl=ttl, roc=round(r, 4)))
 
-        def reduce_buy(have, sell_px, qty, layer, sub, ttl, band=0.01):
-            """Close `qty` of a holding on `have` by buying the complement at 1 - sell_px (never below fair - kappa)."""
-            sell_px = max(sell_px, sf[have] - k)
+        def reduce_buy(have, sell_px, qty, layer, sub, ttl, band=0.01, a2=True):
+            """Close `qty` of a holding on `have` by buying the complement at 1 - sell_px (never below fair - kappa, unless
+            a2=False: the dump catcher's rebound, the documented A2 exception)."""
+            if a2:
+                sell_px = max(sell_px, sf[have] - k)
             px = tick_down(1 - sell_px)
             if qty >= MIN_QTY and MB_MIN_PX <= px <= MB_MAX_PX:
                 close = "no" if have == "yes" else "yes"
@@ -297,6 +299,10 @@ class MarketBot:
                     sub = (s.get("ladder_ids") or {}).get((side, i))
                     add_entry(side, px, notional, "ladder", px - off / 2, min(px + off / 2, sf[side] - 0.02 * sp),
                               LADDER_TTL_S, sub=sub, qtol=0.5)
+        for t in s.get("dump_tranches", []):                        # afternoon D-A: sell the rebound (A2 exception)
+            q = subs.get(t["sub"], 0)
+            if abs(q) >= MIN_QTY:
+                reduce_buy("yes" if q > 0 else "no", t["rebound"], abs(q), "dumpexit", t["sub"], DUMP_TTL_S, a2=False)
         for t in s.get("tranches", []):                             # rebounds run even when entries are paused
             q = subs.get(t["sub"], 0)
             if abs(q) < MIN_QTY or t.get("state") == "news":
@@ -316,6 +322,8 @@ class MarketBot:
                     add_entry(side, px, s.get("take_notional", TAKE_NOTIONAL), "take", px - 0.01, px, TAKE_TTL_S, sub="sniper")
 
         out += fat
+        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"] - 0.015, x["px"], QTY_TOL, "dump", sub=x["sub"], ttl=DUMP_TTL_S)
+                for x in (s.get("dump") or [])]                 # afternoon D-A: own caps and reserve fit (engine)
         self.orders = out
         layers = sorted({w["layer"] for w in out})
         net = sum(subs.values())

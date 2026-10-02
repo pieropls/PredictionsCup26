@@ -1403,6 +1403,148 @@ class FatFingerTests(EngineCase):
             self.assertGreater(rest, eng.cap("fatfinger", "resting") - 2_400, "cap is used before sides go uncovered")
 
 
+class DumpTests(EngineCase):
+    """Afternoon D-A: bids 7-20c under fair on favourites, a rebound sell for the round trip (A2 exception), guards."""
+
+    def rig(self, state="full", cash_above_floor=40_000):
+        fresh_data(layers=dict(position=dict(state="full"), dump=dict(state=state)))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + cash_above_floor)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None
+                and eng.fair[b.ex] >= 0.93]
+        self.assertTrue(favs, "fixture has favourites")
+        for ex in favs:
+            seed_ref(eng, ex, mid=eng.fair[ex] - 0.01)
+        return fake, eng, favs
+
+    def settle(self, eng, fake, favs, n=4):
+        for _ in range(n):
+            eng.ex.capacity = 6000.0
+            loop(eng, fake)
+            for ex in favs:
+                seed_ref(eng, ex, mid=eng.fair[ex] - 0.01)
+
+    def dump_orders(self, eng, fake, ex=None):
+        return [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "dump"
+                and (ex is None or o["ex"] == ex)]
+
+    def test_levels_ref_cap_queue_and_reserve_fit(self):
+        fake, eng, favs = self.rig()
+        self.settle(eng, fake, favs)
+        ex = favs[0]
+        mine = sorted(self.dump_orders(eng, fake, ex), key=lambda o: -o["price"])
+        self.assertEqual(len(mine), 3, mine)
+        fs, rs = eng.fair[ex], eng.ref(ex)
+        for o, off in zip(mine, a_config.DUMP_OFFSETS):
+            self.assertEqual(o["side"], "yes")
+            self.assertLessEqual(o["price"], min(fs - off, rs - 0.04) + 1e-9)
+        cost = sum(o["qty"] * o["price"] for o in mine)
+        tier = "A" if ex in eng.fat_tiers() else "B"
+        self.assertLessEqual(cost, a_config.DUMP_COST[tier] + 1e-6, "a full fill of all three levels fits the side's budget")
+        # queue: a rival at 0.86 between level 1 and 2 -> level 1 goes one tick above it (never above the level)
+        lv1 = bots.tick_down(min(fs - 0.07, rs - 0.04))
+        rival = round(lv1 - 0.02, 3)
+        eng.dump_book[ex] = (time.time(), [(rival, 500.0)], [])
+        lv = eng.dump_levels(ex, "yes", fs, rs, 8_000)
+        self.assertEqual(lv[0][1], round(rival + 0.005, 3))
+        # reserve fit: with 600 of reserve room nothing on this side; < DUMP_MIN_SIDE_COST
+        fake2, eng2, favs2 = self.rig(cash_above_floor=200)
+        self.settle(eng2, fake2, favs2, 2)
+        self.assertEqual(self.dump_orders(eng2, fake2), [])
+
+    def test_eligibility(self):
+        fake, eng, favs = self.rig()
+        ex = favs[0]
+        seed_ref(eng, ex, mid=0.75)                       # SIG already trades below 0.80: no levels there
+        self.assertEqual(eng.dump_eligible(ex), [])
+        self.assertEqual(eng.dump_eligible(AK), [], "never on manual markets")
+        low = next(b.ex for b in eng.bots if b.kind == "market" and eng.fair.get(b.ex) is not None and 0.2 < eng.fair[b.ex] < 0.8)
+        seed_ref(eng, low)
+        self.assertEqual(eng.dump_eligible(low), [], "no side with fair >= 0.90")
+
+    def test_fill_rebound_below_fair_then_inventory_after_24h(self):
+        fake, eng, favs = self.rig()
+        self.settle(eng, fake, favs)
+        ex = favs[0]
+        top = max(self.dump_orders(eng, fake, ex), key=lambda o: o["price"])
+        sub = eng.ledger.orders[top["id"]]["sub"]
+        pre = eng.ref(ex)
+        fake.fill(top["id"], top["qty"])                  # a big player dumps into our top level
+        self.settle(eng, fake, favs, 3)
+        t = eng.ledger.tranches[sub]
+        self.assertEqual((t["kind"], t["state"]), ("dump", "open"))
+        self.assertAlmostEqual(t["pre_ref_side"], pre, places=3)
+        rb = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "dumpexit"]
+        self.assertEqual(len(rb), 1, rb)
+        sell_px = round(1 - rb[0]["price"], 3)            # a NO buy at p sells YES at 1 - p
+        self.assertEqual(rb[0]["side"], "no")
+        self.assertAlmostEqual(sell_px, bots.tick_up(max(pre - 0.005, top["price"] + 0.05)), places=3)
+        self.assertLess(sell_px, eng.fair[ex] - eng.kappa()[0] - 1e-9, "the A2 exception: below fair - kappa")
+        self.assertTrue(any(e["kind"] == "DUMP" and "DUMP FILL" in e["text"] for e in eng.events))
+        t["ts"] -= 25 * 3600                              # a day later, still unsold
+        self.settle(eng, fake, favs, 2)
+        self.assertEqual(t["state"], "aged")
+        self.assertEqual(eng.ledger.sub(ex, sub), 0)
+        self.assertGreaterEqual(abs(eng.ledger.sub(ex, "inventory")), top["qty"] - 1)
+
+    def test_news_guard_and_breaker(self):
+        fake, eng, favs = self.rig()
+        self.settle(eng, fake, favs)
+        ex = favs[0]
+        self.assertTrue(self.dump_orders(eng, fake, ex))
+        FAIR[ex] = eng.fair[ex] - 0.06                    # Polymarket drops 6c on this favourite
+        try:
+            self.settle(eng, fake, favs, 3)
+            self.assertGreater(eng.dump_block.get((ex, "yes"), 0), time.time())
+            self.assertEqual(self.dump_orders(eng, fake, ex), [])
+        finally:
+            FAIR.pop(ex, None)
+        # breaker: fills in >= 3 markets on one political side within 10 min AND Polymarket >= 1c against -> pulled
+        fake2, eng2, favs2 = self.rig()
+        self.settle(eng2, fake2, favs2)
+        by_dir = {}
+        for o in self.dump_orders(eng2, fake2):
+            by_dir.setdefault(eng2.pol(o["ex"], o["side"]), {}).setdefault(o["ex"], o)
+        d, picks = max(by_dir.items(), key=lambda kv: len(kv[1]))
+        if len(picks) < 3:
+            self.skipTest("fixture lacks 3 same-side favourites")
+        for o in list(picks.values())[:3]:
+            fake2.fill(o["id"], 50)
+        loop(eng2, fake2)
+        self.assertLess(eng2.breaker.get(("dump", d), 0), time.time(), "no Polymarket move: dump flow, not news")
+        for f in eng2.ledger.fills:
+            if f["layer"] == "dump" and f.get("fair") is not None:
+                f["fair"] += 0.02                         # Polymarket has since moved 2c against those fills
+        eng2.dump_fill_events([])
+        self.assertGreater(eng2.breaker.get(("dump", d), 0), time.time())
+
+    def test_pilot_sides_and_gate(self):
+        fake, eng, favs = self.rig(state="pilot")
+        sides = eng.dump_pilot_sides(time.time())
+        self.assertLessEqual(len(sides), a_config.DUMP_PILOT_SIDES)
+        self.assertTrue(all(sd in [s_ for s_, _, _ in eng.dump_eligible(ex)] for ex, sd in sides))
+        c = eng.controls
+        c.layer("dump").update(state="pilot", since=time.time() - 4 * 3600 - 60)
+        eng.controller(time.time())
+        self.assertEqual(c.state("dump"), "full")
+
+    def test_self_cross_guard(self):
+        fake, eng, favs = self.rig()
+        self.settle(eng, fake, favs)
+        ex = favs[0]
+        top = max(self.dump_orders(eng, fake, ex), key=lambda o: o["price"])     # our YES bid
+        b = eng.owner[ex]
+        cross = dict(side="no", action="buy", px=round(1 - top["price"], 3), qty=100, layer="mm")   # = a YES ask at our bid
+        self.assertIsNotNone(eng.self_cross(cross, [dict(top)]))
+        self.assertEqual(eng.no_self_cross(b, [cross], []), [])
+        ok = dict(cross, px=round(1 - top["price"] - 0.02, 3))                   # a YES ask 2c above our bid
+        self.assertEqual(eng.no_self_cross(b, [ok], []), [ok])
+
+
 class IntelTests(EngineCase):
     def test_tape_sweep_becomes_a_big_event_with_missed_value(self):
         fresh_data(layers=dict(position=dict(state="full"), leaders=dict(state="full")))
@@ -1542,7 +1684,7 @@ class DashV3PayloadTests(EngineCase):
         self.assertEqual([b["key"] for b in cap["buckets"]][-1], "cash")
         self.assertTrue(all(b["sig"] >= 0 for b in cap["buckets"]))
         self.assertEqual([r["key"] for r in s["strategies"]],
-                         ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "leaders"])
+                         ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "leaders"])
         self.assertTrue(all(h["side"] in ("yes", "no") and h["shares"] > 0 for h in s["holdings"]))
         mm_row = next(r for r in s["strategies"] if r["key"] == "mm")
         self.assertEqual(mm_row["fills_today"], 1)

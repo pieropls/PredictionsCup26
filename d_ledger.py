@@ -126,9 +126,9 @@ class Ledger:
                 sub = f"tranche:{ex}{side[0]}{level}-{n}"
             return sub
 
-    def tranche_avg(self, sub):
-        """Average fill price of the ladder fills that built a tranche (orders placed into that sub-book)."""
-        ids = {i for i, o in self.orders.items() if o.get("sub") == sub and o.get("layer") == "ladder"}
+    def tranche_avg(self, sub, layer="ladder"):
+        """Average fill price of the entry fills (ladder, or dump) that built a tranche (orders placed into that sub-book)."""
+        ids = {i for i, o in self.orders.items() if o.get("sub") == sub and o.get("layer") == layer}
         q = sum(f["qty"] for f in self.fills if f["order"] in ids)
         return sum(f["qty"] * f["price"] for f in self.fills if f["order"] in ids) / q if q else None
 
