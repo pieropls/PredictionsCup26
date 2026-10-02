@@ -1587,6 +1587,16 @@ class IntelTests(EngineCase):
         n = fake.tape_reads
         eng.intel_step(time.time())                       # nothing changed: no reads
         self.assertEqual(fake.tape_reads, n)
+        # dump tracker (afternoon §4.1): the event is followed for 2 h, then written with its price path
+        self.assertEqual(len(eng.dump_track), 1)
+        d = next(iter(eng.dump_track.values()))
+        self.assertEqual((d["side"], d["extreme"]), ("yes", 0.04))
+        self.assertTrue(d["path"])
+        d["t"] -= 2 * 3600 + 60
+        eng.intel_step(time.time())
+        self.assertEqual(eng.dump_track, {})
+        rows = [json.loads(l) for l in open(os.path.join(TMP, "intel", "dumps.jsonl"))]
+        self.assertEqual(rows[0]["market"], e["market"])
 
     def test_daily_report_and_leaders_study_from_local_files(self):
         fresh_data(layers=dict(position=dict(state="full"), leaders=dict(state="full")))

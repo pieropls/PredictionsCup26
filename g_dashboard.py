@@ -487,7 +487,11 @@ function money() {
   const fair = `<div class="card soft"><div class="lab" title="Value of everything at Polymarket prices: what we expect at settlement if Polymarket is right">Expected at settlement (Polymarket fair)</div>
      ${fa == null ? na("Not available yet.") : `<div class="v3">${num(fa)}</div><div class="sub">if Polymarket is right</div>
      <div class="sub"><b class="${cls(fd)}">${sgn(fd)}</b> vs SIG marks</div><div class="sub">${sgn(fa - start)} vs the ${num(start)} start</div>`}</div>`;
-  return `<div class="cards">${hero}${today}${total}${fair}</div>`;
+  const v = obj(m.velocity);
+  const vel = val(v.turnover_today) == null ? "" : `<div class="card"><div class="lab" title="Return on capital today = P&L at SIG today / average account value today; turnover = volume traded today / the same capital">Capital velocity today${info("The leaders make 20-40% a day by turning their capital over 3-12 times a day.")}</div>
+     <div class="v2 ${cls(v.roc_today)}">${val(v.roc_today) == null ? "–" : sgn(v.roc_today * 100, 2) + "%"}</div><div class="sub">return on capital today</div>
+     <div class="sub"><b>${num(v.turnover_today, 2)}x</b> turnover today</div><div class="sub mute">${num(v.volume_today)} traded on ${num(v.avg_capital)} average capital</div></div>`;
+  return `<div class="cards">${hero}${today}${total}${fair}${vel}</div>`;
 }
 
 function basis() {
@@ -639,6 +643,9 @@ function capital() {
       ft != null && ft < 0 ? `<span class="bad">cash is ${num(-ft)} short of floor + reserve + committed</span>` : "for new entries", "Cash − floor − reserve − committed. What the market maker, ladders and pairs may still spend."),
     tile("Free-cash target", tg == null ? "–" : `${num(fc)} <span class="mute" style="font-size:14px">of ${num(tg)}</span>`,
       (c.target_date ? `by ${esc(dday(c.target_date))}` : "") + (prog == null ? "" : `<div class="meter"><i style="width:${(prog * 100).toFixed(1)}%"></i></div>`), "Free cash (cash above the 5k floor) the release layer is working towards."),
+    ...(val(obj(obj(c.idle).no_exit).sig) == null ? [] : [(() => { const a = obj(c.idle.idle_3d), b = obj(c.idle.no_exit);
+      return tile("Capital idle", num(a.sig), `${num(a.n)} holdings &gt; 3 days with no exit order · <b>${num(b.sig)}</b> in ${num(b.n)} holdings with no exit order at all`,
+        "Holdings older than 3 days with no exit order resting (SIG marks). Also: every holding with no exit order, whatever its age."); })()]),
     tile("Released today", val(rel.sig) == null ? "–" : num(rel.sig), val(rel.sig) == null ? "not available yet" : `freed at ${pct(rel.avg_cost)} average cost`,
       "Cash the release layer freed today by selling where it is cheap, and what it gave up vs fair on average."),
   ].join("");
@@ -670,13 +677,14 @@ function strategies() {
   const tot = (g, k) => rows.reduce((a, r) => a + (val(obj(r[g])[k]) || 0), 0);
   const body = rows.map(r => `<tr><td class="wide">${tag(r.key)}<div class="mute" style="font-size:12px">${esc(r.what || "")}</div></td>
     <td>${chip(r.state, r.killed)}${r.killed ? `<div class="bad" style="font-size:12px;white-space:normal">${esc(obj(r.killed).reason || "")}</div>` : ""}</td>
-    ${three(r.today)}${three(r.total)}<td class="n">${num(r.fills_today)}</td><td class="n">${num(r.capital_used)}</td><td class="n">${num(r.resting)}</td>
+    ${three(r.today)}${three(r.total)}<td class="n">${num(r.fills_today)}</td><td class="n">${num(r.capital_used)}</td>
+    <td class="n" title="Volume today ${esc(num(r.volume_today))} SIG">${val(r.turnover_today) == null ? "–" : num(r.turnover_today, 1) + "x"}</td><td class="n">${num(r.resting)}</td>
     <td class="wide">${esc(r.last_action || "–")}</td></tr>`).join("");
   const foot = `<tr><td>All strategies</td><td></td>${["today", "total"].map(g => ["realized", "unrealized_sig", "unrealized_fair"].map(k => { const v = tot(g, k); return `<td class="n ${cls(v)}">${sgn(v)}</td>`; }).join("")).join("")}
-    <td class="n">${num(rows.reduce((a, r) => a + (val(r.fills_today) || 0), 0))}</td><td class="n">${num(rows.reduce((a, r) => a + (val(r.capital_used) || 0), 0))}</td><td class="n">${num(rows.reduce((a, r) => a + (val(r.resting) || 0), 0))}</td><td></td></tr>`;
+    <td class="n">${num(rows.reduce((a, r) => a + (val(r.fills_today) || 0), 0))}</td><td class="n">${num(rows.reduce((a, r) => a + (val(r.capital_used) || 0), 0))}</td><td></td><td class="n">${num(rows.reduce((a, r) => a + (val(r.resting) || 0), 0))}</td><td></td></tr>`;
   const h3 = `<th class="n" title="Closed trades: cash made or lost">Realized</th><th class="n" title="Open positions at SIG marks">Unrealized (SIG)</th><th class="n" title="Open positions at Polymarket fair">Unrealized (fair)</th>`;
   return `<div class="wrap"><table><thead><tr><th rowspan="2">Strategy</th><th rowspan="2">State</th><th colspan="3" class="grp">Today</th><th colspan="3" class="grp">Since start</th>
-    <th rowspan="2" class="n">Fills today</th><th rowspan="2" class="n" title="Capital in this strategy's positions, at SIG marks">Capital used</th><th rowspan="2" class="n">Resting orders</th><th rowspan="2">Last action</th></tr>
+    <th rowspan="2" class="n">Fills today</th><th rowspan="2" class="n" title="Capital in this strategy's positions, at SIG marks">Capital used</th><th rowspan="2" class="n" title="Volume traded today / capital used">Turnover today</th><th rowspan="2" class="n">Resting orders</th><th rowspan="2">Last action</th></tr>
     <tr>${h3}${h3}</tr></thead><tbody>${body}</tbody><tfoot>${foot}</tfoot></table></div>`;
 }
 

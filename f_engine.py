@@ -327,6 +327,7 @@ class Engine:
         self.fat_sent = collections.deque(maxlen=5000)      # placement times (pilot gate: write usage)
         self.dump_now, self.dump_book, self.dump_block, self.dump_view, self.dump_ref = {}, {}, {}, {}, {}   # afternoon D-A
         self.dump_quota, self.dump_pilot, self.cross_log = 0, None, {}
+        self.dump_track, self.dump_params = read_json(os.path.join(DATA, "intel", "dump_track.json"), {}) or {}, None
         self.tmm_mid, self.mid24, self.mm_since, self.tmm_inv = {}, {}, {}, collections.deque(maxlen=5000)   # afternoon D-C
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.load_pilots()
@@ -708,6 +709,18 @@ class Engine:
             c = self.coverage
             self.intel_write("coverage.jsonl", dict(t=now, pct=round(100 * c["covered"] / c["eligible"], 1) if c["eligible"] else None,
                                                     eligible=c["eligible"], covered=c["covered"], uncovered=len(c["reasons"])))
+        for k, d in list(self.dump_track.items()):          # dump tracker: SIG mid of the gaining side, every minute, 2 h
+            b_, a_, _ = self.px.get(d["ex"], (None, None, None))
+            m = (now - d["t"]) / 60
+            if b_ is not None and a_ is not None and (not d["path"] or m - d["path"][-1][0] >= 1):
+                mid = (b_ + a_) / 2
+                d["path"].append((round(m, 1), round(mid if d["side"] == "yes" else 1 - mid, 4)))
+            if m >= 120:
+                self.intel_write("dumps.jsonl", d)
+                del self.dump_track[k]
+            if now - self.intel_s.get("track_save", 0) >= 60:
+                self.intel_s["track_save"] = now
+                self.save_dump_track()
         if not self.controls.on("leaders") or api.DRY_RUN:
             return
         if self.tape is None:
@@ -734,6 +747,23 @@ class Engine:
             for e in intel.detect(new, self.fair_at, {ex: self.name(ex)}):
                 self.intel_event(e)
 
+    def save_dump_track(self):
+        try:
+            os.makedirs(os.path.join(DATA, "intel"), exist_ok=True)
+            with open(os.path.join(DATA, "intel", "dump_track.json"), "w") as fh:
+                json.dump(self.dump_track, fh)
+        except OSError:
+            pass
+
+    def dump_settings(self):
+        """Daily settings from tracked dumps (data/intel/dump_params.json, written only with >= 5 dumps), else the plan's."""
+        if time.time() - self.intel_s.get("dump_params", 0) > 600:
+            self.intel_s["dump_params"] = time.time()
+            p = read_json(os.path.join(DATA, "intel", "dump_params.json"), None)
+            self.dump_params = p if p and p.get("n", 0) >= 5 else None
+        p = self.dump_params
+        return (p["offsets"], p["rebound_share"]) if p else (DUMP_OFFSETS, 1.0)
+
     def intel_event(self, e):
         """One big event: what we caught, what our current levels would have caught (missed), logged everywhere."""
         side, ex = e["gainer_side"], e["ex"]
@@ -756,6 +786,13 @@ class Engine:
                                f"deepest print ({deep:.3f})" if not would else "levels now resting would have caught it")
         e.update(captured_shares=round(caught_q), captured_value=round(caught_v, 2), had_orders=caught_q > 0)
         self.intel_write("events.jsonl", e)
+        r = self.dump_ref.get(ex) or self.ref(ex) or (self.tmm_mid.get(ex) or (0, None))[1]   # pre-dump SIG level
+        if side and e.get("fair") is not None and r is not None:     # afternoon §4.1: follow the price for 2 h
+            pre = r if side == "yes" else 1 - r
+            extreme = e["p_lo"] if side == "yes" else round(1 - e["p_hi"], 3)
+            self.dump_track[f"{ex}:{e['first_id']}"] = dict(ex=ex, market=e["market"], side=side, t=e["t"], pre=round(pre, 4),
+                                                             extreme=extreme, shares=e["shares"], walk=e.get("walk"), path=[])
+            self.save_dump_track()
         msg = (f"BIG EVENT {e['market']}: {e['shares']:,} shares at {e['p_lo']:.3f}-{e['p_hi']:.3f}"
                + (f" (fair {e['fair']:.3f}), value {e['value']:,.0f}" if e["fair"] is not None else f", cost {e['cost']:,.0f}")
                + f" [{', '.join(e['kinds'])}] · we caught {caught_v:,.0f}"
@@ -1535,7 +1572,8 @@ class Engine:
             _, yb, ya = book
             bids = [p for p, _ in yb] if side == "yes" else [round(1 - p, 3) for p, _ in ya]
         ask_s = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[1]
-        lv = [bots.tick_down(min(fs - off, rs - DUMP_REF_GAP)) for off in DUMP_OFFSETS]
+        offsets, _ = self.dump_settings()
+        lv = [bots.tick_down(min(fs - off, rs - DUMP_REF_GAP)) for off in offsets]
         out, used = [], set()
         for i, lvl in enumerate(lv):
             deeper = lv[i + 1] if i + 1 < len(lv) else 0.0
@@ -1546,7 +1584,7 @@ class Engine:
             if px < 0.01 or px in used:
                 continue
             used.add(px)
-            q = int(cost / len(DUMP_OFFSETS) / px)
+            q = int(cost / len(lv) / px)
             if q >= MIN_QTY:
                 out.append((i, px, q))
         return out
@@ -1661,7 +1699,9 @@ class Engine:
             if avg is None:
                 continue
             pre = t.get("pre_ref_side")
-            rebound = bots.tick_up(max(avg + DUMP_REBOUND_MIN, (pre - TICK) if pre is not None else 0.0))
+            _, share = self.dump_settings()                 # 1.0: back to the pre-dump level (the plan's default)
+            target = 0.0 if pre is None else (pre - TICK if share >= 0.999 else avg + share * (pre - avg))
+            rebound = bots.tick_up(max(avg + DUMP_REBOUND_MIN, target))
             self.dump_view.setdefault(ex, []).append(dict(sub=sub, rebound=min(rebound, 0.99), avg=avg))
 
     def dump_fill_events(self, fills):
@@ -2914,7 +2954,17 @@ class Engine:
                                account_minus_start=round(acct - INITIAL_BALANCE, 2), diff=round(diff, 2), ok=abs(diff) <= 50,
                                positions_value=round(mv, 2)),
                     fair=dict(account=round(fair_now, 2), vs_sig=round(fair_now - acct, 2)),
+                    velocity=self.velocity_view(acct, None if not start else acct - start["sig"], pts, today),
                     cash=round(cash, 2), holdings_sig=round(hold, 2))
+
+    def velocity_view(self, acct, pnl_today, pts, today):
+        """Afternoon §2.4: return on capital today = P&L at SIG today / average account value today; turnover today =
+        volume traded today (our fills, SIG) / the same average capital."""
+        caps = [p["sig"] for p in pts if p["date"] == today] + [acct]
+        avg = sum(caps) / len(caps)
+        vol = sum(f["qty"] * f["price"] for f in self.ledger.fills if f["t"][:10] == today and not f["before_engine"])
+        return dict(avg_capital=round(avg, 2), volume_today=round(vol, 2),
+                    roc_today=None if pnl_today is None else round(pnl_today / avg, 5), turnover_today=round(vol / avg, 3))
 
     def leader_meta(self):
         """Latest leaderboard sample: our row, #10/#25/#50/#100 P&L, number of traders (data/leaders.csv + meta)."""
@@ -2967,10 +3017,39 @@ class Engine:
         reserve_used = max(0.0, min(float(OPPORTUNITY_RESERVE), CASH_RESERVE + OPPORTUNITY_RESERVE - (money["cash"] - committed)))
         tgt, tdate = self.release_target()
         rel = self.released_today_view()
-        return dict(cash=money["cash"], free_cash=round(money["cash"] - CASH_RESERVE, 2), holdings_sig=money["holdings_sig"], holdings_fair=round(money["fair"]["account"] - money["cash"], 2),
+        idle = self.idle_view()
+        return dict(cash=money["cash"], free_cash=round(money["cash"] - CASH_RESERVE, 2), idle=idle, holdings_sig=money["holdings_sig"], holdings_fair=round(money["fair"]["account"] - money["cash"], 2),
                     floor=CASH_RESERVE, reserve=OPPORTUNITY_RESERVE, reserve_used=round(reserve_used, 2), committed=round(committed, 2),
                     free_to_trade=round(money["cash"] - CASH_RESERVE - OPPORTUNITY_RESERVE - committed, 2),
                     target=tgt, target_date=tdate, released_today=rel, buckets=out)
+
+    def idle_view(self):
+        """Afternoon §2.4: capital idle = holdings older than 3 days with no exit order resting (SIG marks); plus all
+        holdings with no exit order, whatever their age. Age: since the position last went from flat to held (ledger)."""
+        since, net = {}, collections.defaultdict(float)
+        for f in self.ledger.fills:                         # oldest first
+            q = f["qty"] * (1 if (f["side"] == "yes") == (f["action"] == "buy") else -1)
+            was = net[f["ex"]]
+            net[f["ex"]] = was + q
+            if abs(was) < 1 <= abs(net[f["ex"]]) or was * net[f["ex"]] < 0:
+                since[f["ex"]] = f["t"]
+        exits = set()
+        for o in self.open:
+            p = self.book.get(o["ex"], {}).get("pos", 0)
+            if p and jx.reduces(o["side"], o["action"], p):
+                exits.add(o["ex"])
+        cutoff = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 3 * 86400))
+        no_exit, idle3 = [0, 0.0], [0, 0.0]
+        for ex, b in self.book.items():
+            if abs(b["pos"]) < 1 or ex in exits:
+                continue
+            v = float((b.get("row") or {}).get("marketValue") or 0)
+            no_exit[0] += 1
+            no_exit[1] += v
+            if since.get(ex, "2026-09-01 00:00:00") <= cutoff:
+                idle3[0] += 1
+                idle3[1] += v
+        return dict(idle_3d=dict(n=idle3[0], sig=round(idle3[1], 2)), no_exit=dict(n=no_exit[0], sig=round(no_exit[1], 2)))
 
     def release_target(self):
         """Free-cash target (excluding the floor) by date (afternoon §2.2): 25k by Oct 3, 40k by Oct 10 (and after)."""
@@ -3039,6 +3118,9 @@ class Engine:
         allf = [f for f in self.ledger.fills if f["t"] >= start and not f["before_engine"]]
         pt, pa = self.layer_pnl(tf), self.layer_pnl(allf)
         cap = {b["key"]: b["sig"] for b in (getattr(self, "last_capital", None) or {}).get("buckets", [])}
+        vol = collections.Counter()
+        for f in tf:
+            vol[self.strategy_of(f["bot"], f["layer"])] += f["qty"] * f["price"]
         last = {}
         for f in self.ledger.fills[-600:]:
             last[self.strategy_of(f["bot"], f["layer"])] = f"{f['t'][11:16]} " + self.fill_sentence(f).split(" ", 1)[1] \
@@ -3054,6 +3136,9 @@ class Engine:
                             total=dict(realized=round(a_.get("realized", 0), 2), unrealized_sig=round(a_.get("sig", 0) - a_.get("realized", 0), 2),
                                        unrealized_fair=round(a_.get("fair", 0) - a_.get("realized", 0), 2)),
                             fills_today=t_.get("fills", 0), capital_used=round(cap.get("manual" if l == "position" else l, 0.0), 2),
+                            volume_today=round(vol.get(l, 0.0), 2),
+                            turnover_today=round(vol.get(l, 0.0) / cap.get("manual" if l == "position" else l, 0.0), 2)
+                            if cap.get("manual" if l == "position" else l, 0.0) >= 100 else None,
                             resting=stats.get(l, {}).get("resting", 0), last_action=last.get(l)))
         return out
 

@@ -88,6 +88,7 @@ def detect(trades, fair_at, names=None):
                         value=None if value is None else round(value, 2), cost=round(cost, 2), kinds=kinds, wrong=wrong,
                         # the side whose resting bids were hit at a good price: YES bids when YES sold cheap, else NO bids
                         gainer_side=None if wrong is None else ("yes" if wrong == "YES seller" else "no"),
+                        walk=("down: a YES seller" if b[-1]["p"] < b[0]["p"] else "up: a YES buyer" if b[-1]["p"] > b[0]["p"] else "flat"),
                         first_id=b[0].get("id"), last_id=b[-1].get("id")))
     return out
 
@@ -169,6 +170,10 @@ def thresholds(rows):
     return sorted(snaps.items())
 
 
+def fmt_pct(x):
+    return "–" if x is None else f"{x:.0%}"
+
+
 def fmt(x, sign=False):
     if x is None:
         return "–"
@@ -188,8 +193,11 @@ def leaders_study(rows, events, our_layers, now, day_s=86400, tape_from=None):
         first = next((x for x in s if x[0] >= t0), s[0])
         _, rank, name, pnl, tr, vol, roi, ours = last
         js = [j for j in jumps(s) if j[1] >= t0]
+        days = max(1 / 24, (last[0] - first[0]) / 86400)
+        cap = max(1.0, first[3] + 100_000)                  # capital at the window start: P&L + the 100k stake
         acct.append(dict(profile=p, name=name, rank=rank, pnl=pnl, trades=tr, volume=vol, roi=roi, ours=ours,
                          d_pnl=pnl - first[3], d_trades=tr - first[4], d_volume=vol - first[5], since=first[0],
+                         roc_day=(pnl - first[3]) / cap / days, turnover_day=(vol - first[5]) / cap / days,
                          ppv=pnl / vol if vol else None, vpt=vol / tr if tr else None, style=style(pnl, tr, vol), jumps=js))
     acct.sort(key=lambda a: a["rank"])
     L = [f"# Leaders study, {dt.datetime.fromtimestamp(t1).strftime('%Y-%m-%d %H:%M')} PT",
@@ -219,13 +227,14 @@ def leaders_study(rows, events, our_layers, now, day_s=86400, tape_from=None):
         L += [f"| {k} | {fmt(v, True)} | {look.get(k, '—')} |" for k, v in sorted(our_layers.items(), key=lambda kv: -abs(kv[1] or 0))]
     # per account
     L += ["", "## Per account", "",
-          "| # | Account | Style | P&L | Δ P&L | Δ trades | Δ volume | P&L/volume | volume/trade | jumps ≥ 10k in 10 min |",
-          "|---:|---|---|---:|---:|---:|---:|---:|---:|---|"]
+          "| # | Account | Style | P&L | Δ P&L | Δ trades | Δ volume | return on capital / day | turnover / day | P&L/volume | volume/trade | jumps ≥ 10k in 10 min |",
+          "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
     for a in acct:
         js = "; ".join(f"{dt.datetime.fromtimestamp(j[1]).strftime('%H:%M')} {fmt(j[2], True)}" for j in a["jumps"][:4])
         ppv = "–" if a["ppv"] is None else f"{a['ppv']:.2f}"
         L.append(f"| {a['rank']} | {a['name']}{' (us)' if a['ours'] else ''} | {a['style']} | {fmt(a['pnl'])} | {fmt(a['d_pnl'], True)} | "
-                 f"{fmt(a['d_trades'], True)} | {fmt(a['d_volume'], True)} | {ppv} | {fmt(a['vpt'])} | {js} |")
+                 f"{fmt(a['d_trades'], True)} | {fmt(a['d_volume'], True)} | {a['roc_day']:+.1%} | {a['turnover_day']:.1f}x | {ppv} | "
+                 f"{fmt(a['vpt'])} | {js} |")
     # attribution
     L += ["", "## Attribution (inferred, not proof)", "",
           "A P&L jump ≥ 10k within 10 min, next to the big events (§4.3) within ±10 min: **likely counterparty**. "
@@ -250,6 +259,18 @@ def leaders_study(rows, events, our_layers, now, day_s=86400, tape_from=None):
                 L.append(f"- {when} **{a['name']}** {fmt(d, True)}: no big event within ±10 min (trading we can't see)")
     if not n_j:
         L.append("- no jumps ≥ 10k within 10 min in the window")
+    # counterparty watch (afternoon §4.2)
+    cw = counterparty_watch(ser, events, tape_from)
+    L += ["", "## Counterparty watch (dumps ±10 min; inferred)", "",
+          f"Dump catchers: P&L jumps ≥ 5k within ±10 min of a dump; possible dumpers: P&L drops ≥ 5k or volume spikes ≥ half the "
+          f"dump's cost at the same time. Running tally in `data/intel/counterparties.json`.", "",
+          "| account | role | events | Δ P&L at those times | when (PT) |", "|---|---|---:|---:|---|"]
+    for name, r in sorted(cw["accounts"].items(), key=lambda kv: -abs(kv[1]["value"])):
+        L.append(f"| {name} | {r['role']} | {r['n']} | {fmt(r['value'], True)} | {', '.join(r['when'][:4])} |")
+    if not cw["accounts"]:
+        L.append("| – | no dump inside the live tape's coverage yet | | | |")
+    if cw["hours"]:
+        L += ["", "Dumps by hour of day (PT): " + " · ".join(f"{h}h {n}" for h, n in sorted(cw["hours"].items()))]
     # thresholds
     th = thresholds(rows)
     L += ["", "## Thresholds over time (P&L of #10 / #25 / #50 / #100, our distance)", "",
@@ -273,6 +294,57 @@ def leaders_study(rows, events, our_layers, now, day_s=86400, tape_from=None):
           "under `/dmm`, which we never call), and we don't scrape the website. The top 50 by P&L, to look up by hand:", ""]
     L.append(", ".join(f"{a['name']}" for a in acct if not a["ours"] and a["rank"] <= 50))
     return "\n".join(L) + "\n", acct
+
+
+def counterparty_watch(ser, events, tape_from=None, jump=5_000.0, window=LINK_WINDOW_S):
+    """Accounts whose P&L jumped (catchers) or dropped / whose volume spiked (possible dumpers) around big events."""
+    acc, hours = {}, collections.Counter()
+    dumps = [e for e in events if e.get("gainer_side") and (e.get("value") or 0) >= BIG_VALUE]
+    for e in dumps:
+        hours[dt.datetime.fromtimestamp(e["t"]).strftime("%H")] += 1
+        for p, s in ser.items():
+            for a, b in zip(s, s[1:]):
+                if not (a[0] - window <= e["t"] <= b[0] + window) or b[0] - a[0] > window + 600:
+                    continue
+                d_pnl, d_vol, name = b[3] - a[3], b[5] - a[5], b[2]
+                role = "catcher" if d_pnl >= jump else "possible dumper" if d_pnl <= -jump or d_vol >= 0.5 * e.get("cost", 0) else None
+                if role:
+                    r = acc.setdefault(name, dict(role=role, n=0, value=0.0, when=[]))
+                    r["n"] += 1
+                    r["value"] += d_pnl
+                    r["when"].append(dt.datetime.fromtimestamp(e["t"]).strftime("%m-%d %H:%M") + f" {e['market']}")
+                    if role != r["role"]:
+                        r["role"] = "both"
+    return dict(accounts=acc, hours=dict(hours))
+
+
+def dump_path_stats(rows):
+    """Afternoon §4.1: from tracked dumps (data/intel/dumps.jsonl: pre, extreme and the SIG mid path for 2 h, in the gaining
+    side's terms) -> n, P(revert >= 50% within 1 h), median minutes to a 50% revert, median revert after 2 h."""
+    rev50, t50, r2 = 0, [], []
+    for r in rows:
+        span = (r["pre"] - r["extreme"]) or 1e-9
+        hit = next((m for m, v in r["path"] if (v - r["extreme"]) / span >= 0.5), None)
+        if hit is not None and hit <= 60:
+            rev50 += 1
+        if hit is not None:
+            t50.append(hit)
+        if r["path"]:
+            r2.append((r["path"][-1][1] - r["extreme"]) / span)
+    n = len(rows)
+    return dict(n=n, p_revert50_1h=rev50 / n if n else None, median_min_to_revert50=statistics.median(t50) if t50 else None,
+                median_revert_2h=statistics.median(r2) if r2 else None)
+
+
+def dump_params(stats, base_offsets=(0.07, 0.12, 0.20)):
+    """Daily dump-catcher settings from the tracked dumps (applied by the engine only with >= 5 dumps): the rebound
+    target as a share of the way back to the pre-dump level (median 2 h revert, clipped 0.3-1.0); deeper levels when
+    dumps rarely revert within the hour."""
+    if not stats.get("n") or stats["n"] < 5:
+        return None
+    share = max(0.3, min(1.0, stats.get("median_revert_2h") or 1.0))
+    deeper = 0.02 if (stats.get("p_revert50_1h") or 0) < 0.5 else 0.0
+    return dict(n=stats["n"], rebound_share=round(share, 2), offsets=[round(o + deeper, 3) for o in base_offsets])
 
 
 def copy_list(acct, events, our_layers, tape_from=None, t0=None):
@@ -618,6 +690,23 @@ def run_daily(data, docs, now, apply_tiers=True, day_s=86400):
         recs.append("**Missed value by market** (levels we'd have had resting): " + "; ".join(f"{names.get(ex, ex)} {fmt(v)}" for ex, v in m_top)
                     + ". These are in tier A from today; size changes need approval.")
     recs += [f"(needs approval) {c}" for c in copy_list(acct, events, our_layers, tape_from, since)[:3]]
+    # afternoon §4.1: dump stats -> tomorrow's dump settings (applied with >= 5 tracked dumps); §4.2 running counterparty tally
+    dstats = dump_path_stats(_jsonl(os.path.join(idir, "dumps.jsonl")))
+    dp = dump_params(dstats)
+    if dp and apply_tiers:
+        json.dump(dict(dp, t=dt.datetime.fromtimestamp(now).isoformat(), stats=dstats), open(os.path.join(idir, "dump_params.json"), "w"), indent=1)
+    recs.insert(0, f"**Dumps tracked: {dstats['n']}.** P(revert ≥ 50% within 1 h) {fmt_pct(dstats['p_revert50_1h'])}, median time to a 50% "
+                   f"revert {fmt(dstats['median_min_to_revert50'])} min, median revert after 2 h {fmt_pct(dstats['median_revert_2h'])}. "
+                   + (f"Applied to the dump catcher: offsets {dp['offsets']}, rebound at {dp['rebound_share']:.0%} of the way back." if dp
+                      else "Fewer than 5 dumps: the dump catcher keeps the plan's settings (0.07/0.12/0.20, rebound to the pre-dump level)."))
+    try:
+        cw = counterparty_watch(leader_series(rows), events, tape_from)
+        tally_p = os.path.join(idir, "counterparties.json")
+        tally = json.load(open(tally_p)) if os.path.exists(tally_p) else {}
+        tally[date] = cw
+        json.dump(tally, open(tally_p, "w"), indent=1)
+    except (OSError, ValueError):
+        pass
     md = daily_report(date, trades, events, fills, sb, coverage, new_m, recs, f"../leaders/{date}.md", names, tape_from)
     dpath = os.path.join(docs, "daily", f"{date}.md")
     with open(dpath, "w") as fh:

@@ -132,6 +132,34 @@ class CollectorTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
 
 
+class DumpTrackerTests(unittest.TestCase):
+    def test_revert_stats_and_daily_settings(self):
+        fast = dict(pre=0.93, extreme=0.81, path=[(5, 0.85), (20, 0.88), (60, 0.91), (120, 0.92)])      # 58% back at 20 min
+        slow = dict(pre=0.93, extreme=0.81, path=[(5, 0.82), (60, 0.84), (120, 0.86)])                  # 42% after 2 h
+        st = li.dump_path_stats([fast, slow])
+        self.assertEqual(st["n"], 2)
+        self.assertEqual(st["p_revert50_1h"], 0.5)
+        self.assertEqual(st["median_min_to_revert50"], 20)
+        self.assertAlmostEqual(st["median_revert_2h"], (0.11 / 0.12 + 0.05 / 0.12) / 2, places=6)
+        self.assertIsNone(li.dump_params(st), "fewer than 5 dumps: the plan's settings stay")
+        st5 = li.dump_path_stats([slow] * 5)
+        p = li.dump_params(st5)
+        self.assertEqual(p["offsets"], [0.09, 0.14, 0.22], "rarely reverts within the hour: levels 2c deeper")
+        self.assertAlmostEqual(p["rebound_share"], 0.42, places=2)
+
+    def test_counterparty_watch(self):
+        t0 = dt.datetime(2026, 10, 2, 14, 10).timestamp()
+        ser = {"qe": [(t0, 50, "quick-ember", 10_000.0, 25, 9e4, 1, False), (t0 + 600, 50, "quick-ember", 33_000.0, 26, 9.2e4, 1, False)],
+               "dd": [(t0, 9, "big-seller", 50_000.0, 9, 1e6, 1, False), (t0 + 600, 9, "big-seller", 20_000.0, 10, 1.6e6, 1, False)],
+               "zz": [(t0, 3, "quiet", 1_000.0, 9, 1e5, 1, False), (t0 + 600, 3, "quiet", 1_200.0, 9, 1e5, 1, False)]}
+        ev = [dict(t=t0 + 480, ex="1076", market="Rhode Island Senate D", gainer_side="yes", value=94_740.0, cost=650_000.0)]
+        cw = li.counterparty_watch(ser, ev)
+        self.assertEqual(cw["accounts"]["quick-ember"]["role"], "catcher")
+        self.assertEqual(cw["accounts"]["big-seller"]["role"], "possible dumper")
+        self.assertNotIn("quiet", cw["accounts"])
+        self.assertEqual(cw["hours"], {"14": 1})
+
+
 class LeadersTests(unittest.TestCase):
     def test_style_rules(self):
         self.assertEqual(li.style(503_000, 400, 84_000), "Opening harvester")
@@ -157,6 +185,8 @@ class LeadersTests(unittest.TestCase):
         self.assertIn("likely counterparty of NH Senate D", md)
         self.assertIn("High-frequency bot", md)
         self.assertIn("## Copy list", md)
+        self.assertIn("return on capital / day", md)
+        self.assertIn("## Counterparty watch", md)
         self.assertIn("| us (rank, P&L) |", md)
         k = next(a for a in acct if a["name"] == "kind")
         self.assertEqual(k["d_pnl"], 30_000)
