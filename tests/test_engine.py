@@ -41,6 +41,7 @@ SIGPX = {p["exchangeId"]: (p["bestBid"], p["bestAsk"], p["latestPrice"]) for p i
 AK, RI, MA, LONE = "1057", "1073", "1060", "9999"          # AK, RI: position bots; MA Gov R: market-bot inventory
 POS = {AK: -11024, RI: 2137, MA: -1008}
 AK_LADDER = [(0.4, 2594), (0.5, 2594), (0.6, 2594), (0.775, 3242)]
+AK_HALF = [(0.4, 1297), (0.5, 1297), (0.6, 1297), (0.775, 1621)]     # after D1 + D1b: the ladder on the remaining 50%
 
 
 class Killed(BaseException):
@@ -642,26 +643,26 @@ class RecyclerTests(EngineCase):
             for ex in (AK, MA):                           # I2 after every loop, while AK is re-sized
                 self.assertLessEqual(reducing(fake, ex), abs(fake.pos[ex]) + 1e-9, f"loop {i}: I2 on {ex}")
         self.assertEqual(fake.canonicalized, [])
-        self.assertEqual(eng.ledger.sub(AK, "recycle:ak-d1"), -2756.0, "D1: 25% of 11,024 NO released to the recycler")
-        self.assertEqual(eng.ledger.sub(AK, "manual"), -8268.0)
-        self.assertEqual(resting(fake, AK, "sell"), [(0.4, 1945), (0.5, 1945), (0.6, 1945), (0.775, 2432)], "ladder on the other 75%")
+        self.assertEqual(eng.ledger.sub(AK, "recycle:ak-d1"), -5512.0, "D1 + D1b: 50% of 11,024 NO released to the recycler")
+        self.assertEqual(eng.ledger.sub(AK, "manual"), -5512.0)
+        self.assertEqual(resting(fake, AK, "sell"), AK_HALF, "ladder on the other 50%")
         self.assertIn((0.1, 3000), resting(fake, AK, "buy"), "spike bid kept")
         # AK NO fair 0.215, SIG NO bid 0.24 >= 0.22: sell the D1 tranche into the bid = buy YES at 0.76
         d1 = [o for o in fake.open_orders() if o["ex"] == AK and o["side"] == "yes" and o["id"] in eng.ledger.orders]
-        self.assertEqual([(o["price"], o["qty"]) for o in d1], [(0.76, 2756.0)])
+        self.assertEqual([(o["price"], o["qty"]) for o in d1], [(0.76, 5512.0)])
         self.assertEqual(eng.ledger.orders[d1[0]["id"]]["sub"], "recycle:ak-d1")
         # MA R inventory: 1,008 NO at fair 0.93; NO bid 0.90 < 0.935: rest at max(0.94, NO ask - tick 0.92) -> buy YES 0.06
         ma = [o for o in fake.open_orders() if o["ex"] == MA and o["id"] in eng.ledger.orders]
         self.assertEqual([(o["side"], o["price"], o["qty"]) for o in ma], [("yes", 0.06, 1008.0)])
         with open(a_config.NIGHT_LOG_FILE) as fh:
-            self.assertIn("D1 applied: 2,756 AK NO", fh.read())
+            self.assertIn("5,512 AK NO moved to sub-book recycle:ak-d1", fh.read())
         # the D1 order fills: realized cash, the tranche sub-book empties, AK exits untouched
-        fake.fill(d1[0]["id"], 2756)
+        fake.fill(d1[0]["id"], 5512)
         loop(eng, fake)
         self.assertEqual(eng.ledger.sub(AK, "recycle:ak-d1"), 0.0)
         f = [x for x in eng.ledger.fills if x["order"] == d1[0]["id"]][0]
         self.assertGreaterEqual(1 - f["price"], 0.215 + 0.005 - 1e-9, "sold at >= fair + 0.5c (the recycler gate)")
-        self.assertEqual(resting(fake, AK, "sell"), [(0.4, 1945), (0.5, 1945), (0.6, 1945), (0.775, 2432)])
+        self.assertEqual(resting(fake, AK, "sell"), AK_HALF)
         st = eng.ex.stats()
         self.assertEqual(st["trims"].get("recycle", 0), 0, "no I2 trims hit")
 

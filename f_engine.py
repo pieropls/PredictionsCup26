@@ -39,7 +39,8 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       DASHBOARD_URL_FILE, STATE_EVERY_S, LAYER_CAPS, KAPPA_FROM_OCT30, LOSS_STOP, MARKET_MAX_POS,
                       LADDER_LEVELS, LADDER_CAPACITY_SHARE, TAKE_NOTIONAL, REF_WINDOW_S, REF_MIN_SAMPLES, REF_MAX_SPREAD,
                       BREAKER_WINDOW_S, BREAKER_MARKETS, BREAKER_SHARE, BREAKER_PAUSE_S, MM_PILOT_MARKETS,
-                      LADDER_PILOT_MARKETS, PILOT_S, REQUOTE_CANCELS_PER_MIN, BREAKER_FAIR_MOVE)
+                      LADDER_PILOT_MARKETS, PILOT_S, REQUOTE_CANCELS_PER_MIN, BREAKER_FAIR_MOVE, AK_RELEASE,
+                      OPPORTUNITY_RESERVE)
 from d_ledger import Ledger, stamp, write_atomic
 
 
@@ -961,7 +962,7 @@ class Engine:
         self.restore_floor()
         self.alerts = self.alerts[-20:]
         # D1: release 25% of the AK position to the recycler once the recycler is on (night plan §1)
-        if c.on("recycler") and not night.get("d1_done"):
+        if c.on("recycler") and night.get("ak_released", 0.25 if night.get("d1_done") else 0.0) < AK_RELEASE - 1e-9:
             self.apply_d1()
         if json.dumps(night, sort_keys=True, default=str) != before:
             c.save()                                        # only on a change: a hand edit on disk is never overwritten
@@ -995,22 +996,29 @@ class Engine:
         return n
 
     def apply_d1(self):
-        c, night = self.controls, self.controls.d.setdefault("night", {})
+        """D1 / D1b (night plan §1, day 2 §1): release a cumulative AK_RELEASE share of the original AK NO position to the
+        recycler (sub-book recycle:ak-d1, sold into the SIG bid while it is >= PM NO fair + 0.5c). The exit ladder is
+        scaled to the share that stays manual; the 0.10 spike bid is kept."""
+        night = self.controls.d.setdefault("night", {})
         ak = next((b for b in self.bots if b.kind == "position" and b.name == "AK-GOV-D"), None)
         if ak is None:
-            night["d1_done"] = "no AK bot"
+            night["d1_done"], night["ak_released"] = "no AK bot", AK_RELEASE
+            return
+        done = night.get("ak_released", 0.25 if night.get("d1_done") else 0.0)
+        if done >= AK_RELEASE - 1e-9:
             return
         held = self.ledger.sub(ak.ex, "manual")
-        q = self.ledger.split_sub(ak.ex, "manual", "recycle:ak-d1", int(abs(held) * 0.25))
+        q = self.ledger.split_sub(ak.ex, "manual", "recycle:ak-d1", int(round(abs(held) * (AK_RELEASE - done) / (1 - done))))
         refs = read_json(POSITION_REF_FILE, {})
         old = ak.ref
-        ak.ref = int(round(old * 0.75))
+        ak.ref = int(round(old * (1 - AK_RELEASE) / (1 - done)))
         if "AK-GOV-D" in refs:
             refs["AK-GOV-D"]["ref"] = ak.ref
             write_atomic(POSITION_REF_FILE, json.dumps(refs, indent=1))
-        night["d1_done"] = stamp()
-        self.night.line(f"D1 applied: {abs(q):,.0f} AK NO (25%) moved to sub-book recycle:ak-d1 (sold into the SIG bid while it is "
-                        f">= PM NO fair + 0.5c); the AK exit ladder now covers the other 75% (ref {old:,} -> {ak.ref:,}); 0.10 spike bid kept")
+        night["d1_done"], night["ak_released"] = night.get("d1_done") or stamp(), AK_RELEASE
+        self.night.line(f"AK release to {AK_RELEASE:.0%} (D1{'b' if done else ''}): {abs(q):,.0f} AK NO moved to sub-book recycle:ak-d1 "
+                        f"(sold into the SIG bid while it is >= PM NO fair + 0.5c); the exit ladder now covers the remaining "
+                        f"{1 - AK_RELEASE:.0%} (ref {old:,} -> {ak.ref:,}); 0.10 spike bid kept")
 
     def log_leaders(self, now):
         """Every 10 min (night plan §5.6): the top 20 and our own row -> data/leaders.csv (2 reads)."""

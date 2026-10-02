@@ -108,13 +108,15 @@ PAIR_COOLDOWN_S = 30            # per race
 # A6b. night plan (docs/night_plan.md): capital buckets per layer, (pilot, full, max) in SIG. The dashboard can set a
 # layer's cap anywhere in 0..max; without an override the cap follows the layer's state (pilot / full) ----------------
 LAYER_CAPS = {
-    "mm": {"inventory": (3_000, 15_000, 25_000)},              # new inventory at cost, beyond what's held now
+    "mm": {"inventory": (3_000, 10_000, 25_000)},              # new inventory at cost (day 2 §1: full 15k -> 10k)
     "ladder": {"filled": (3_000, 15_000, 25_000), "resting": (10_000, 60_000, 80_000)},
     "pairs": {"capital": (3_000, 10_000, 15_000)},
     "sniper": {"per_market": (1_000, 3_000, 3_000), "per_day": (10_000, 10_000, 10_000)},
 }
 KAPPA_FROM_OCT30 = 0.03         # D3: capital discount from Oct 30 (election-night cash)
 LOSS_STOP = 2_000               # D5: bot-owned P&L at fair, rolling 24 h
+OPPORTUNITY_RESERVE = 10_000    # day 2 §3.2: on top of the floor; only fat-finger fills, new-market snipes, >= 8c takes use it
+AK_RELEASE = 0.50               # D1 + D1b (day 2 §1): share of the original AK NO position released to the recycler
 
 # A7. files ---------------------------------------------------------------------------------------------------------
 DATA = os.environ.get("SIG_DATA") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")   # releases share it
@@ -131,4 +133,4 @@ OVERRIDES_FILE = os.path.join(DATA, "overrides.json")     # layer flags and cont
 DASHBOARD_URL_FILE = os.path.join(DATA, "dashboard_url.txt")   # the live dashboard's URL with its access token
 STATE_EVERY_S = 60              # data/state.json and the static data/dashboard.html: rewritten at most this often
 HOST_ID_FILE = os.path.join(DATA, "host_id")
-NIGHT_LOG_FILE = os.path.join(os.path.dirname(DATA), "docs", "NIGHT_LOG.md")
+NIGHT_LOG_FILE = os.path.join(os.path.dirname(DATA), "docs", "RUN_LOG.md")   # day 2: the run log (NIGHT_LOG.md = the night)
