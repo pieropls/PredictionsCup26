@@ -1985,9 +1985,13 @@ class Engine:
             f"**Live** ({time.strftime('%H:%M')} PT): {live}",
             f"**Account at fair:** {night['start_fair']:,} at night start ({night['start_t'][11:16]}) -> {fair_now:,.0f} now "
             f"({fair_now - night['start_fair']:+,.0f})",
-            f"**Realized P&L today:** {self.realized_today():+,.0f} · **free cash** {cash:,.0f}",
+            (lambda mv: f"**P&L today (SIG marks):** {mv['today']['pnl']:+,.0f} = realized {mv['today']['realized']:+,.0f} + "
+                        f"unrealized {mv['today']['unrealized_change']:+,.0f} · **free cash** {cash - CASH_RESERVE:,.0f} above the floor"
+             if (mv or {}).get("today") and mv["today"].get("pnl") is not None
+             else f"**Realized P&L today:** {self.realized_today():+,.0f} · **free cash** {cash:,.0f}")(self.money_view()),
             f"**Kills / rollbacks:** {'; '.join(kills) or 'none'}",
-            f"**For Piero to decide:** {'; '.join(c.d.get('decisions') or []) or 'nothing'}"])
+            f"**For Piero to decide (engine):** {'; '.join(c.d.get('decisions') or []) or 'nothing from the engine'}"
+            " · Claude Code's items are in the summary below"])
 
     # ------------------------------------------------------------------------------------------------ F5 state
     def pnl_of(self, ex):
