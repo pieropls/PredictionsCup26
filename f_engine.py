@@ -763,6 +763,17 @@ class Engine:
                 u["ladder_side"][self.pol(o["ex"], o["side"])] += n
             elif l == "take":
                 u["sniper_market"][o["ex"]] = u["sniper_market"].get(o["ex"], 0.0) + n
+        for p in self.ex.pending():                         # queued / in flight / acked but not yet in a snapshot
+            if p["action"] != "buy" or p["bot"] in self.position_names:
+                continue
+            n, l = p["qty"] * p["price"], p["layer"]
+            if l in self.FLOOR_LAYERS:
+                u["committed"] += n
+            if l == "ladder":
+                u["ladder_resting"] += n
+                u["ladder_side"][self.pol(p["ex"], p["side"])] += n
+            elif l == "take":
+                u["sniper_market"][p["ex"]] = u["sniper_market"].get(p["ex"], 0.0) + n
         for ex, books in self.ledger.subbooks.items():
             q = books.get("mm", 0)
             f = self.fair.get(ex)
@@ -1539,13 +1550,20 @@ class Engine:
         k = 0.0 if free > 0.20 else 0.01 if free >= 0.05 else 0.02
         return k, f"free budget {free * 100:.1f}%"
 
+    FLOOR_LAYERS = ("mm", "take", "set")                   # §4.2: the cash floor counts these resting buys (not ladders)
+
     def committed(self):
-        """SIG committed by resting engine buys that add risk (not exits, rebounds, unwinds, repairs), at full notional."""
+        """SIG committed by engine entry buys under the cash floor (MM, takes, pair sets): resting, queued or in flight,
+        at full notional. Ladders are excluded: they have their own fill cap and breaker (night plan §4.2)."""
         out = 0.0
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
-            if rec and o["action"] == "buy" and rec["layer"] not in self.REDUCING and rec["bot"] not in self.position_names:
+            if rec and o["action"] == "buy" and rec["layer"] in self.FLOOR_LAYERS and not jx.reduces(
+                    o["side"], "buy", self.book.get(o["ex"], {}).get("pos", 0)):
                 out += o["qty"] * o["price"]
+        for p in self.ex.pending():
+            if p["action"] == "buy" and p["layer"] in self.FLOOR_LAYERS:
+                out += p["qty"] * p["price"]
         return out
 
     def cap(self, layer, key):

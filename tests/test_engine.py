@@ -765,6 +765,29 @@ class LadderTests(EngineCase):
         self.assertNotIn(int(rb[0]["id"]), fake.book, "its rebound was cancelled")
 
 
+class CapTests(EngineCase):
+    def test_ladder_resting_cap_counts_queued_orders_and_kappa_ignores_ladders(self):
+        fresh_data(layers=dict(position=dict(state="full"), ladder=dict(state="pilot")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        eng.pilot_sets = {}
+        loop(eng, fake)
+        for b in eng.bots:
+            if b.kind == "market" and b.ex in eng.fair:
+                seed_ref(eng, b.ex)
+        eng.controls.set_caps("ladder", dict(resting=2000), by="test")
+        for _ in range(8):                                # each loop admits more; queued orders must count
+            eng.step()                                    # (no drain: placements stay queued between loops)
+            for b in eng.bots:
+                if b.kind == "market" and b.ex in eng.fair:
+                    seed_ref(eng, b.ex)
+        used = eng.bucket_usage()
+        self.assertLessEqual(used["ladder_resting"], 2000 + 1e-6, "queued ladder orders count against the resting cap")
+        self.assertGreater(used["ladder_resting"], 0)
+        k, why = eng.kappa()
+        self.assertEqual(k, 0.0, f"ladder bids don't lock cash: kappa stays 0 ({why})")
+
+
 class BreakerTests(EngineCase):
     def test_correlated_fills_trip_the_breaker(self):
         fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="full")))
