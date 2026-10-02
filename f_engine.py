@@ -1561,7 +1561,9 @@ class Engine:
         f, r = self.fair.get(ex), self.ref(ex)
         if b is None or b.kind != "market" or ex in self.manual_ex or f is None or r is None:
             return []
-        return [(side, fs, rs) for side, fs, rs in (("yes", f, r), ("no", 1 - f, 1 - r)) if fs >= DUMP_MIN_FAIR and rs >= DUMP_MIN_REF]
+        held = self.book.get(ex, {}).get("pos", 0)         # never a bid that would net against shares we hold on the other
+        return [(side, fs, rs) for side, fs, rs in (("yes", f, r), ("no", 1 - f, 1 - r))   # side (pair-set legs, inventory)
+                if fs >= DUMP_MIN_FAIR and rs >= DUMP_MIN_REF and not (held <= -MIN_QTY if side == "yes" else held >= MIN_QTY)]
 
     def dump_levels(self, ex, side, fs, rs, cost):
         """[(i, price, shares)]: fair_side - 0.07 / 0.12 / 0.20, each <= ref_side - 0.04, one tick above the best rival bid

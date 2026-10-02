@@ -1474,6 +1474,11 @@ class DumpTests(EngineCase):
         seed_ref(eng, ex, mid=0.75)                       # SIG already trades below 0.80: no levels there
         self.assertEqual(eng.dump_eligible(ex), [])
         self.assertEqual(eng.dump_eligible(AK), [], "never on manual markets")
+        ex2 = favs[1]
+        seed_ref(eng, ex2, mid=eng.fair[ex2] - 0.01)
+        self.assertTrue(eng.dump_eligible(ex2))
+        eng.book[ex2] = dict(eng.book.get(ex2, {}), pos=-500)          # we hold NO (e.g. a pair-set leg): no YES dump bid
+        self.assertEqual(eng.dump_eligible(ex2), [], "a YES bid would net against our NO shares")
         low = next(b.ex for b in eng.bots if b.kind == "market" and eng.fair.get(b.ex) is not None and 0.2 < eng.fair[b.ex] < 0.8)
         seed_ref(eng, low)
         self.assertEqual(eng.dump_eligible(low), [], "no side with fair >= 0.90")
