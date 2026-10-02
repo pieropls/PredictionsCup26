@@ -463,8 +463,8 @@ class Executor:
 
     # ---------------------------------------------------------------------------------------- threads (live)
     def start(self):
-        self.running = True
-        for fn in (self.step_cancels, self.step_placements):
+        self.running = True                                 # two cancel workers: a burst of DELETEs goes out in parallel
+        for fn in (self.step_cancels, self.step_cancels, self.step_placements):   # (A7: cancel queued -> sent <= 1 s)
             t = threading.Thread(target=self._loop, args=(fn,), daemon=True, name=fn.__name__)
             t.start()
             self.threads.append(t)
