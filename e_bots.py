@@ -9,7 +9,7 @@ Prices: SIG books are YES-normalized; an order's price is in its own side (a NO 
 """
 import math
 
-from a_config import (TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, ROC_MIN_TIGHT, DUMP_TTL_S, RECYCLE_BID_EDGE,
+from a_config import (TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, ROC_MIN_TIGHT, DUMP_TTL_S, TMM_BUY_EDGE, TMM_TTL_S, RECYCLE_BID_EDGE,
                       RECYCLE_REST_EDGE, RECYCLE_TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_EDGE, MM_U_MULT, MM_NOTIONAL, MM_TTL_S,
                       LADDER_LEVELS, LADDER_TTL_S, TAKE_EDGE, TAKE_U_MULT, TAKE_NOTIONAL, TAKE_TTL_S, FAT_TTL_S)
 
@@ -266,8 +266,45 @@ class MarketBot:
             out += recycle_wants({k2: v for k2, v in subs.items() if k2 in ("mm", "sniper") and v * net > 0},
                                  f, s["bid"], s["ask"], k, s.get("own", ()), take_only=True)
 
-        # market maker v2
-        if L.get("mm"):
+        # turnover MM (afternoon D-C): quote at SIG's own level (EWMA mid +- max(1 tick, half the spread), joining or
+        # improving the touch), skewed against inventory; entries never above fair - 1c, sells never below fair - kappa_mm
+        t = s.get("tmm")
+        if L.get("mm") and t:
+            mm = subs.get("mm", 0)
+            bid, ask = s["bid"], s["ask"]
+            if t.get("mid") is not None and bid is not None and ask is not None and ask > bid:
+                h = max(TICK, 0.5 * (ask - bid))
+                bid_y, ask_y = tick_down(t["mid"] - h), tick_up(t["mid"] + h)
+                bid_y, ask_y = max(bid_y, bid), min(ask_y, ask)          # join or improve the best price
+                sk = t.get("skew", 0.0) * TICK                          # long YES -> both quotes lower (sell more, buy less)
+                bid_y, ask_y = tick_down(bid_y - sk), tick_up(ask_y - sk)
+                if t.get("offer_mid"):                                   # inventory older than 2 h: offered at SIG mid
+                    if mm > 0:
+                        ask_y = min(ask_y, tick_up(t["mid"]))
+                    elif mm < 0:
+                        bid_y = max(bid_y, tick_down(t["mid"]))
+                bid_y, ask_y = min(bid_y, tick_down(ask - TICK)), max(ask_y, tick_up(bid + TICK))   # rest, never take
+                km = t["kappa_mm"]
+                # YES bid: closes a NO holding (sell NO >= fair_no - kappa_mm) or opens YES (<= fair - 1c)
+                if mm <= -MIN_QTY:
+                    if bid_y <= f + km + EPS:
+                        reduce_buy("no", 1 - bid_y, abs(mm), "mm", "mm", TMM_TTL_S, band=TICK, a2=False)
+                elif entries_ok and "yes" not in blocked and bid_y <= f - TMM_BUY_EDGE + EPS and MB_MIN_PX <= bid_y <= MB_MAX_PX:
+                    q = int(min(t["size"], t["room"]["yes"]) / bid_y)
+                    if q >= MIN_QTY:
+                        out.append(want("yes", "buy", bid_y, q, bid_y - TICK, bid_y, 2 * QTY_TOL, "mm", sub="mm", ttl=TMM_TTL_S))
+                # YES ask (a NO bid at 1 - ask): closes a YES holding (>= fair - kappa_mm) or opens NO (NO <= fair_no - 1c)
+                no_px = round(1 - ask_y, 3)
+                if mm >= MIN_QTY:
+                    if ask_y >= f - km - EPS:
+                        reduce_buy("yes", ask_y, mm, "mm", "mm", TMM_TTL_S, band=TICK, a2=False)
+                elif entries_ok and "no" not in blocked and no_px <= (1 - f) - TMM_BUY_EDGE + EPS and MB_MIN_PX <= no_px <= MB_MAX_PX:
+                    q = int(min(t["size"], t["room"]["no"]) / no_px)
+                    if q >= MIN_QTY:
+                        out.append(want("no", "buy", no_px, q, no_px - TICK, no_px, 2 * QTY_TOL, "mm", sub="mm", ttl=TMM_TTL_S))
+
+        # market maker v2 (classic: held to settlement; the engine runs the turnover MM above instead)
+        if L.get("mm") and not t:
             mm = subs.get("mm", 0)
             e = max(MM_EDGE, MM_U_MULT * u) * s_of(f)
             skew = 0.01 * max(-1.0, min(1.0, exposure(f, mm) / MARKET_MAX_POS))

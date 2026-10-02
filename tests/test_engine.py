@@ -318,9 +318,7 @@ class RestartTests(EngineCase):
         save), with prices moving while it is down: zero duplicates, I2 holds, and every order sent after a restart was
         wanted by a plan made after that restart."""
         fake = new_fake(writes_per_min=10_000)
-        for k, v in (("ROC_HOLD_MIN", a_config.ROC_MIN), ("OPPORTUNITY_RESERVE", 10_000)):   # restart safety needs many MM
-            self.addCleanup(setattr, f_engine, k, getattr(f_engine, k))                     # requotes, not the afternoon's
-            setattr(f_engine, k, v)                                                         # 10% hold rule / 25k reserve
+        classic_capital(self, tmm=False)                  # restart safety needs many MM requotes (classic MM, 10k reserve)
         eng = engine(fake)
         loop(eng, fake)
         loop(eng, fake)
@@ -674,11 +672,17 @@ class RecyclerTests(EngineCase):
 
 class ControllerTests(EngineCase):
     def test_kill_rule_loss_stop_and_5xx_pause(self):
+        classic_capital(self)
         fake = new_fake(writes_per_min=10_000)
         eng = engine(fake)
         loop(eng, fake)
         loop(eng, fake)
-        mm = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"]
+        mm, seen = [], set()
+        for o in fake.open_orders():                      # one MM entry per market (the turnover MM quotes both sides)
+            if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm" and o["ex"] not in seen \
+                    and not jx.reduces(o["side"], "buy", fake.pos.get(o["ex"], 0)):
+                seen.add(o["ex"])
+                mm.append(o)
         for o in mm[:12]:                                 # MM gets filled, then fair moves hard against every fill
             fake.fill(o["id"], o["qty"])
             FAIR[o["ex"]] = 0.02 if o["side"] == "yes" else 0.98
@@ -709,6 +713,14 @@ class ControllerTests(EngineCase):
             log = fh.read()
         self.assertIn("KILL layer mm", log)
         self.assertIn("SIG 5xx/timeouts > 50% for 10 min", log)
+
+
+def classic_capital(case, tmm=True):
+    """MM mechanics tests: the pre-afternoon 10k opportunity reserve and 4% ROC (the fixture account can't fund a 25k
+    reserve), optionally the classic MM v2 (requotes on every Polymarket move)."""
+    for k, v in (("ROC_HOLD_MIN", a_config.ROC_MIN), ("OPPORTUNITY_RESERVE", 10_000), ("TMM_ENABLED", tmm)):
+        case.addCleanup(setattr, f_engine, k, getattr(f_engine, k))
+        setattr(f_engine, k, v)
 
 
 def mid_market(eng, lo=0.35, hi=0.65):
@@ -1618,6 +1630,7 @@ class LeadersTests(EngineCase):
 
 class PromotionTests(EngineCase):
     def test_mm_pilot_promoted_after_its_gate(self):
+        classic_capital(self)
         fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="pilot")))
         fake = new_fake(writes_per_min=10_000)
         eng = engine(fake)
@@ -1625,7 +1638,14 @@ class PromotionTests(EngineCase):
         loop(eng, fake)
         loop(eng, fake)
         mm = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"]
-        for o in mm[:22]:
+        for o in mm[:22]:                                 # turnover MM: entries fill ...
+            fake.fill(o["id"], o["qty"])
+        for _ in range(2):
+            loop(eng, fake)
+        exits = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"
+                 and jx.reduces(o["side"], "buy", fake.pos.get(o["ex"], 0))]
+        self.assertTrue(exits, "the turnover MM offers its inventory back")
+        for o in exits:                                   # ... and the exits fill: round trips with realized P&L
             fake.fill(o["id"], o["qty"])
         old = f_engine.PILOT_S
         f_engine.PILOT_S = 0

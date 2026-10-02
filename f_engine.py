@@ -48,6 +48,7 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, DUMP_MIN_FAIR, DUMP_MIN_REF, DUMP_OFFSETS,
                       DUMP_REF_GAP, DUMP_COST, DUMP_MIN_SIDE_COST, DUMP_QUEUE_S, DUMP_BOOK_READS, DUMP_REBOUND_MIN, DUMP_HOLD_S,
                       DUMP_NEWS_DROP, DUMP_BREAKER_MARKETS, DUMP_BREAKER_FAIR, DUMP_PILOT_SIDES, DUMP_PILOT_S, DUMP_REARM_S,
+                      TMM_MID_HALF_LIFE_S, TMM_KAPPA_MAX, TMM_SIZE, TMM_CAP_SIDE, TMM_SKEW_TICKS, TMM_OFFER_MID_S, TMM_RELEASE_S,
                       INTEL_READS, INTEL_REVISIT_S, INTEL_DAILY_HOUR, HEADLINE_RACES)
 from d_ledger import Ledger, stamp, write_atomic
 
@@ -80,6 +81,7 @@ def host_id():
 
 # ====================================================================================================== controls
 LAYERS = ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "leaders"]
+TMM_ENABLED = True              # afternoon D-C: the engine's MM is the turnover MM (False: classic MM v2, tests only)
 LAYER_STATES = ("off", "pilot", "full")
 
 
@@ -325,6 +327,7 @@ class Engine:
         self.fat_sent = collections.deque(maxlen=5000)      # placement times (pilot gate: write usage)
         self.dump_now, self.dump_book, self.dump_block, self.dump_view, self.dump_ref = {}, {}, {}, {}, {}   # afternoon D-A
         self.dump_quota, self.dump_pilot, self.cross_log = 0, None, {}
+        self.tmm_mid, self.mid24, self.mm_since, self.tmm_inv = {}, {}, {}, collections.deque(maxlen=5000)   # afternoon D-C
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
@@ -514,6 +517,10 @@ class Engine:
         self.cash_hist = (getattr(self, "cash_hist", []) + [raw])[-3:]
         cash = min(self.cash_hist)                          # one glitchy read can't open the gates (06:12: +10.7k for a loop)
         self.update_mids(now)
+        try:
+            self.update_tmm(now)
+        except Exception as err:
+            self.event("ERR", f"turnover MM state: {err!r}")
         self.track_tranches(now)
         try:
             self.track_dumps(now)
@@ -926,7 +933,7 @@ class Engine:
         return dict(fair=f, u=self.ft.u.get(b.ex), bid=bid, ask=ask, ref=self.ref(b.ex), kappa=kappa,
                     roc_min=ROC_MIN_TIGHT if free < self.release_target()[0] else ROC_MIN, roc_hold=ROC_HOLD_MIN, held=q, release=rel,
                     fatfinger=self.fat_now.get(b.ex) or [], dump=self.dump_now.get(b.ex) or [],
-                    dump_tranches=self.dump_view.get(b.ex, []),
+                    dump_tranches=self.dump_view.get(b.ex, []), tmm=self.tmm_view(b.ex, f, bid, ask),
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
                     room={sd: max(0.0, MARKET_MAX_POS - held[sd]) for sd in ("yes", "no")},
@@ -1100,14 +1107,19 @@ class Engine:
                 continue
             st, age = stats.get(l, {}), now - since[l]
             ok, why = False, ""
-            if l == "mm" and age >= PILOT_S:
-                n, edge, mo = st.get("fills", 0), st.get("edge"), st.get("markout30")
-                if n >= 20 and edge is not None and edge > 0.01 and (mo is None or mo >= -0.005):
-                    ok, why = True, f"{n} fills, edge {edge * 100:+.2f}c, mark-out {(mo or 0) * 100:+.2f}c"
+            if l == "mm" and age >= PILOT_S:              # afternoon D-C gate for the turnover MM
+                n, mo, real, vol = st.get("fills", 0), st.get("markout30"), st.get("realized", 0.0), st.get("volume", 0.0)
+                inv = [c_ for t_, c_ in self.tmm_inv if t_ >= since[l]]
+                avg_inv = max(1_000.0, sum(inv) / len(inv)) if inv else 1_000.0
+                pace = vol / avg_inv * 86400 / max(age, 1)
+                trims = self.ex.trims.get("mm", 0)
+                if real > 0 and pace >= 2.0 and (mo is None or mo >= -0.005) and trims == 0:
+                    ok, why = True, (f"{n} fills, realized {real:+,.0f}, turnover {pace:.1f}x/day pace, mark-out "
+                                     f"{(mo or 0) * 100:+.2f}c, no I2 trims")
                 elif now - night.get(f"{l}_ext", 0) >= PILOT_S:
                     night[f"{l}_ext"] = now
-                    self.night.line(f"layer mm pilot extended 2 h: {n} fills, edge {(edge or 0) * 100:+.2f}c, "
-                                    f"mark-out {(mo or 0) * 100:+.2f}c (gate: >= 20 fills, edge > 1c, mark-out >= -0.5c)")
+                    self.night.line(f"layer mm (turnover) stays pilot: {n} fills, realized {real:+,.0f}, turnover {pace:.1f}x/day, "
+                                    f"mark-out {(mo or 0) * 100:+.2f}c, {trims} I2 trims (gate: realized > 0, >= 2x/day, >= -0.5c, 0)")
             if l == "ladder" and age >= PILOT_S:
                 trims = self.ex.trims.get("ladder", 0) - night.get("ladder_trims0", 0)
                 trips = night.get("breaker_trips_since_ladder", 0)
@@ -1425,6 +1437,54 @@ class Engine:
                 self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
                 self.event("BREAKER", msg)
                 self.night.line(msg)
+
+    # ------------------------------------------------------------------------------------------------ turnover MM (D-C)
+    def update_tmm(self, now):
+        """Per loop: the SIG mid EWMA (30 s half-life), a 5-min sample of it for the 24 h median, MM inventory age (offered
+        at SIG mid after 2 h; handed to the release layer after 6 h) and the MM inventory at cost (turnover)."""
+        for ex, (b, a, _) in self.px.items():
+            if b is None or a is None or a <= b:
+                continue
+            m = (b + a) / 2
+            t0, v = self.tmm_mid.get(ex, (now, m))
+            v = v + (1 - 0.5 ** (max(0.0, now - t0) / TMM_MID_HALF_LIFE_S)) * (m - v)
+            self.tmm_mid[ex] = (now, v)
+            h = self.mid24.setdefault(ex, collections.deque(maxlen=288))
+            if not h or now - h[-1][0] >= 300:
+                h.append((now, v))
+        inv = 0.0
+        for ex, books in self.ledger.subbooks.items():
+            q = books.get("mm", 0)
+            if abs(q) < MIN_QTY:
+                self.mm_since.pop(ex, None)
+                continue
+            self.mm_since.setdefault(ex, now)
+            mid = (self.tmm_mid.get(ex) or (0, 0.5))[1]
+            inv += abs(q) * (mid if q > 0 else 1 - mid)
+            if now - self.mm_since[ex] > TMM_RELEASE_S and self.controls.on("mm"):
+                self.ledger.move_sub(ex, "mm", "inventory")
+                self.mm_since.pop(ex, None)
+                self.event("MM", f"{self.name(ex)}: MM inventory {abs(q):,.0f} older than 6 h handed to the release layer")
+        self.tmm_inv.append((now, inv))
+
+    def tmm_view(self, ex, f, bid, ask):
+        """The turnover MM's inputs for one market (None while the MM layer is off for it)."""
+        if not TMM_ENABLED or f is None or not self.market_layers(ex).get("mm") or ex not in self.tmm_mid:
+            return None
+        mid = self.tmm_mid[ex][1]
+        h = self.mid24.get(ex) or []
+        if len(h) >= 12:                                    # >= 1 h of samples: SIG's own level over (up to) 24 h
+            xs = sorted(v for _, v in h)
+            med = xs[len(xs) // 2]
+        else:
+            med = self.ref(ex) if self.ref(ex) is not None else mid
+        q = self.ledger.subbooks.get(ex, {}).get("mm", 0)
+        cost = q * mid if q > 0 else q * (1 - mid)          # signed: + YES, - NO
+        tier = "A" if ex in self.fat_tiers() else "B"
+        return dict(mid=mid, kappa_mm=min(TMM_KAPPA_MAX, abs(med - f) + 0.01), size=TMM_SIZE[tier],
+                    room={"yes": max(0.0, TMM_CAP_SIDE - max(cost, 0.0)), "no": max(0.0, TMM_CAP_SIDE - max(-cost, 0.0))},
+                    skew=TMM_SKEW_TICKS * max(-1.0, min(1.0, cost / (0.5 * TMM_CAP_SIDE))),
+                    offer_mid=ex in self.mm_since and time.time() - self.mm_since[ex] > TMM_OFFER_MID_S)
 
     # ------------------------------------------------------------------------------------------------ dump catcher (D-A)
     def dump_pilot_sides(self, now):
@@ -2580,6 +2640,7 @@ class Engine:
                 r["mo_n"] += 1
             r["pnl_fair"] += self.fill_pnl_fair(f)
             r["realized"] += f.get("realized") or 0
+            r["volume"] = r.get("volume", 0.0) + f["qty"] * f["price"]
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
             if rec:

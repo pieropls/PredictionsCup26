@@ -98,6 +98,15 @@ BREAKER_WINDOW_S, BREAKER_MARKETS, BREAKER_SHARE, BREAKER_PAUSE_S = 600, 5, 0.8,
 BREAKER_FAIR_MOVE = 0.01        # ... and only if Polymarket fair moved >= 1c against those fills (news), not on MM flow
 MM_PILOT_MARKETS, LADDER_PILOT_MARKETS, PILOT_S = 10, 40, 2 * 3600
 REQUOTE_CANCELS_PER_MIN = 20    # A9: MM/ladder requote cancels per minute (one per write); picked-off quotes always go
+# turnover MM (afternoon D-C): quote at SIG's own level, Polymarket as a guardrail, inventory kept moving
+TMM_MID_HALF_LIFE_S = 30        # SIG mid EWMA (the microprice needs top-of-book sizes, which /exchanges/prices doesn't give)
+TMM_BUY_EDGE = 0.01             # never buy above fair_side - 1c
+TMM_KAPPA_MAX = 0.04            # never sell below fair_side - min(4c, |SIG 24 h median - fair| + 1c)
+TMM_SIZE = {"A": 1_500, "B": 300}   # SIG per quote
+TMM_CAP_SIDE = 5_000            # inventory at cost per market per side
+TMM_SKEW_TICKS = 3              # skew grows linearly to this at 50% of TMM_CAP_SIDE
+TMM_OFFER_MID_S, TMM_RELEASE_S = 2 * 3600, 6 * 3600   # older inventory: offered at SIG mid; then to the release layer
+TMM_TTL_S = 900
 
 # A6. pair bots: one per race. NO on every party pays >= legs-1; YES on every party pays 1 unless an outsider wins ---
 PAIR_ENABLED = True
@@ -112,7 +121,7 @@ PAIR_COOLDOWN_S = 30            # per race
 # A6b. night plan (docs/night_plan.md): capital buckets per layer, (pilot, full, max) in SIG. The dashboard can set a
 # layer's cap anywhere in 0..max; without an override the cap follows the layer's state (pilot / full) ----------------
 LAYER_CAPS = {
-    "mm": {"inventory": (3_000, 10_000, 25_000)},              # new inventory at cost (day 2 §1: full 15k -> 10k)
+    "mm": {"inventory": (10_000, 25_000, 40_000)},             # inventory at cost (afternoon D-C: turnover MM, 25k bucket)
     "ladder": {"filled": (3_000, 15_000, 25_000), "resting": (10_000, 60_000, 80_000)},
     "pairs": {"capital": (3_000, 10_000, 15_000)},
     "sniper": {"per_market": (1_000, 3_000, 3_000), "per_day": (10_000, 10_000, 10_000)},

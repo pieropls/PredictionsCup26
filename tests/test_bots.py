@@ -120,6 +120,30 @@ class MarketBotTests(unittest.TestCase):
         ws = self.b.plan(mb_state(fair=0.50, u=0.005, bid=0.40, ask=0.47, layers={"mm": True}))
         self.assertLess({w["side"]: w["px"] for w in ws}["yes"], 0.47, "a bid never at/above the ask")
 
+    def test_turnover_mm_quotes_at_sig_level_with_pm_guardrails(self):
+        tmm = lambda **k: dict(dict(mid=0.50, kappa_mm=0.04, size=300, room={"yes": 5000, "no": 5000}, skew=0.0, offer_mid=False), **k)
+        # SIG 0.48 / 0.52, mid 0.50: quotes join the touch (half spread 2c); PM fair 0.53 -> YES bid 0.48 <= 0.52 ok,
+        # NO bid 0.48 (YES ask 0.52) needs NO <= fair_no - 1c = 0.46 -> no NO entry
+        ws = self.b.plan(mb_state(fair=0.53, bid=0.48, ask=0.52, layers={"mm": True}, tmm=tmm()))
+        self.assertEqual([(w["side"], w["px"]) for w in ws if w["layer"] == "mm"], [("yes", 0.48)])
+        # fair 0.50: both sides 0.48 (each <= fair_side - 1c); a 1-tick spread -> quotes stay one tick off the touch's far side
+        ws = self.b.plan(mb_state(fair=0.50, bid=0.48, ask=0.52, layers={"mm": True}, tmm=tmm()))
+        self.assertEqual(sorted((w["side"], w["px"]) for w in ws), [("no", 0.48), ("yes", 0.48)])
+        # never buy above fair - 1c: PM fair 0.485 -> no YES bid at 0.48
+        ws = self.b.plan(mb_state(fair=0.485, bid=0.48, ask=0.52, layers={"mm": True}, tmm=tmm()))
+        self.assertNotIn("yes", [w["side"] for w in ws])
+        # long YES 2,000: sell at the SIG ask 0.52 even with PM fair 0.55 (>= fair - kappa_mm = 0.51), skewed lower
+        ws = self.b.plan(mb_state(fair=0.55, bid=0.48, ask=0.52, subs={"mm": 2000}, layers={"mm": True}, tmm=tmm(skew=1.0)))
+        ex_ = [w for w in ws if w["reduce"]]
+        self.assertEqual([(w["side"], w["qty"]) for w in ex_], [("no", 2000)])
+        self.assertAlmostEqual(1 - ex_[0]["px"], 0.515, places=3)            # ask 0.52 - 1 tick of skew
+        # ... but never below fair - kappa_mm: PM fair 0.60, kappa 0.04 -> 0.56 > ask -> no sell this loop
+        ws = self.b.plan(mb_state(fair=0.60, bid=0.48, ask=0.52, subs={"mm": 2000}, layers={"mm": True}, tmm=tmm()))
+        self.assertFalse([w for w in ws if w["reduce"]])
+        # inventory older than 2 h: offered at SIG mid
+        ws = self.b.plan(mb_state(fair=0.53, bid=0.48, ask=0.54, subs={"mm": 2000}, layers={"mm": True}, tmm=tmm(mid=0.51, offer_mid=True)))
+        self.assertAlmostEqual(1 - [w for w in ws if w["reduce"]][0]["px"], 0.51, places=3)
+
     def test_mm_reducing_side_always_quoted_even_when_paused_and_skewed(self):
         ws = self.b.plan(mb_state(fair=0.50, subs={"mm": 3000}, layers={"mm": True}, paused=True))
         self.assertEqual([(w["side"], w["qty"], w["reduce"]) for w in ws], [("no", 3000, True)], "only the reducing NO bid")
