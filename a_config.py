@@ -125,6 +125,10 @@ FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S = 0.15, 600, 1800
 FAT_MOVE = 0.10                 # re-place only when fair moves > 10c (or crosses FAT_MIN_FAIR)
 FAT_CAPACITY_SHARE = 0.30
 FAT_REFRESH_MAX_H = 60          # pilot gate: placements per hour after the initial placement (≈ 0: TTL, re-arm, queue steps)       # initial placement uses <= 30% of measured SIG capacity
+INTEL_READS, INTEL_REVISIT_S = 2, 1800    # day 2 §5 tape collector: markets a loop (spare reads only); revisit every 30 min
+INTEL_DAILY_HOUR = 7                      # docs/daily + docs/leaders + tier A refresh at 07:00 PT
+HEADLINE_RACES = ["U.S. Senate", "U.S. House", "Rhode Island Senate", "Oklahoma Senate", "Massachusetts Governor",
+                  "New Hampshire Senate", "Minnesota Senate"]   # always fat-finger tier A (morning_plan 1.4)
 FAT_BOOK_READS = 3              # queue reads (order books) per loop
 KAPPA_FROM_OCT30 = 0.03         # D3: capital discount from Oct 30 (election-night cash)
 LOSS_STOP = 2_000               # D5: bot-owned P&L at fair, rolling 24 h

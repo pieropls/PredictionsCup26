@@ -11,10 +11,10 @@ Every loop:
   F4  pairs     every PairBot screens its race; the best sets are sized from the books and sent atomically
   F5  record    data/ledger.json, data/state.json, data/dashboard.html, data/pnl.csv
 """
+import collections
 import csv
 import fcntl
 from concurrent.futures import ThreadPoolExecutor
-import collections
 import json
 import math
 import os
@@ -32,6 +32,7 @@ import e_bots as bots
 import g_dashboard as dashboard
 import i_realtime as rt
 import j_executor as jx
+import l_intel as intel
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
                       RISK_MAX_EXPOSURE, CASH_RESERVE, POSITION_BOTS, POSITION_MAX_ADD, MANUAL_MARKETS, MB_PM_MAX_SPREAD,
                       MB_FOCUS, MB_REFILL_S, MB_QUOTE_TTL_S, PAIR_ENABLED, PAIR_EDGE, PAIR_THIRD_PARTY, PAIR_MAX_QTY,
@@ -44,7 +45,8 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       OPPORTUNITY_RESERVE, ROC_MIN, ROC_MIN_TIGHT, RELEASE_EVERY_S, RELEASE_MARKETS, RELEASE_PILOT_TARGET,
                       FAT_LEVELS, FAT_SIZES, FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP, FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S,
                       FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S, FAT_MOVE, FAT_CAPACITY_SHARE, FAT_BOOK_READS, QTY_TOL,
-                      FAT_REFRESH_MAX_H, FILL_POLL_S)
+                      FAT_REFRESH_MAX_H, FILL_POLL_S,
+                      INTEL_READS, INTEL_REVISIT_S, INTEL_DAILY_HOUR, HEADLINE_RACES)
 from d_ledger import Ledger, stamp, write_atomic
 
 
@@ -322,6 +324,7 @@ class Engine:
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
         self.wake, self.rt_lock, self.rt_pending = threading.Event(), threading.Lock(), []   # realtime -> planner
         self.fill_retry = {}
+        self.tape, self.intel_px, self.intel_t, self.fair_series, self.intel_s = None, {}, {}, {}, {}   # day 2 §5
         self.requotes = []                                  # times of MM/ladder requote cancels (A9 cap)
         self.sig_feed = self.pm_feed = None
         self.latency = {k: [] for k in ("fill_to_queued", "pm_to_defend", "plan_cycle")}
@@ -638,11 +641,110 @@ class Engine:
         self.ledger.save()
         self.write_state(fresh)
         for job in (self.hourly, lambda: self.log_leaders(time.time()), lambda: self.leaders_marks_check(time.time()),
-                    lambda: self.scan_new_markets(time.time())):
+                    lambda: self.scan_new_markets(time.time()), lambda: self.intel_step(time.time()),
+                    lambda: self.intel_daily(time.time())):
             try:
                 job()
             except Exception as e:                          # side jobs must never stop trading
                 self.event("ERR", f"side job: {e!r}")
+
+    # ------------------------------------------------------------------------------------------------ intel (day 2 §5)
+    def intel_write(self, name, row):
+        os.makedirs(os.path.dirname(os.path.join(DATA, "intel", name)), exist_ok=True)
+        with open(os.path.join(DATA, "intel", name), "a") as fh:
+            fh.write(json.dumps(row, default=str) + "\n")
+
+    def fair_at(self, ex, ts):
+        """The engine's Polymarket fair of `ex` at time ts (sampled every 30 s, kept 3 h); None before the samples."""
+        s = self.fair_series.get(ex)
+        if not s:
+            return None
+        i = max((k for k, (t, _) in enumerate(s) if t <= ts + 1e-6), default=None)
+        if i is None:
+            return None if s[0][0] - ts > 60 else s[0][1]
+        return s[i][1] if ts - s[i][0] <= 1800 else None
+
+    def intel_step(self, now):
+        """Big-event detector, live (morning_plan 4.3). SIG's market channels deliver nothing, so the tape is read
+        incrementally (l_intel.TapeCollector): up to INTEL_READS markets a loop and only with spare reads, markets whose
+        last price changed first, every market at least every INTEL_REVISIT_S. Prints get the fair of their time."""
+        if now - self.intel_s.get("fair", 0) >= 30:
+            self.intel_s["fair"] = now
+            for ex, f in self.fair.items():
+                self.fair_series.setdefault(ex, collections.deque(maxlen=360)).append((now, f))
+        if self.coverage is not None and now - self.intel_s.get("cov", 0) >= 60:
+            self.intel_s["cov"] = now
+            c = self.coverage
+            self.intel_write("coverage.jsonl", dict(t=now, pct=round(100 * c["covered"] / c["eligible"], 1) if c["eligible"] else None,
+                                                    eligible=c["eligible"], covered=c["covered"], uncovered=len(c["reasons"])))
+        if not self.controls.on("leaders") or api.DRY_RUN:
+            return
+        if self.tape is None:
+            os.makedirs(os.path.join(DATA, "intel", "trades"), exist_ok=True)
+            self.tape = intel.TapeCollector(lambda path, p: api._req("GET", path, params=p), api.T["id"],
+                                            os.path.join(DATA, "intel", "state.json"))
+            head = [ex for ex, m in self.meta.items() if m.get("race") in HEADLINE_RACES]
+            with open(os.path.join(DATA, "intel", "names.json"), "w") as fh:
+                json.dump(dict(names={b.ex: self.name(b.ex) for b in self.bots if b.kind == "market"}, headline=head), fh)
+        exs = [b.ex for b in self.bots if b.kind == "market"]
+        last = lambda ex: (self.px.get(ex) or (None, None, None))[2]
+        changed = sorted((ex for ex in exs if last(ex) is not None and last(ex) != self.intel_px.get(ex)), key=lambda ex: self.intel_t.get(ex, 0))
+        stale = sorted((ex for ex in exs if now - self.intel_t.get(ex, 0) >= INTEL_REVISIT_S), key=lambda ex: self.intel_t.get(ex, 0))
+        for ex in list(dict.fromkeys(changed + stale))[:INTEL_READS]:
+            if not api.spare_reads(40):                     # §6: the loop's own reads first
+                break
+            new = self.tape.visit(ex)
+            self.intel_t[ex], self.intel_px[ex] = now, last(ex)
+            if not new:
+                continue
+            for r in new:
+                r["fair"] = self.fair_at(ex, r["ts"])
+                self.intel_write(f"trades/{datetime.fromtimestamp(r['ts']).strftime('%Y-%m-%d')}.jsonl", r)
+            for e in intel.detect(new, self.fair_at, {ex: self.name(ex)}):
+                self.intel_event(e)
+
+    def intel_event(self, e):
+        """One big event: what we caught, what our current levels would have caught (missed), logged everywhere."""
+        side, ex = e["gainer_side"], e["ex"]
+        caught_q = caught_v = 0.0
+        if side:
+            sf = e["fair"] if side == "yes" else 1 - e["fair"]
+            for f in self.ledger.fills[-500:]:
+                if f["ex"] == ex and f["action"] == "buy" and f["side"] == side and \
+                        e["t"] - 5 <= datetime.strptime(f["t"], "%Y-%m-%d %H:%M:%S").timestamp() <= e["t_end"] + 120:
+                    caught_q += f["qty"]
+                    caught_v += (sf - f["price"]) * f["qty"]
+            levels = [(o["price"], o["qty"]) for o in self.open if o["ex"] == ex and o["action"] == "buy" and o["side"] == side]
+            have = {round(p, 3) for p, _ in levels}
+            levels += [(w["px"], w["qty"]) for w in self.fat_now.get(ex) or [] if w["side"] == side and round(w["px"], 3) not in have]
+            _, would = intel.missed_value(e, levels)
+            e["missed_value"] = round(max(0.0, would - caught_v), 2)
+            e["missed_why"] = "no level on that side" if not levels else "levels now resting would have caught it"
+        e.update(captured_shares=round(caught_q), captured_value=round(caught_v, 2), had_orders=caught_q > 0)
+        self.intel_write("events.jsonl", e)
+        msg = (f"BIG EVENT {e['market']}: {e['shares']:,} shares at {e['p_lo']:.3f}-{e['p_hi']:.3f}"
+               + (f" (fair {e['fair']:.3f}), value {e['value']:,.0f}" if e["fair"] is not None else f", cost {e['cost']:,.0f}")
+               + f" [{', '.join(e['kinds'])}] · we caught {caught_v:,.0f}"
+               + (f" · missed {e['missed_value']:,.0f}" if e.get("missed_value") else ""))
+        self.event("EVENT", msg)
+        if (e.get("value") or 0) >= 10_000 or "Max sweep" in e["kinds"]:
+            self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+            self.night.line(msg)
+
+    def intel_daily(self, now):
+        """07:00 PT: docs/daily/<date>.md, docs/leaders/<date>.md, tier A refresh (local files only, no SIG reads)."""
+        day = time.strftime("%Y-%m-%d")
+        if time.localtime(now).tm_hour < INTEL_DAILY_HOUR or self.intel_s.get("daily") == day or api.DRY_RUN:
+            return
+        night = self.controls.d.setdefault("night", {})
+        if night.get("intel_daily") == day:
+            self.intel_s["daily"] = day
+            return
+        self.intel_s["daily"] = night["intel_daily"] = day
+        self.controls.save()
+        dpath, lpath, (add, drop) = intel.run_daily(DATA, os.path.join(os.path.dirname(DATA), "docs"), now)
+        self.night.line(f"daily intel: {os.path.relpath(dpath, os.path.dirname(DATA))}, {os.path.relpath(lpath, os.path.dirname(DATA))}; "
+                        f"tier A +{len(add)} −{len(drop)} (applied)")
 
     # ------------------------------------------------------------------------------------------------ realtime (P2)
     def rt_event(self, kind, exs, t):
@@ -2560,6 +2662,8 @@ class Engine:
                 if ex not in self.cov_logged and not any(u["ex"] == ex for u in un):
                     self.cov_logged.add(ex)
                     self.night.line(f"NEW MARKET {self.name(ex)} covered {time.time() - t0:.0f} s after it was seen")
+                    self.intel_write("new_markets.jsonl", dict(t=time.time(), ex=ex, market=self.name(ex), seen=t0,
+                                                                covered_s=round(time.time() - t0, 1)))
         return dict(money=money, daily=daily, series=self.series_view(), capital=capital, strategies=self.strategies_view(stats),
                     coverage=cov,
                     holdings=self.holdings_view(), activity=self.activity_view(), leader_thresholds=lm.get("thresholds"))

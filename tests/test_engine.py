@@ -9,6 +9,7 @@ No network, nothing sent.   python3 -m unittest tests.test_engine
 """
 import contextlib
 import csv
+import datetime
 import io
 import json
 import os
@@ -108,6 +109,7 @@ import d_ledger  # noqa: E402
 import e_bots as bots  # noqa: E402
 import f_engine  # noqa: E402
 import j_executor as jx  # noqa: E402
+import l_intel  # noqa: E402
 
 d_ledger.LEDGER_FILE = a_config.LEDGER_FILE               # whichever test module imported d_ledger first
 
@@ -1338,6 +1340,52 @@ class FatFingerTests(EngineCase):
         if cov["uncovered"]:
             rest = sum(o["qty"] * min(o["price"], 1 - o["price"]) for o in self.fat_orders(eng, fake))
             self.assertGreater(rest, eng.cap("fatfinger", "resting") - 2_400, "cap is used before sides go uncovered")
+
+
+class IntelTests(EngineCase):
+    def test_tape_sweep_becomes_a_big_event_with_missed_value(self):
+        fresh_data(layers=dict(position=dict(state="full"), leaders=dict(state="full")))
+        fake = new_fake()
+        eng = engine(fake)
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and eng.side_fair(b.ex, "yes") and eng.side_fair(b.ex, "yes") > 0.6)
+        now = time.time()
+        for b_ in eng.bots:                               # visited recently: only a price change brings a market back
+            eng.intel_t[b_.ex], eng.intel_px[b_.ex] = now, (fake.px.get(b_.ex) or (None, None, None))[2]
+        stamp_ = lambda t: datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        fake.tape = {ex: [dict(id="900", createdAt=stamp_(now - 2), price=0.05, size=60_000),
+                          dict(id="901", createdAt=stamp_(now - 1), price=0.04, size=20_000)]}
+        b, a, _ = fake.px[ex]
+        fake.px[ex] = eng.px[ex] = (b, a, 0.04)           # the loop read a new last price: the collector reads this market first
+        eng.fat_now = {ex: [dict(side="yes", px=0.12, qty=5_000), dict(side="yes", px=0.08, qty=10_000)]}
+        eng.intel_step(time.time())
+        evs = [json.loads(l) for l in open(os.path.join(TMP, "intel", "events.jsonl"))]
+        self.assertEqual(len(evs), 1)
+        e = evs[0]
+        self.assertIn("Max sweep", e["kinds"])
+        self.assertEqual((e["ex"], e["gainer_side"], e["shares"]), (ex, "yes", 80_000))
+        f = eng.side_fair(ex, "yes")
+        self.assertAlmostEqual(e["missed_value"], 5_000 * (f - 0.12) + 10_000 * (f - 0.08), places=0)
+        self.assertTrue(any(x["kind"] == "EVENT" and "BIG EVENT" in x["text"] for x in eng.events))
+        rows = open(os.path.join(TMP, "intel", "trades", datetime.datetime.fromtimestamp(now).strftime("%Y-%m-%d") + ".jsonl")).read()
+        self.assertIn('"id": "901"', rows)
+        n = fake.tape_reads
+        eng.intel_step(time.time())                       # nothing changed: no reads
+        self.assertEqual(fake.tape_reads, n)
+
+    def test_daily_report_and_leaders_study_from_local_files(self):
+        fresh_data(layers=dict(position=dict(state="full"), leaders=dict(state="full")))
+        fake = new_fake()
+        eng = engine(fake)
+        loop(eng, fake)
+        eng.intel_step(time.time())
+        docs = os.path.join(TMP, "docs")
+        dpath, lpath, _ = l_intel.run_daily(TMP, docs, time.time())
+        md = open(dpath).read()
+        for h in ("## 1. Scoreboard", "## 2. Where the money went", "## 3. What we captured vs missed", "## 4. Leaders",
+                  "## 5. Coverage", "## 6. Recommendations"):
+            self.assertIn(h, md)
+        self.assertIn("## Style rules", open(lpath).read())
 
 
 class LeadersTests(EngineCase):

@@ -1,13 +1,17 @@
-"""Tape study: where did the money on SIG come from since the cup opened, and what of it can we copy?
+"""Tape study: where did the money on SIG come from since the cup opened (corrected method, day 2 §5 / morning_plan 4.1).
 
-python3 -u k_tape_study.py            (run from ~/Desktop/susquehanna; resumable; reads only, never trades)
+python3 -u k_tape_study.py                 collect (incremental, resumable) + analyse -> docs/TAPE_STUDY.md
+python3 -u k_tape_study.py --analyse-only  analyse what's on disk
+python3 k_tape_study.py --daily            docs/daily/<date>.md + docs/leaders/<date>.md + tier A refresh (local files only;
+                                           the engine also runs this at 07:00 PT)
+python3 k_tape_study.py --leaders          docs/leaders/<date>.md only
 
-Reads (throttled to READS_PER_MIN so the live engine keeps its budget):
-  every market's trade tape since the tournament start, the leaderboard (day + all), Polymarket price history.
-Writes: data/tape/trades.jsonl (raw), data/tape/pm_history.json, data/tape/leaders.json, data/tape/summary.json,
-        docs/TAPE_STUDY.md (the report).
-The tape has no usernames: this measures the market's money flows (who captured value: makers or takers, in which
-situations), and the leaderboard's volume/ROI per account. It cannot see sunny-acorn's trades directly."""
+Corrected method: the tape's `side` is NOT the aggressor (a tick-rule check agrees 50.7%), so there is no maker/taker split.
+The number reported is the value that changed hands at a wrong price: sum |price - Polymarket fair| x shares, by situation,
+distance from fair, size, hour and market. Trade ids are saved; prints are ordered by (time, id) per market.
+Collection is incremental: data/tape/state.json keeps the newest trade per exchange (the engine's live collector keeps
+its own in data/intel/state.json), so a re-run only reads what's new. Reads: <= READS_PER_MIN (the engine shares the
+account's 100/min). Leaderboard periods: 1d / 7d / 30d / all (from /api/v1/openapi.json; "day" is a 400)."""
 import bisect
 import collections
 import datetime as dt
@@ -20,8 +24,9 @@ import urllib.request
 import requests
 
 import a_config as C
+import l_intel as li
 
-READS_PER_MIN = 30                       # account budget is 100/min, shared with the live engine
+READS_PER_MIN = 20                       # account budget is 100/min, shared with the live engine (~60-75/min)
 OUT = os.path.join(C.DATA, "tape")
 GAMMA, CLOB = "https://gamma-api.polymarket.com", "https://clob.polymarket.com"
 S = requests.Session()
@@ -81,33 +86,33 @@ def collect():
     json.dump(dict(tid=tid, start=start, markets=mk), open(os.path.join(OUT, "meta.json"), "w"))
     print(f"{len(mk)} markets, tape since {start}", flush=True)
 
-    done_file, raw = os.path.join(OUT, "done.txt"), os.path.join(OUT, "trades.jsonl")
-    done = set(open(done_file).read().split()) if os.path.exists(done_file) else set()
+    raw, state_path = os.path.join(OUT, "trades.jsonl"), os.path.join(OUT, "state.json")
+    boundary = collections.defaultdict(set)
+    if not os.path.exists(state_path) and os.path.exists(raw):     # seed from the first (id-less) collection
+        newest = {}
+        for line in open(raw):
+            r = json.loads(line)
+            if r["t"] > newest.get(r["ex"], ""):
+                newest[r["ex"]] = r["t"]
+        json.dump({ex: dict(id="0", t=t) for ex, t in newest.items()}, open(state_path, "w"))
+    for line in (open(raw) if os.path.exists(raw) else []):           # prints at a seeded boundary time: skip re-reads
+        r = json.loads(line)
+        boundary[r["ex"]].add((r["t"], r["p"], r["q"]))
+    col = li.TapeCollector(lambda path, p: sig(path, **p), tid, state_path, first_window_s=time.time() - ts(start), max_pages=1000)
     for i, ex in enumerate(sorted(mk)):
-        if ex in done:
-            continue
-        rows, cursor = [], None
-        while True:
-            p = dict(tournamentId=tid, limit=200, **{"from": start})
-            if cursor:
-                p["cursor"] = cursor
-            d = sig(f"/exchanges/{ex}/trades", **p)
-            rows += [dict(ex=ex, t=x["createdAt"], p=x["price"], q=x["size"], side=x["side"], vol=x.get("volume"))
-                     for x in d["data"] if x.get("price") is not None]
-            if not d["pagination"]["hasMore"]:
-                break
-            cursor = d["pagination"]["nextCursor"]
+        new = col.visit(ex)
+        rows = [dict(id=r["id"], ex=ex, t=dt.datetime.fromtimestamp(r["ts"], dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+                     p=r["p"], q=r["q"]) for r in new]
+        rows = [r for r in rows if (r["t"], r["p"], r["q"]) not in boundary.get(ex, ())]
         with open(raw, "a") as fh:
             for r in rows:
                 fh.write(json.dumps(r) + "\n")
-        with open(done_file, "a") as fh:
-            fh.write(ex + "\n")
-        print(f"  [{i + 1}/{len(mk)}] ex {ex}: {len(rows)} trades", flush=True)
+        print(f"  [{i + 1}/{len(mk)}] ex {ex}: {len(rows)} new trades", flush=True)
 
     leaders = {}
-    for per in ("day", "all"):
+    for per in ("1d", "all"):                                     # the enum is 1d/7d/30d/all ("day" is a 400)
         try:
-            leaders[per] = sig("/leaderboards", tournamentSlug=C.TOURNAMENT, period=per, limit=100)
+            leaders[per] = sig(f"/tournaments/{C.TOURNAMENT}/leaderboard", period=per, limit=100, sort="pnl")
         except Exception as e:
             print("  leaderboard", per, "failed:", repr(e)[:100], flush=True)
     json.dump(leaders, open(os.path.join(OUT, "leaders.json"), "w"))
@@ -149,21 +154,13 @@ def _at(series, t):
 
 # ------------------------------------------------------------------ 2. analyse
 def analyse(trades, pmh, meta, leaders):
-    """trades: [{ex, t, p, q, side}] YES-normalized; pmh: {ex: [(t, fair)]}. Returns the summary dict."""
+    """trades: [{ex, t, p, q[, id]}] YES-normalized; pmh: {ex: [(t, fair)]}. Value at a wrong price, no maker/taker."""
     mk = meta["markets"]
     start = ts(meta["start"])
     times = {ex: [x[0] for x in s] for ex, s in pmh.items()}
-    for r in trades:
+    for i, r in enumerate(trades):
         r["ts"] = ts(r["t"])
-    trades.sort(key=lambda r: (r["ex"], r["ts"]))
-
-    # Which tape side is the aggressor? In a burst (same market, < 3 s apart) a buyer of YES walks the price up.
-    agree = n = 0
-    for a, b in zip(trades, trades[1:]):
-        if a["ex"] == b["ex"] and b["ts"] - a["ts"] < 3 and a["side"] == b["side"] and b["p"] != a["p"]:
-            n += 1
-            agree += (b["p"] > a["p"]) == (b["side"] == "YES")
-    side_is_taker = n == 0 or agree / n >= 0.5
+        r.setdefault("id", str(i))
 
     def fair(ex, t, lag=0):
         s = pmh.get(ex)
@@ -174,54 +171,34 @@ def analyse(trades, pmh, meta, leaders):
             return None
         return s[i][1]
 
-    # bursts = sweeps: same market, same aggressor side, trades < 5 s apart, >= 3 prints or >= 5c of price travel
-    burst_id, bid = {}, 0
-    i = 0
-    while i < len(trades):
-        j = i
-        while (j + 1 < len(trades) and trades[j + 1]["ex"] == trades[i]["ex"] and trades[j + 1]["side"] == trades[i]["side"]
-               and trades[j + 1]["ts"] - trades[j]["ts"] < 5):
-            j += 1
-        if j - i + 1 >= 3 or abs(trades[j]["p"] - trades[i]["p"]) >= 0.05:
-            bid += 1
-            for k in range(i, j + 1):
-                burst_id[k] = bid
-        i = j + 1
-
+    in_burst = {r["id"] for b in li.bursts(trades) if len(b) >= 3 or abs(b[-1]["p"] - b[0]["p"]) >= 0.05 for r in b}
     rows = []
-    for k, r in enumerate(trades):
+    for r in li.order(trades):
         f = fair(r["ex"], r["ts"])
         if f is None:
             continue
-        buy_yes = (r["side"] == "YES") == side_is_taker            # taker bought YES?
-        taker_edge = (f - r["p"]) if buy_yes else (r["p"] - f)     # per share, vs Polymarket fair at that time
         f_before = fair(r["ex"], r["ts"], lag=600)
-        pm_move = None if f_before is None else f - f_before        # Polymarket move over the previous 10 min
-        if burst_id.get(k):
-            kind = "sweep (taker walked the book)"
+        pm_move = None if f_before is None else f - f_before
+        if r["id"] in in_burst:
+            kind = "sweep / burst (prints < 5 s apart)"
         elif r["ts"] - start < 3 * 3600 and abs(r["p"] - f) >= 0.10:
             kind = "opening mispricing (first 3 h)"
-        elif pm_move is not None and abs(pm_move) >= 0.02 and taker_edge >= 0.02 and (pm_move > 0) == buy_yes:
-            kind = "stale quote picked off after a PM move"
+        elif pm_move is not None and abs(pm_move) >= 0.02:
+            kind = "within 10 min of a >= 2c Polymarket move"
         else:
             kind = "ordinary"
-        rows.append(dict(ex=r["ex"], t=r["t"], p=r["p"], q=r["q"], fair=round(f, 4), buy_yes=buy_yes,
-                         taker=round(taker_edge * r["q"], 2), edge=round(taker_edge, 4), kind=kind,
+        rows.append(dict(ex=r["ex"], id=r["id"], t=r["t"], p=r["p"], q=r["q"], fair=round(f, 4), kind=kind,
+                         value=round(abs(r["p"] - f) * r["q"], 2), wrong=li.wrong_side(r["p"], f),
                          title=mk.get(r["ex"], {}).get("title", r["ex"])))
 
     def tally(key):
-        out = collections.defaultdict(lambda: dict(trades=0, shares=0, taker_pnl=0.0, maker_pnl=0.0))
+        out = collections.defaultdict(lambda: dict(trades=0, shares=0, value=0.0))
         for x in rows:
             o = out[key(x)]
             o["trades"] += 1
             o["shares"] += x["q"]
-            o["taker_pnl"] += x["taker"]
-            o["maker_pnl"] -= x["taker"]
+            o["value"] += x["value"]
         return {k: {kk: round(vv, 1) if isinstance(vv, float) else vv for kk, vv in v.items()} for k, v in sorted(out.items())}
-
-    def disloc(x):
-        d = abs(x["p"] - x["fair"])
-        return "<2c" if d < .02 else "2-5c" if d < .05 else "5-10c" if d < .10 else "10-25c" if d < .25 else ">25c"
 
     def size(x):
         q = x["q"]
@@ -230,59 +207,77 @@ def analyse(trades, pmh, meta, leaders):
     def hour(x):
         return dt.datetime.fromisoformat(x["t"].replace("Z", "+00:00")).astimezone(dt.timezone(dt.timedelta(hours=-7))).strftime("%m-%d %H:00 PT")
 
-    top = sorted(rows, key=lambda x: -abs(x["taker"]))[:100]
+    by_market = tally(lambda x: x["title"])
+    by_market = dict(sorted(by_market.items(), key=lambda kv: -kv[1]["value"])[:30])
     lead = []
     for per, d in leaders.items():
         for e in d.get("leaderboard", [])[:25]:
             v, nt = e.get("volume") or 0, e.get("tradesCount") or 0
             lead.append(dict(period=per, rank=e["rank"], user=e.get("username"), pnl=round(e["pnl"]), trades=nt,
-                             volume=round(v), roi=e.get("roi"), win=e.get("winRate"),
+                             volume=round(v), roi=e.get("roi"), style=li.style(e["pnl"], nt, v),
                              pnl_per_volume=round(e["pnl"] / v, 4) if v else None, volume_per_trade=round(v / nt) if nt else None))
-    return dict(side_is_taker=side_is_taker, side_check=f"{agree}/{n}", trades_total=len(trades), trades_with_fair=len(rows),
-                by_kind=tally(lambda x: x["kind"]), by_dislocation=tally(disloc), by_size=tally(size), by_hour=tally(hour),
-                top_trades=top, leaders=lead)
+    return dict(trades_total=len(trades), trades_with_fair=len(rows), value_total=round(sum(x["value"] for x in rows)),
+                by_kind=tally(lambda x: x["kind"]), by_dislocation=tally(lambda x: li.dist_bin(abs(x["p"] - x["fair"]))),
+                by_size=tally(size), by_hour=tally(hour), by_market=by_market,
+                top_trades=sorted(rows, key=lambda x: -x["value"])[:100], leaders=lead)
 
 
 # ------------------------------------------------------------------ 3. report
 def report(s):
-    L = ["# Tape study: where the money came from", "",
+    L = ["# Tape study: where the money came from (corrected method)", "",
          f"Generated {time.strftime('%Y-%m-%d %H:%M')} by `k_tape_study.py`. {s['trades_total']:,} trades on the tape, "
-         f"{s['trades_with_fair']:,} with a Polymarket fair at that time. Edge = vs the Polymarket mid at the trade time. "
-         f"Tape side read as the {'aggressor' if s['side_is_taker'] else 'resting order'} (burst check {s['side_check']}).",
-         "", "Taker P&L > 0: the aggressor got the better of the trade. Maker P&L > 0: resting orders won.", ""]
+         f"{s['trades_with_fair']:,} with a Polymarket fair at that time: **{s['value_total']:,}** SIG changed hands at a wrong "
+         f"price (Σ |price − fair| × shares). The tape's side is not the aggressor, so there is no maker/taker split.", ""]
 
     def table(title, d):
-        L.extend([f"## {title}", "", "| bucket | trades | shares | taker P&L | maker P&L |", "|---|---:|---:|---:|---:|"])
+        L.extend([f"## {title}", "", "| bucket | trades | shares | value at a wrong price |", "|---|---:|---:|---:|"])
         for k, v in d.items():
-            L.append(f"| {k} | {v['trades']:,} | {v['shares']:,} | {v['taker_pnl']:+,.0f} | {v['maker_pnl']:+,.0f} |")
+            L.append(f"| {k} | {v['trades']:,} | {v['shares']:,.0f} | {v['value']:,.0f} |")
         L.append("")
 
     table("By situation", s["by_kind"])
-    table("By distance from fair", s["by_dislocation"])
+    table("By distance from fair", {b: s["by_dislocation"][b] for b in li.BINS if b in s["by_dislocation"]})
     table("By trade size (shares)", s["by_size"])
     table("By hour (PT)", s["by_hour"])
+    table("By market (top 30)", s["by_market"])
     L.extend(["## Leaderboard: how the leaders trade", "",
-              "| period | # | user | P&L | trades | volume | P&L / volume | volume / trade | ROI | win rate |",
-              "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|"])
+              "| period | # | user | style | P&L | trades | volume | P&L / volume | volume / trade | ROI |",
+              "|---|---:|---|---|---:|---:|---:|---:|---:|---:|"])
     for e in s["leaders"]:
-        L.append(f"| {e['period']} | {e['rank']} | {e['user']} | {e['pnl']:+,} | {e['trades']:,} | {e['volume']:,} | "
-                 f"{e['pnl_per_volume']} | {e['volume_per_trade']} | {e['roi']} | {e['win']} |")
-    L.extend(["", "## 100 biggest trades by value transferred", "",
-              "| time | market | taker bought | price | PM fair | shares | taker P&L | situation |", "|---|---|---|---:|---:|---:|---:|---|"])
+        L.append(f"| {e['period']} | {e['rank']} | {e['user']} | {e['style']} | {e['pnl']:+,} | {e['trades']:,} | {e['volume']:,} | "
+                 f"{e['pnl_per_volume']} | {e['volume_per_trade']} | {e['roi']} |")
+    L.extend(["", "## 100 biggest trades by value at a wrong price", "",
+              "| time | market | price | PM fair | shares | value | wrong side | situation |", "|---|---|---:|---:|---:|---:|---|---|"])
     for x in s["top_trades"]:
-        L.append(f"| {x['t'][5:16]} | {x['title'][:55]} | {'YES' if x['buy_yes'] else 'NO'} | {x['p']:.3f} | {x['fair']:.3f} | "
-                 f"{x['q']:,} | {x['taker']:+,.0f} | {x['kind']} |")
-    L.extend(["", "## What's copyable (read with the tables above)", "",
-              "- **Maker P&L large in sweeps / >10c buckets** → resting deep ladders on every market (night_plan §5.3) capture it.",
-              "- **Taker P&L large in 'stale quote picked off'** → speed: P2 realtime + takes on PM moves (A9).",
-              "- **Opening mispricing large** → the new-market sniper (§5.5) matters; it only pays if SIG adds markets.",
-              "- **Leaders' P&L / volume and volume / trade** show their edge per SIG traded and their size: compare with ours.", ""])
+        L.append(f"| {x['t'][5:16]} | {x['title'][:55]} | {x['p']:.3f} | {x['fair']:.3f} | {x['q']:,.0f} | {x['value']:,.0f} | "
+                 f"{x['wrong']} | {x['kind']} |")
     path = os.path.join(os.path.dirname(C.DATA), "docs", "TAPE_STUDY.md")
-    open(path, "w").write("\n".join(L))
+    keep = ""
+    try:                                                # keep the hand-written reading above the generated part
+        old = open(path).read()
+        cut = old.find("\n---\n\n# Tape study")
+        keep = old[:cut] + "\n---\n\n" if cut > 0 else ""
+    except OSError:
+        pass
+    open(path, "w").write(keep + "\n".join(L) + "\n")
     return path
 
 
 def main():
+    docs = os.path.join(os.path.dirname(C.DATA), "docs")
+    if "--daily" in sys.argv or "--leaders" in sys.argv:
+        if "--daily" in sys.argv:
+            print("daily:", li.run_daily(C.DATA, docs, time.time()), flush=True)
+        else:
+            import csv
+            rows = list(csv.DictReader(open(os.path.join(C.DATA, "leaders.csv"))))
+            evs = li._jsonl(os.path.join(C.DATA, "intel", "events.jsonl"), time.time() - 86400)
+            md, _ = li.leaders_study(rows, evs, {}, time.time())
+            os.makedirs(os.path.join(docs, "leaders"), exist_ok=True)
+            path = os.path.join(docs, "leaders", time.strftime("%Y-%m-%d") + ".md")
+            open(path, "w").write(md)
+            print("leaders:", path, flush=True)
+        return
     if "--analyse-only" not in sys.argv:
         collect()
     meta = json.load(open(os.path.join(OUT, "meta.json")))

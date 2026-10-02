@@ -110,6 +110,14 @@ class FakeSIG:
         return {str(e): self.px.get(str(e), (None, None, None)) for e in exs}
 
     spare = True                                          # the read governor (b_sig.spare_reads): tests can tighten it
+    tape = {}                                             # {ex: [trade, ...]} for /exchanges/{ex}/trades (intel)
+
+    def _req(self, method, path, params=None, **kw):
+        assert method == "GET" and path.startswith("/exchanges/") and path.endswith("/trades"), path
+        self.tape_reads = getattr(self, "tape_reads", 0) + 1
+        ex = path.split("/")[2]
+        rows = sorted((r for r in self.tape.get(ex, []) if r["createdAt"] >= (params or {}).get("from", "")), key=lambda r: -int(r["id"]))
+        return dict(data=rows[:200], pagination=dict(hasMore=False, nextCursor=None))
 
     def spare_reads(self, keep=30):
         return self.spare
