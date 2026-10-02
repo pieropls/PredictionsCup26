@@ -814,6 +814,24 @@ class RequoteCapTests(EngineCase):
                                      f"one MM quote per side on {e_}: a deferred cancel defers its replacement")
 
 
+class FloorTests(EngineCase):
+    def test_hard_cash_floor_is_restored_after_fills(self):
+        fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)
+        loop(eng, fake)
+        committed = eng.committed()
+        self.assertGreater(committed, 1000)
+        rich = fake.pnl()
+        fake.pnl = lambda: dict(rich, totalAccountValue=rich["totalHoldingsValue"] + a_config.CASH_RESERVE + committed / 2)
+        loop(eng, fake)                                   # cash fell (fills elsewhere): half the quotes no longer fit
+        loop(eng, fake)
+        self.assertLessEqual(eng.committed() + a_config.CASH_RESERVE,
+                             fake.pnl()["totalAccountValue"] - fake.pnl()["totalHoldingsValue"] + 1e-6, "floor restored")
+        self.assertTrue(any(e["kind"] == "FLOOR" for e in eng.events))
+
+
 class BreakerTests(EngineCase):
     def test_correlated_fills_trip_the_breaker(self):
         fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="full")))

@@ -950,12 +950,41 @@ class Engine:
                 self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
                 self.event("BREAKER", msg)
                 self.night.line(msg)
+        self.restore_floor()
         self.alerts = self.alerts[-20:]
         # D1: release 25% of the AK position to the recycler once the recycler is on (night plan §1)
         if c.on("recycler") and not night.get("d1_done"):
             self.apply_d1()
         if json.dumps(night, sort_keys=True, default=str) != before:
             c.save()                                        # only on a change: a hand edit on disk is never overwritten
+
+    def restore_floor(self):
+        """§4.2 hard floor: free cash - every resting MM/take entry buy >= CASH_RESERVE. Fills spend cash while the other
+        quotes stay, so it can slip: cancel resting entries, lowest ROC first, until the deficit is covered (admission
+        keeps them from coming back until cash recovers)."""
+        a = self.acct or {}
+        cash = (a.get("totalAccountValue") or 0) - (a.get("totalHoldingsValue") or 0)
+        deficit = self.committed() + CASH_RESERVE - cash
+        if deficit <= 0 or not a:
+            return 0
+        cands = []
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"])
+            if not rec or o["action"] != "buy" or rec["layer"] not in ("mm", "take") or o["id"] in self.ex.cancelling or \
+                    jx.reduces(o["side"], "buy", self.book.get(o["ex"], {}).get("pos", 0)):
+                continue
+            f = self.side_fair(o["ex"], o["side"])
+            cands.append((bots.roc_of(f, o["price"]) if f is not None else -1.0, o))
+        freed, n = 0.0, 0
+        for _, o in sorted(cands, key=lambda t: t[0]):
+            if freed >= deficit:
+                break
+            if self.ex.cancel(o, reason="cash floor"):
+                freed += o["qty"] * o["price"]
+                n += 1
+        if n:
+            self.event("FLOOR", f"cash floor short by {deficit:,.0f}: {n} lowest-ROC entry quotes cancelled ({freed:,.0f} SIG)")
+        return n
 
     def apply_d1(self):
         c, night = self.controls, self.controls.d.setdefault("night", {})
