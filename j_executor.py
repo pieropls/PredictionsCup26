@@ -1,6 +1,7 @@
 """J. EXECUTOR: every SIG write goes through here (plan_review A7/A8, invariants I2, I4, I6-I8).
 
-  priority     0 cancels · 1 position exits & trims · 2 takes · 3 rebounds/recycler · 4 pair sets · 5 MM quotes · 6 ladders
+  priority     0 cancels · 1 position exits & trims · 2 takes · 3 rebounds/recycler/release · 4 pair sets · 5 MM quotes ·
+               6 ladders · 7 fat-finger levels (background coverage)
   two lanes    a cancel lane (only cancels, so a cancel never waits behind a placement) and a placement lane
   budget       one token bucket (b_sig.writes_left); placements leave CANCEL_RESERVE writes for the cancel lane;
                a 429 pauses both lanes for Retry-After
@@ -25,7 +26,7 @@ import uuid
 from datetime import datetime, timedelta
 
 PRIORITY = {"cancel": 0, "position": 1, "trim": 1, "take": 2, "rebound": 3, "recycle": 3, "repair": 3, "unwind": 3,
-            "set": 4, "mm": 5, "exit": 3, "touch": 5, "ladder": 6, "add": 1}
+            "set": 4, "mm": 5, "exit": 3, "touch": 5, "ladder": 6, "add": 1, "release": 3, "fatfinger": 7}
 
 
 def reduces(side, action, pos):

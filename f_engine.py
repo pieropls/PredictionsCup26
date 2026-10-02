@@ -321,6 +321,7 @@ class Engine:
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
         self.wake, self.rt_lock, self.rt_pending = threading.Event(), threading.Lock(), []   # realtime -> planner
+        self.fill_retry = {}
         self.requotes = []                                  # times of MM/ladder requote cancels (A9 cap)
         self.sig_feed = self.pm_feed = None
         self.latency = {k: [] for k in ("fill_to_queued", "pm_to_defend", "plan_cycle")}
@@ -464,6 +465,16 @@ class Engine:
             e = "" if f["edge"] is None else f" | vs PM {f['edge'] * 100:+.1f}c, vs SIG mid {(f['sig_edge'] or 0) * 100:+.1f}c"
             self.event("FILL", f"{f['bot']} [{f['layer'] or '-'}]: {f['action'] or 'trade'} {f['side'].upper()} {f['qty']:,.0f} @ {f['price']:.3f}{e}")
         self.new_fill_orders = new_orders
+        # §6: SIG's fill notification can beat its REST fills page; a notification that found nothing re-polls in 2 s (x2)
+        if not fill_exs:
+            retry = [(t_ev, k, x) for t_ev, k, x in events if k == "fills" and self.fill_retry.get(t_ev, 0) < 2]
+            for t_ev, k, x in retry:
+                self.fill_retry[t_ev] = self.fill_retry.get(t_ev, 0) + 1
+            if retry:
+                with self.rt_lock:
+                    self.rt_pending = retry + self.rt_pending
+                self.wake.set()
+        self.fill_retry = {t_: n for t_, n in self.fill_retry.items() if t_ > now - 120}
         self.ledger.markouts(self.side_mid)
         try:
             self.fat_fill_events([f for f in self.ledger.fills[-200:] if f["order"] in self.new_fill_orders]) \
@@ -508,10 +519,12 @@ class Engine:
                               budget=round(cash - CASH_RESERVE - used["committed"]))
         budget = self.risk_view["budget"]
 
-        # F2a pairs first: unwinds and repairs always; new sets only with the pairs layer on and new risk allowed
+        # F2a pairs first: unwinds and repairs always; new sets only with the pairs layer on and new risk allowed. A loop
+        # woken by our own fills skips new sets (their book reads take 1-3 s): exits go out first (day 2 §6)
         t0 = time.time()
-        shots, spent = self.run_pairs(now, min(budget - OPPORTUNITY_RESERVE, self.cap("pairs", "capital") - used["pairs"]), kappa) \
-            if self.controls.on("pairs") else (0, 0.0)
+        fill_loop = any(k == "fills" for _, k, _ in events)
+        shots, spent = self.run_pairs(now, min(budget - OPPORTUNITY_RESERVE, self.cap("pairs", "capital") - used["pairs"]), kappa,
+                                      new_sets=not fill_loop) if self.controls.on("pairs") else (0, 0.0)
         self.t["pairs"] = time.time() - t0
         t0 = time.time()
         # each bot sees only its own orders: resting ones it placed (ownership record) + its queued/in-flight ones
@@ -1509,7 +1522,7 @@ class Engine:
         return sum(l[3] for l in legs) - self.ledger.matched(bk) * bk["legs"] if legs else 0
 
     # ------------------------------------------------------------------------------------------------ F2a / F4 pairs
-    def run_pairs(self, now, budget, kappa=0.0):
+    def run_pairs(self, now, budget, kappa=0.0, new_sets=True):
         """Pairs v2 (A12). Unwinds first (no ROC, no cap, not paused): a NO basket when the YES ask sum <= n-1+kappa, a
         YES set when the YES bid sum >= 1 - outsider - kappa, sent atomically. Then new sets (pairs layer on, new risk
         allowed): edge >= PAIR_EDGE (2c), EV vs fair >= 0 (>= 3c when a leg has no fair), sized from the books with our
@@ -1553,7 +1566,7 @@ class Engine:
             self.ex.place([(pb.name, f"pairset:{bk['id']}", "unwind", o) for o in orders], ttl_s=PAIR_TTL_S, atomic=True, on_done=unwound)
             self.event("UNWIND", f"{bk['race']}: {bk['side'].upper()} set x{int(m):,} unwound early at "
                                  f"{' + '.join(f'{o[3]:.3f}' for o in orders)} (keeps the locked edge, frees the capital)")
-        if self.controls.paused:
+        if self.controls.paused or not new_sets:
             return 0, 0.0
         own = {}
         for o in self.open:
@@ -1852,15 +1865,18 @@ class Engine:
         live = " · ".join(f"{l} {c.state(l)}" for l in LAYERS) + (" · NEW RISK PAUSED" if c.paused else "")
         kills = [f"{l}: {v['killed']['reason']}" for l, v in c.d["layers"].items() if v.get("killed")]
         st = self.ex.stats()
-        self.night.entry(f"{time.strftime('%H:%M')} PT (engine, hourly)", [
-            f"live: {live}",
-            f"account @ fair {fair_now:,.0f} (night start {night['start_fair']:,}, {fair_now - night['start_fair']:+,.0f}) · "
-            f"leaderboard {(self.acct or {}).get('totalAccountValue', 0):,.0f} (SIG marks, not the score) · free cash {cash:,.0f} · "
-            f"realized today {self.realized_today():+,.0f}",
-            f"fills last hour: {', '.join(f'{k} {n}' for k, n in sorted(per.items())) or 'none'}",
-            "latency p50/p90 s: " + ", ".join(f"{k} {v['p50']}/{v['p90']} (n {v['n']})" for k, v in self.latency_view().items()),
-            f"kills/rollbacks: {'; '.join(kills) or 'none'} · errors last hour {len(self.errors)} · loop {self.n}, "
-            f"last {self.t.get('loop', 0):.0f} s · journal UNKNOWN {st['unknown']} · executor sent {st['sent_orders']}"])
+        if night.get("hourly_h") != h or force:             # a restart within the hour refreshes the status block only
+            night["hourly_h"] = h
+            c.save()
+            self.night.entry(f"{time.strftime('%H:%M')} PT (engine, hourly)", [
+                f"live: {live}",
+                f"account @ fair {fair_now:,.0f} (night start {night['start_fair']:,}, {fair_now - night['start_fair']:+,.0f}) · "
+                f"leaderboard {(self.acct or {}).get('totalAccountValue', 0):,.0f} (SIG marks, not the score) · free cash {cash:,.0f} · "
+                f"realized today {self.realized_today():+,.0f}",
+                f"fills last hour: {', '.join(f'{k} {n}' for k, n in sorted(per.items())) or 'none'}",
+                "latency p50/p90 s: " + ", ".join(f"{k} {v['p50']}/{v['p90']} (n {v['n']})" for k, v in self.latency_view().items()),
+                f"kills/rollbacks: {'; '.join(kills) or 'none'} · errors last hour {len(self.errors)} · loop {self.n}, "
+                f"last {self.t.get('loop', 0):.0f} s · journal UNKNOWN {st['unknown']} · executor sent {st['sent_orders']}"])
         self.night.status([
             f"**Live** ({time.strftime('%H:%M')} PT): {live}",
             f"**Account at fair:** {night['start_fair']:,} at night start ({night['start_t'][11:16]}) -> {fair_now:,.0f} now "

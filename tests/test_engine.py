@@ -1002,6 +1002,31 @@ class PairsTests(EngineCase):
         self.assertTrue(sets, [e["text"] for e in eng.events if e["kind"] == "PAIR"][-3:])
         return sets[-1]
 
+    def test_fill_loop_sends_exits_before_new_sets(self):
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        eng.rt_event("fills", set(), time.time())        # woken by our own fill: no new-set book reads this loop
+        fake.book_reads = 0
+        loop(eng, fake)
+        self.assertEqual(fake.book_reads, 0)
+        self.assertFalse([b for b in eng.ledger.baskets if b["race"] == "Massachusetts Governor"])
+        loop(eng, fake)                                  # the 2 re-polls of a fill REST hasn't shown yet are fill loops too
+        loop(eng, fake)
+        self.ma_set(eng, fake)                           # then the loop screens and sends as usual
+
+    def test_fill_notification_before_rest_repolls_twice(self):
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)
+        t_ev = time.time()
+        eng.rt_event("fills", set(), t_ev)               # REST has no new fill yet
+        for n in (1, 2):
+            loop(eng, fake)
+            self.assertEqual(eng.fill_retry.get(t_ev), n)
+            self.assertIn(t_ev, [t_ for t_, k, _ in eng.rt_pending if k == "fills"], "re-polled in 2 s")
+        loop(eng, fake)
+        self.assertNotIn(t_ev, [t_ for t_, k, _ in eng.rt_pending], "gives up after 2 re-polls")
+
     def test_ev_positive_set_then_early_unwind(self):
         fake = new_fake(writes_per_min=10_000)
         eng = engine(fake)
