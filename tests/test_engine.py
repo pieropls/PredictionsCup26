@@ -1339,6 +1339,7 @@ class FatFingerTests(EngineCase):
         why = {u["reason"] for u in cov["uncovered"]}
         self.assertFalse(any(r.startswith("being placed") for r in why), why)   # placement done; the rest is the cap
         self.assertTrue(all(u["reason"] for u in cov["uncovered"]), cov["uncovered"][:3])
+        self.assertTrue(all(u["minutes"] >= 0 for u in cov["uncovered"]) and "over_5_min" in cov)
         if cov["uncovered"]:
             rest = sum(o["qty"] * min(o["price"], 1 - o["price"]) for o in self.fat_orders(eng, fake))
             self.assertGreater(rest, eng.cap("fatfinger", "resting") - 2_400, "cap is used before sides go uncovered")

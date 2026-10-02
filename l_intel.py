@@ -295,9 +295,21 @@ def copy_list(acct, events, our_layers, tape_from=None, t0=None):
     ev_v = sum(e.get("value") or 0 for e in events)
     if events:
         top = sorted(events, key=lambda e: -(e.get("value") or 0))[:3]
+        # how deep each sweep went, in the gaining side's terms: our fat-finger levels sit at <= 0.12
+        deep = lambda e: e["p_lo"] if e.get("gainer_side") == "yes" else 1 - e["p_hi"]
+        shallow = [e for e in events if e.get("gainer_side") and e.get("fair") is not None and deep(e) > 0.12]
+        sv = sum(e.get("value") or 0 for e in shallow)
         out.append(f"**Fat-finger levels.** {len(events)} big events moved {fmt(ev_v)} at a wrong price in the window "
-                   f"(largest: {'; '.join(e['market'] + ' ' + fmt(e.get('value')) for e in top)}). Keep levels on those markets "
-                   f"(tier membership is applied automatically).")
+                   f"(largest: {'; '.join(e['market'] + ' ' + fmt(e.get('value')) for e in top)}). Tier membership follows them "
+                   f"automatically.")
+        if sv > 0.5 * ev_v:
+            ex_ = max(shallow, key=lambda e: e.get("value") or 0)
+            sf = ex_["fair"] if ex_["gainer_side"] == "yes" else 1 - ex_["fair"]
+            out.append(f"**Shallow sweeps.** {fmt(sv)} of it ({sv / ev_v:.0%}) came from sweeps that stopped above 0.12, out of "
+                       f"reach of the fat-finger levels: e.g. {ex_['market']} {ex_['gainer_side'].upper()} swept to {deep(ex_):.3f} "
+                       f"with fair {sf:.3f}. Consider resting bids 7-20c under fair on favourites (fair >= 0.95), sized so a full "
+                       f"fill fits the opportunity reserve; ladders can't rest there while the reserve takes all spare cash. "
+                       f"New level definitions need approval.")
     elif harv:
         d = sum(a["d_pnl"] for a in harv)
         if tape_from and t0 and tape_from <= t0:
@@ -330,14 +342,17 @@ def dist_bin(d):
 BINS = ["< 2c", "2-5c", "5-10c", "10-25c", "25-40c", ">= 40c"]
 
 
-def daily_report(date, trades, events, fills, scoreboard, coverage, new_markets, recs, leaders_link, names=None):
+def daily_report(date, trades, events, fills, scoreboard, coverage, new_markets, recs, leaders_link, names=None, tape_from=None):
     """Markdown for docs/daily/<date>.md (morning_plan §4.5, sections in its order).
     trades: [{ex, ts, p, q, fair}] of the last 24 h (fair may be None); events: detect() output with captured/missed
     filled in; fills: our ledger fills of the window; scoreboard: {account_fair, account_sig, rank, n, thresholds{}};
     coverage: {pct, uncovered_minutes, samples}; new_markets: [{market, seen, covered_s}]; recs: [str]."""
     names = names or {}
     L = [f"# Daily report {date}", "", "Previous 24 h. Value at a wrong price = Σ |price − Polymarket fair| × shares. "
-         "The tape's side is not the aggressor, so no maker/taker split.", ""]
+         "The tape's side is not the aggressor, so no maker/taker split."
+         + (f" **The live tape covers only since {dt.datetime.fromtimestamp(tape_from).strftime('%m-%d %H:%M')} PT**; a print gets "
+            "a fair only once the engine has sampled that market (30 s after each start)." if tape_from else
+            " **No live tape yet.**"), ""]
     s = scoreboard or {}
     th = s.get("thresholds") or {}
     L += ["## 1. Scoreboard", "",
@@ -372,7 +387,7 @@ def daily_report(date, trades, events, fills, scoreboard, coverage, new_markets,
     cap_l = collections.Counter()
     for f in fills:
         if f.get("fair") is not None and f.get("action") == "buy":
-            cap_l[f.get("layer") or "-"] += (f["fair"] - f["price"]) * f["qty"]
+            cap_l[f.get("layer") or "other (before the engine / manual)"] += (f["fair"] - f["price"]) * f["qty"]
     by_kind = collections.defaultdict(lambda: [0.0, 0.0])
     for e in events:
         k = "Max sweep" if "Max sweep" in e["kinds"] else e["kinds"][0]
@@ -603,7 +618,7 @@ def run_daily(data, docs, now, apply_tiers=True, day_s=86400):
         recs.append("**Missed value by market** (levels we'd have had resting): " + "; ".join(f"{names.get(ex, ex)} {fmt(v)}" for ex, v in m_top)
                     + ". These are in tier A from today; size changes need approval.")
     recs += [f"(needs approval) {c}" for c in copy_list(acct, events, our_layers, tape_from, since)[:3]]
-    md = daily_report(date, trades, events, fills, sb, coverage, new_m, recs, f"../leaders/{date}.md", names)
+    md = daily_report(date, trades, events, fills, sb, coverage, new_m, recs, f"../leaders/{date}.md", names, tape_from)
     dpath = os.path.join(docs, "daily", f"{date}.md")
     with open(dpath, "w") as fh:
         fh.write(md)

@@ -806,13 +806,14 @@ function covsum() {                             // morning_plan Part 3: coverage
   const c = obj(S.coverage);
   if (val(c.pct) == null) return `<span class="mute">· not available yet (fat-finger layer off)</span>`;
   const n = arr(c.uncovered).length;
-  return `<b class="${c.pct >= 99.95 ? "good" : "warn"}">${num(c.pct, 1)}%</b> <span class="mute" style="font-weight:400">· ${num(c.covered)} of ${num(c.eligible)} eligible sides covered${n ? ` · ${num(n)} uncovered, with the reason` : ""}</span>`;
+  const o5 = val(c.over_5_min);
+  return `<b class="${c.pct >= 99.95 ? "good" : "warn"}">${num(c.pct, 1)}%</b> <span class="mute" style="font-weight:400">· ${num(c.covered)} of ${num(c.eligible)} eligible sides covered${n ? ` · ${num(n)} uncovered${o5 ? `, <b>${num(o5)} for over 5 min</b>` : ""}, with the reason` : ""}</span>`;
 }
 function cov() {
   const un = arr(obj(S.coverage).uncovered);
   if (!un.length) return val(obj(S.coverage).pct) == null ? na("Coverage is not available yet.") : `<div class="mute">Every eligible side has its fat-finger bids resting.</div>`;
-  return `<div class="wrap"><table><thead><tr><th>Market</th><th>Side</th><th>Why not covered</th></tr></thead><tbody>${un.map(u =>
-    `<tr><td>${esc(u.market || u.ex)}</td><td>${esc(String(u.side || "").toUpperCase())}</td><td>${esc(u.reason || "")}</td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="wrap"><table><thead><tr><th>Market</th><th>Side</th><th class="n">Uncovered for</th><th>Why not covered</th></tr></thead><tbody>${un.map(u =>
+    `<tr><td>${esc(u.market || u.ex)}</td><td>${esc(String(u.side || "").toUpperCase())}</td><td class="n${val(u.minutes) > 5 ? " warn" : ""}">${val(u.minutes) == null ? "–" : num(u.minutes, 0) + " min"}</td><td>${esc(u.reason || "")}</td></tr>`).join("")}</tbody></table></div>`;
 }
 function healthsum() {
   if (!S.health || typeof S.health !== "object") return `<span class="mute">· not available yet</span>`;

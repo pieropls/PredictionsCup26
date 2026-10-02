@@ -323,7 +323,7 @@ class Engine:
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
         self.wake, self.rt_lock, self.rt_pending = threading.Event(), threading.Lock(), []   # realtime -> planner
-        self.fill_retry = {}
+        self.fill_retry, self.uncov_since = {}, {}
         self.tape, self.intel_px, self.intel_t, self.fair_series, self.intel_s = None, {}, {}, {}, {}   # day 2 §5
         self.requotes = []                                  # times of MM/ladder requote cancels (A9 cap)
         self.sig_feed = self.pm_feed = None
@@ -2657,10 +2657,13 @@ class Engine:
         cov = None
         if self.coverage is not None:
             c_ = self.coverage
-            un = [dict(ex=k.split("|")[0], market=self.name(k.split("|")[0]), side=k.split("|")[1], reason=v)
-                  for k, v in sorted(c_["reasons"].items())]
+            now_ = time.time()                              # C1: how long each side has been uncovered
+            self.uncov_since = {k: self.uncov_since.get(k, now_) for k in c_["reasons"]}
+            un = [dict(ex=k.split("|")[0], market=self.name(k.split("|")[0]), side=k.split("|")[1], reason=v,
+                       minutes=round((now_ - self.uncov_since[k]) / 60, 1))
+                  for k, v in sorted(c_["reasons"].items(), key=lambda kv: self.uncov_since[kv[0]])]
             cov = dict(pct=round(100 * c_["covered"] / c_["eligible"], 1) if c_["eligible"] else None, eligible=c_["eligible"],
-                       covered=c_["covered"], uncovered=un[:200])
+                       covered=c_["covered"], over_5_min=sum(1 for u in un if u["minutes"] > 5), uncovered=un[:200])
             for ex, t0 in self.new_markets.items():
                 if ex not in self.cov_logged and not any(u["ex"] == ex for u in un):
                     self.cov_logged.add(ex)
