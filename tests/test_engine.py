@@ -1108,13 +1108,15 @@ class SniperTests(EngineCase):
             NEW_MAPS.clear()
             FAIR.pop("7777", None)
         self.assertIn("7777", eng.owner)
-        self.assertNotIn("7778", eng.owner)
+        self.assertIn("7778", eng.unmapped_new, "unmapped: a bot for 0.05 fat-finger bids only, mapping retried every 10 min")
+        self.assertFalse([o for o in fake.open_orders() if o["ex"] == "7778" and o["id"] in eng.ledger.orders],
+                         "no fair: no takes (fat-finger is off in this test)")
         takes = [o for o in fake.open_orders() if o["ex"] == "7777" and o["id"] in eng.ledger.orders]
         self.assertTrue(takes and takes[0]["side"] == "yes" and takes[0]["price"] <= 0.60 - 0.04 * bots.s_of(0.6) + 1e-9, takes)
         notional = sum(o["qty"] * o["price"] for o in takes)
         self.assertLessEqual(notional, eng.cap("sniper", "per_market") + 1e-6)
         self.assertGreater(notional, 1000, "a new market gets the whole per-market cap, not the 150 gap-take size")
-        self.assertTrue(any("no confident Polymarket match" in a for a in eng.alerts))
+        self.assertTrue(any("NEW MARKET UNMAPPED" in a for a in eng.alerts))
 
 
 class TakeCapTests(EngineCase):
@@ -1141,6 +1143,122 @@ class TakeCapTests(EngineCase):
         spent = sum(f["qty"] * f["price"] for f in eng.ledger.fills if f["ex"] in (d, r) and f["layer"] == "take")
         self.assertGreater(spent, 500)
         self.assertLessEqual(spent, eng.cap("sniper", "per_market") + 1e-6, "one race, one per-market cap")
+
+
+class FatFingerTests(EngineCase):
+    LAYERS = dict(position=dict(state="full"), fatfinger=dict(state="full"))
+
+    def rig(self, cash_above_floor=20_000):
+        fresh_data(layers=self.LAYERS)
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + cash_above_floor)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0                          # live-like pacing (the fake's EWMA starts at 60/min)
+        return fake, eng
+
+    def settle(self, eng, fake, n=12):
+        for _ in range(n):
+            eng.ex.capacity = 6000.0
+            loop(eng, fake)
+
+    def fat_orders(self, eng, fake, ex=None):
+        return [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "fatfinger"
+                and (ex is None or o["ex"] == ex)]
+
+    def test_levels_sides_and_queue_step_up(self):
+        fake, eng = self.rig()
+        self.settle(eng, fake)
+        mine = self.fat_orders(eng, fake)
+        self.assertTrue(mine)
+        for o in mine:                                    # only sides worth >= 0.35; never above 25% of the side's fair
+            fs = eng.side_fair(o["ex"], o["side"])
+            if fs is not None:
+                self.assertGreaterEqual(fs, a_config.FAT_MIN_FAIR - 1e-9, o)
+                self.assertLessEqual(o["price"], min(0.12, 0.25 * fs) + 1e-9, o)
+        self.assertFalse([o for o in mine if o["ex"] in (AK, RI)], "never on manual positions")
+        # queue step-up: someone already bids 0.05 on a side we cover -> our 0.05 level goes to 0.055, not above caps
+        ex, side = mine[0]["ex"], mine[0]["side"]
+        yb = [(0.05, 500.0)] if side == "yes" else []
+        ya = [(0.95, 500.0)] if side == "no" else []
+        eng.fat_book[ex] = (time.time(), yb, ya)
+        lv = eng.fat_levels(ex, side, eng.side_fair(ex, side), 1.0, "A")
+        self.assertIn(0.055, [px for _, px, _ in lv])
+        self.assertTrue(all(px <= 0.12 + 1e-9 for _, px, _ in lv))
+        self.assertTrue(all(px <= 0.075 + 1e-9 for _, px, _ in eng.fat_levels(ex, side, 0.30, 1.0, "A")), "cap: 25% of a 0.30 side")
+
+    def test_max_sweep_fills_best_price_first_and_logs_value(self):
+        fake, eng = self.rig()
+        self.settle(eng, fake)
+        ex = next(o["ex"] for o in self.fat_orders(eng, fake) if eng.side_fair(o["ex"], o["side"]) and eng.side_fair(o["ex"], o["side"]) > 0.6)
+        side = next(o["side"] for o in self.fat_orders(eng, fake, ex))
+        levels = sorted((o for o in self.fat_orders(eng, fake, ex) if o["side"] == side), key=lambda o: -o["price"])
+        left = 100_000                                    # a "Max" market order sweeps the book: best price first
+        for o in levels:
+            take = min(left, o["qty"])
+            fake.fill(o["id"], take)
+            left -= take
+        loop(eng, fake)
+        ev = [e for e in eng.events if e["kind"] == "FATFINGER"]
+        self.assertEqual(len(ev), len(levels))
+        fs = eng.side_fair(ex, side)
+        want = sum((fs - o["price"]) * o["qty"] for o in levels)
+        got = sum(float(e["text"].rsplit("value captured ", 1)[1].replace(",", "")) for e in ev)
+        self.assertAlmostEqual(got, want, delta=len(levels))
+        with open(a_config.NIGHT_LOG_FILE) as fh:
+            self.assertIn("FATFINGER FILL", fh.read())
+
+    def test_reserve_must_cover_the_worst_single_market_fill(self):
+        fake, eng = self.rig(cash_above_floor=500)        # reserve unfunded: nothing armed
+        self.settle(eng, fake, 4)
+        self.assertEqual(self.fat_orders(eng, fake), [])
+        self.assertTrue(any(v == "reserve not funded" for v in (eng.coverage or {}).get("reasons", {}).values()))
+
+    def test_news_guard_and_breaker(self):
+        fake, eng = self.rig()
+        self.settle(eng, fake)
+        o = next(o for o in self.fat_orders(eng, fake) if eng.side_fair(o["ex"], o["side"]) and eng.side_fair(o["ex"], o["side"]) > 0.6)
+        ex, side = o["ex"], o["side"]
+        f = eng.fair[ex]
+        FAIR[ex] = f - 0.20 if side == "yes" else f + 0.20  # the side's fair falls 20c within minutes
+        try:
+            loop(eng, fake)
+            loop(eng, fake)
+        finally:
+            FAIR.pop(ex, None)
+            FAIR.update({AK: 0.785, RI: 0.965, "1059": 0.93, "1060": 0.07})
+        self.assertFalse([x for x in self.fat_orders(eng, fake, ex) if x["side"] == side], "news guard pulled the side")
+        self.assertTrue(any(e["kind"] == "NEWS" for e in eng.events))
+        # breaker: fat-finger fills in 5 markets, one political direction, within 10 min
+        fake2, eng2 = self.rig()
+        self.settle(eng2, fake2)
+        picks, seen = [], set()
+        for x in self.fat_orders(eng2, fake2):
+            if eng2.pol(x["ex"], x["side"]) == "D" and x["ex"] not in seen:
+                seen.add(x["ex"])
+                picks.append(x)
+        self.assertGreaterEqual(len(picks), 5)
+        for x in picks[:5]:
+            fake2.fill(x["id"], 10)
+        loop(eng2, fake2)
+        self.assertGreater(eng2.breaker.get(("fat", "D"), 0), time.time())
+
+    def test_write_budget_is_about_zero_after_placement(self):
+        fake, eng = self.rig()
+        self.settle(eng, fake, 15)
+        fake.calls.clear()
+        for _ in range(5):
+            loop(eng, fake)
+        fat_writes = [c for c in fake.calls if c[0] in ("batch", "cancel")]
+        self.assertEqual(fat_writes, [], "no refresh churn once placed")
+        cov = eng.dash_state()["coverage"]
+        self.assertGreater(cov["covered"], 0)
+        why = {u["reason"] for u in cov["uncovered"]}
+        self.assertFalse(any(r.startswith("being placed") for r in why), why)   # placement done; the rest is the cap
+        self.assertTrue(all(u["reason"] for u in cov["uncovered"]), cov["uncovered"][:3])
+        if cov["uncovered"]:
+            rest = sum(o["qty"] * min(o["price"], 1 - o["price"]) for o in self.fat_orders(eng, fake))
+            self.assertGreater(rest, eng.cap("fatfinger", "resting") - 2_400, "cap is used before sides go uncovered")
 
 
 class LeadersTests(EngineCase):

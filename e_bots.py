@@ -11,7 +11,7 @@ import math
 
 from a_config import (TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, ROC_MIN_TIGHT, RECYCLE_BID_EDGE,
                       RECYCLE_REST_EDGE, RECYCLE_TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_EDGE, MM_U_MULT, MM_NOTIONAL, MM_TTL_S,
-                      LADDER_LEVELS, LADDER_TTL_S, TAKE_EDGE, TAKE_U_MULT, TAKE_NOTIONAL, TAKE_TTL_S)
+                      LADDER_LEVELS, LADDER_TTL_S, TAKE_EDGE, TAKE_U_MULT, TAKE_NOTIONAL, TAKE_TTL_S, FAT_TTL_S)
 
 EPS = 1e-9
 
@@ -207,9 +207,11 @@ class MarketBot:
     def plan(self, s):
         f, L, k = s["fair"], s.get("layers", {}), s.get("kappa", 0.0)
         self.fair = f
+        fat = [want(x["side"], "buy", x["px"], x["qty"], x["px"] - TICK / 2, x["px"] + TICK / 2, x.get("qtol", QTY_TOL),
+                    "fatfinger", sub=x["sub"], ttl=FAT_TTL_S) for x in (s.get("fatfinger") or [])]   # day 2 §4: own caps
         if f is None:
-            self.status, self.orders = "no fair (Polymarket missing, wide or stale)", []
-            return []
+            self.status, self.orders = "no fair (Polymarket missing, wide or stale)" + (" · fat-finger" if fat else ""), fat
+            return fat
         sf, u = {"yes": f, "no": 1 - f}, s.get("u") or 0.0
         subs = s.get("subs", {})
         entries_ok = not s.get("paused")
@@ -311,6 +313,7 @@ class MarketBot:
                 if ask_s is not None and ask_s <= px + EPS:
                     add_entry(side, px, s.get("take_notional", TAKE_NOTIONAL), "take", px - 0.01, px, TAKE_TTL_S, sub="sniper")
 
+        out += fat
         self.orders = out
         layers = sorted({w["layer"] for w in out})
         net = sum(subs.values())

@@ -40,7 +40,9 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       LADDER_LEVELS, LADDER_CAPACITY_SHARE, TAKE_NOTIONAL, REF_WINDOW_S, REF_MIN_SAMPLES, REF_MAX_SPREAD,
                       BREAKER_WINDOW_S, BREAKER_MARKETS, BREAKER_SHARE, BREAKER_PAUSE_S, MM_PILOT_MARKETS,
                       LADDER_PILOT_MARKETS, PILOT_S, REQUOTE_CANCELS_PER_MIN, BREAKER_FAIR_MOVE, AK_RELEASE,
-                      OPPORTUNITY_RESERVE, ROC_MIN, ROC_MIN_TIGHT, RELEASE_EVERY_S, RELEASE_MARKETS, RELEASE_PILOT_TARGET)
+                      OPPORTUNITY_RESERVE, ROC_MIN, ROC_MIN_TIGHT, RELEASE_EVERY_S, RELEASE_MARKETS, RELEASE_PILOT_TARGET,
+                      FAT_LEVELS, FAT_SIZES, FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP, FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S,
+                      FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S, FAT_MOVE, FAT_CAPACITY_SHARE, FAT_BOOK_READS, QTY_TOL)
 from d_ledger import Ledger, stamp, write_atomic
 
 
@@ -311,6 +313,8 @@ class Engine:
         self.breaker, self.bad_since, self.tranche_view, self.used, self.ladder_quota = {}, None, {}, {}, 0
         self.pilot_sets, self.sweep_rank = {}, {}
         self.release_now, self.release_t, self.depth_cache = {}, 0.0, {}
+        self.fat_book, self.fat_anchor, self.fat_block, self.fair_hist, self.fat_now = {}, {}, {}, {}, {}
+        self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
         self.wake, self.rt_lock, self.rt_pending = threading.Event(), threading.Lock(), []   # realtime -> planner
@@ -449,13 +453,20 @@ class Engine:
             pos[ex], rows[ex] = pos.get(ex, 0) + api.net(p), p
         self.open, self.px = got["open"], got["px"]
         prev = {ex: (b["pos"], b["row"]) for ex, b in self.book.items()}
-        fill_exs = set()
+        fill_exs, new_orders = set(), set()
         for f in self.ledger.sync(self.open, got.get("fills", []), self.bot_of, self.side_fair, self.side_mid, as_of=now,
                                   held=lambda ex: prev.get(ex)):
             fill_exs.add(f["ex"])
+            new_orders.add(f["order"])
             e = "" if f["edge"] is None else f" | vs PM {f['edge'] * 100:+.1f}c, vs SIG mid {(f['sig_edge'] or 0) * 100:+.1f}c"
             self.event("FILL", f"{f['bot']} [{f['layer'] or '-'}]: {f['action'] or 'trade'} {f['side'].upper()} {f['qty']:,.0f} @ {f['price']:.3f}{e}")
+        self.new_fill_orders = new_orders
         self.ledger.markouts(self.side_mid)
+        try:
+            self.fat_fill_events([f for f in self.ledger.fills[-200:] if f["order"] in self.new_fill_orders]) \
+                if getattr(self, "new_fill_orders", None) else None
+        except Exception as err:
+            self.event("ERR", f"fat-finger events: {err!r}")
         self.ledger.init_subbooks(pos, self.manual_ex)
         self.ledger.audit_subbooks(pos, log=lambda s: self.event("AUDIT", s.strip()[6:].strip()))
         self.ex.update(pos, self.open, as_of=now)
@@ -482,6 +493,12 @@ class Engine:
         except Exception as err:                            # never let it stop the loop
             self.release_now = {}
             self.event("ERR", f"release plan: {err!r}")
+        try:
+            self.fat_now = self.fat_plan(now)
+        except Exception as err:
+            self.fat_now = {}
+            self.event("ERR", f"fat-finger plan: {err!r}")
+        self.fat_quota = int(FAT_CAPACITY_SHARE * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60)
         engine_ex = {b.ex for b in self.bots if b.kind == "market"} | {ex for pb in self.pairs for ex in pb.legs}
         filled = sum(self.risk(ex, pos.get(ex, 0)) for ex in engine_ex)
         self.risk_view = dict(filled=round(filled), resting=round(used["committed"]), cash=round(cash),
@@ -504,8 +521,9 @@ class Engine:
             mine.setdefault(p["bot"], []).append(dict(p, id=None, price=p["price"]))
         plans = []
         self.ladder_quota = int(LADDER_CAPACITY_SHARE * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60)
-        for b in sorted(self.bots, key=lambda b: (b.kind != "position", -self.sweep_rank.get(b.ex, (0, 0))[0],
-                                                  -self.sweep_rank.get(b.ex, (0, 0))[1])):   # §5.3: most sweeps first
+        tier_a = self.fat_tiers() if self.fat_now else set()
+        for b in sorted(self.bots, key=lambda b: (b.kind != "position", b.ex not in tier_a, -self.sweep_rank.get(b.ex, (0, 0))[0],
+                                                  -self.sweep_rank.get(b.ex, (0, 0))[1])):   # tier A, then most sweeps first
             s = self.bot_snapshot(b, pos, rows, kappa, cash, used)
             s["own"] = [o for o in mine.get(b.name, []) if o.get("id")]   # I4: our resting orders aren't the market
             wants = self.gate(b, b.plan(s))
@@ -762,6 +780,7 @@ class Engine:
         rel = self.release_now.get(b.ex)
         return dict(fair=f, u=self.ft.u.get(b.ex), bid=bid, ask=ask, ref=self.ref(b.ex), kappa=kappa,
                     roc_min=ROC_MIN_TIGHT if free < self.release_target()[0] else ROC_MIN, held=q, release=rel,
+                    fatfinger=self.fat_now.get(b.ex) or [],
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
                     room={sd: max(0.0, MARKET_MAX_POS - held[sd]) for sd in ("yes", "no")},
@@ -775,7 +794,7 @@ class Engine:
     def bucket_usage(self):
         """What each capital bucket uses now (SIG): resting entry buys at full notional, filled inventory at cost."""
         u = dict(committed=0.0, mm=0.0, ladder_filled=0.0, ladder_resting=0.0, ladder_side={"D": 0.0, "R": 0.0, "other": 0.0},
-                 sniper_market={}, sniper_day=0.0, pairs=0.0)
+                 sniper_market={}, sniper_day=0.0, pairs=0.0, fat_resting=0.0, fat_filled=0.0)
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
             if not rec or o["action"] != "buy" or rec["bot"] in self.position_names:
@@ -788,6 +807,12 @@ class Engine:
                 u["ladder_side"][self.pol(o["ex"], o["side"])] += n
             elif l == "take":
                 u["sniper_market"][o["ex"]] = u["sniper_market"].get(o["ex"], 0.0) + n
+            elif l == "fatfinger":
+                u["fat_resting"] += n
+        for ex, books in self.ledger.subbooks.items():
+            for sub, v in books.items():
+                if sub.startswith("fatfinger:"):
+                    u["fat_filled"] += abs(v) * float(sub.rsplit(":", 1)[1])
         for p in self.ex.pending():                         # queued / in flight / acked but not yet in a snapshot
             if p["action"] != "buy" or p["bot"] in self.position_names:
                 continue
@@ -799,6 +824,8 @@ class Engine:
                 u["ladder_side"][self.pol(p["ex"], p["side"])] += n
             elif l == "take":
                 u["sniper_market"][p["ex"]] = u["sniper_market"].get(p["ex"], 0.0) + n
+            elif l == "fatfinger":
+                u["fat_resting"] += n
         for ex, books in self.ledger.subbooks.items():
             q = books.get("mm", 0)
             f = self.fair.get(ex)
@@ -817,6 +844,7 @@ class Engine:
             if bk.get("state", "held") in ("held", "repair"):
                 u["pairs"] += sum(l[3] * (l[4] or 0) for l in self.ledger.basket_fills(bk))
         self.used = {("mm", "inventory"): u["mm"], ("ladder", "filled"): u["ladder_filled"], ("ladder", "resting"): u["ladder_resting"],
+                     ("fatfinger", "resting"): u["fat_resting"], ("fatfinger", "filled"): u["fat_filled"],
                      ("pairs", "capital"): u["pairs"], ("sniper", "per_day"): u["sniper_day"],
                      ("sniper", "per_market"): max(u["sniper_market"].values(), default=0.0)}
         return u
@@ -834,8 +862,22 @@ class Engine:
                 out.append(w)
                 continue
             n, l = w["qty"] * w["px"], w["layer"]
+            if l == "fatfinger":
+                funded = max(0.0, min(float(OPPORTUNITY_RESERVE), cash - CASH_RESERVE - used["committed"]))
+                worst = sum(x["qty"] * x["px"] for x in (self.fat_now.get(b.ex) or []) if x["side"] == w["side"])
+                if (self.fat_quota <= 0 or used["fat_resting"] + n > self.cap("fatfinger", "resting")
+                        or used["fat_filled"] >= self.cap("fatfinger", "filled") or worst > funded):
+                    self.cover_why(b.ex, w["side"], "reserve not funded" if worst > funded else
+                                   "resting cap reached" if used["fat_resting"] + n > self.cap("fatfinger", "resting") else
+                                   "filled cap reached" if used["fat_filled"] >= self.cap("fatfinger", "filled") else
+                                   "being placed (paced at 30% of SIG capacity)")
+                    continue
+                self.fat_quota -= 1
+                used["fat_resting"] += n
+                out.append(w)
+                continue
             need = CASH_RESERVE if self.reserve_ok(b.ex, w) else CASH_RESERVE + OPPORTUNITY_RESERVE    # §3.2 two tiers
-            if l in ("mm", "take", "fatfinger") and cash - used["committed"] - n < need:
+            if l in ("mm", "take") and cash - used["committed"] - n < need:
                 continue
             if l == "mm" and used["mm"] >= self.cap("mm", "inventory"):
                 continue                                    # the MM bucket is inventory at cost (§4.2); resting = the floor
@@ -853,7 +895,7 @@ class Engine:
                 self.ladder_quota -= 1
                 used["ladder_resting"] += n
                 used["ladder_side"][side] += n
-            if l in ("mm", "take", "fatfinger"):
+            if l in ("mm", "take"):
                 used["committed"] += n
             if l == "take":
                 used["sniper_day"] += n
@@ -998,7 +1040,7 @@ class Engine:
         cands, res_n, other_n = [], 0.0, 0.0
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
-            if not rec or o["action"] != "buy" or rec["layer"] not in ("mm", "take", "fatfinger") or o["id"] in self.ex.cancelling or \
+            if not rec or o["action"] != "buy" or rec["layer"] not in ("mm", "take") or o["id"] in self.ex.cancelling or \
                     jx.reduces(o["side"], "buy", self.book.get(o["ex"], {}).get("pos", 0)):
                 continue
             f = self.side_fair(o["ex"], o["side"])
@@ -1020,6 +1062,170 @@ class Engine:
             self.event("FLOOR", f"cash short of floor + reserve by {max(deficit_other, deficit_all):,.0f}: {n} lowest-ROC entry quotes "
                                 f"cancelled ({freed:,.0f} SIG)")
         return n
+
+    # ------------------------------------------------------------------------------------------------ fat-finger (day 2 §4)
+    def fat_tiers(self):
+        t = read_json(os.path.join(DATA, "intel", "tiers.json"), {})
+        return set(t.get("tier_a") or [])
+
+    def fat_eligible(self, ex):
+        """[(side, fair or ref, size scale)] for the sides of a market the fat-finger catcher covers (morning_plan §1.2)."""
+        b = self.owner.get(ex)
+        if b is None or b.kind != "market" or ex in self.manual_ex:
+            return []
+        out = []
+        f = self.fair.get(ex)
+        if f is not None:
+            for side, fs in (("yes", f), ("no", 1 - f)):
+                if fs >= FAT_MIN_FAIR:
+                    out.append((side, fs, 1.0))
+            return out
+        if ex in {m["ex"] for m in self.mp}:                # mapped but no fair right now (wide / stale): not covered
+            return []
+        r = self.ref(ex)
+        new = time.time() - self.new_markets.get(ex, 0) < 3 * 3600 or ex in self.unmapped_new
+        if new and r is None:                               # a brand-new unmapped market: 0.05 on both sides, half size
+            return [("yes", 0.5, 0.5), ("no", 0.5, 0.5)]
+        if r is not None:
+            for side, rs in (("yes", r), ("no", 1 - r)):
+                if rs >= FAT_UNMAPPED_REF:
+                    out.append((side, rs, 0.5))
+        return out
+
+    def fat_levels(self, ex, side, value, scale, tier):
+        """[(level, price, shares)]: levels <= 25% of the side's value, one tick above the best resting bid <= the level
+        (from the last queue read), never above the level or the cap."""
+        sizes = FAT_SIZES[tier]
+        book = self.fat_book.get(ex)
+        bids = []
+        if book:
+            _, yb, ya = book
+            bids = [p for p, _ in yb] if side == "yes" else [round(1 - p, 3) for p, _ in ya]
+        out, used = [], set()
+        new_unmapped = scale == 0.5 and value == 0.5
+        bands = sorted(FAT_LEVELS)
+        for lvl in FAT_LEVELS:
+            if lvl not in sizes or (new_unmapped and lvl != 0.05):
+                continue
+            cap = min(max(FAT_LEVELS), FAT_FAIR_CAP * value) if not new_unmapped else lvl   # never above 0.12, 25% of fair
+            if min(lvl, cap) < 0.01:
+                continue
+            floor_ = max([b for b in bands if b < lvl], default=0.0)   # this level's band: (next lower level, level]
+            rivals = [p for p in bids if floor_ < p <= lvl + 1e-9]
+            px = bots.tick_down(min(cap, max(rivals) + TICK)) if rivals else bots.tick_down(min(lvl, cap))
+            if px < 0.01 or px in used:
+                continue
+            used.add(px)
+            q = int(sizes[lvl] * scale)
+            if q >= MIN_QTY:
+                out.append((lvl, px, q))
+        return out
+
+    def fat_plan(self, now):
+        """{ex: [want-spec]} for the fat-finger layer; also refreshes queue reads (<= FAT_BOOK_READS per loop, tier A first,
+        every FAT_QUEUE_S) and the news guard; records coverage reasons."""
+        if not self.controls.on("fatfinger"):
+            self.coverage = None
+            return {}
+        tier_a = self.fat_tiers()
+        st = self.controls.state("fatfinger")
+        exs = [b.ex for b in self.bots if b.kind == "market"]
+        if st == "pilot":
+            exs = [ex for ex in exs if ex in tier_a]
+        exs.sort(key=lambda ex: (ex not in tier_a, -self.sweep_rank.get(ex, (0, 0))[1]))
+        # queue reads: oldest first, a few per loop
+        stale = [ex for ex in exs if now - (self.fat_book.get(ex) or (0,))[0] > FAT_QUEUE_S and self.fat_eligible(ex)]
+        for ex in stale[:FAT_BOOK_READS]:
+            try:
+                bids, asks = api.orderbook(ex, depth=50)
+                self.fat_book[ex] = (now, [(p, q) for p, q in bids if p <= 0.15], [(p, q) for p, q in asks if p >= 0.85])
+            except Exception as err:
+                self.event("ERR", f"fat-finger queue read {self.name(ex)}: {str(err)[:80]}")
+                break
+        # news guard: a side's fair dropping > 15c within 10 min cancels its levels until fair is stable for 30 min
+        for ex in exs:
+            f = self.fair.get(ex)
+            if f is None:
+                continue
+            h = self.fair_hist.setdefault(ex, [])
+            h.append((now, f))
+            while h and h[0][0] < now - FAT_NEWS_WINDOW_S:
+                h.pop(0)
+            for side in ("yes", "no"):
+                cur = f if side == "yes" else 1 - f
+                top = max((v if side == "yes" else 1 - v) for _, v in h)
+                if top - cur > FAT_NEWS_DROP:
+                    if self.fat_block.get((ex, side), 0) < now:
+                        self.event("NEWS", f"{self.name(ex)} {side.upper()} fair fell {top - cur:.2f} in 10 min: fat-finger levels pulled 30 min")
+                    self.fat_block[(ex, side)] = now + FAT_NEWS_HOLD_S
+        plan, cov = {}, dict(eligible=0, covered=0, reasons={})
+        resting = {}
+        for o in list(self.open) + [dict(p, id=None) for p in self.ex.pending()]:
+            rec = self.ledger.orders.get(o["id"]) if o.get("id") else o
+            if rec and rec.get("layer") == "fatfinger":
+                resting.setdefault((o["ex"], o["side"]), []).append(o)
+        recent_fill = {}
+        for fl in self.fills_since(now - FAT_REARM_S):
+            if fl["layer"] == "fatfinger":
+                recent_fill[(fl["ex"], fl["side"])] = True
+        for ex in exs:
+            for side, value, scale in self.fat_eligible(ex):
+                cov["eligible"] += 1
+                key = (ex, side)
+                if resting.get(key):
+                    cov["covered"] += 1
+                why = None
+                if self.fat_block.get(key, 0) > now:
+                    why = "news guard (fair fell > 15c)"
+                elif self.breaker.get(("fat", self.pol(ex, side)), 0) > now:
+                    why = "fat-finger breaker"
+                elif self.ex.is_frozen(ex):
+                    why = "frozen (unknown write)"
+                if why:
+                    cov["reasons"][f"{ex}|{side}"] = why
+                    continue
+                anchor = self.fat_anchor.get(key)
+                if anchor is None or abs(anchor - value) > FAT_MOVE or (anchor >= FAT_MIN_FAIR) != (value >= FAT_MIN_FAIR):
+                    self.fat_anchor[key] = anchor = value
+                tier = "A" if ex in tier_a else "B"
+                for lvl, px, q in self.fat_levels(ex, side, anchor, scale, tier):
+                    sub = f"fatfinger:{ex}:{side}:{lvl}"
+                    if key in recent_fill and not any(abs(o["price"] - px) < 1e-9 for o in resting.get(key, [])):
+                        continue                            # re-arm a filled level only after 10 min
+                    plan.setdefault(ex, []).append(dict(side=side, px=px, qty=q, sub=sub, level=lvl,
+                                                        qtol=1.0 if key in recent_fill else QTY_TOL))
+                if not resting.get(key) and f"{ex}|{side}" not in cov["reasons"]:
+                    cov["reasons"][f"{ex}|{side}"] = "being placed (paced at 30% of SIG capacity)"
+        self.coverage = cov
+        return plan
+
+    def fat_fill_events(self, fills):
+        for f in fills:
+            if f["layer"] != "fatfinger" or f["action"] != "buy":
+                continue
+            fv = self.side_fair(f["ex"], f["side"])
+            cap = None if fv is None else (fv - f["price"]) * f["qty"]
+            msg = (f"FATFINGER FILL {self.name(f['ex'])}: bought {f['qty']:,.0f} {f['side'].upper()} at {f['price']:.3f}"
+                   + ("" if fv is None else f" (fair {fv:.3f}): value captured {cap:+,.0f}"))
+            self.event("FATFINGER", msg)
+            self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+            self.night.line(msg)
+        recent = [f for f in self.fills_since(time.time() - BREAKER_WINDOW_S) if f["layer"] == "fatfinger" and f["action"] == "buy"]
+        now = time.time()
+        for direction in ("D", "R"):
+            ms = {f["ex"] for f in recent if self.pol(f["ex"], f["side"]) == direction}
+            if len(ms) >= BREAKER_MARKETS and self.breaker.get(("fat", direction), 0) < now:
+                self.breaker[("fat", direction)] = now + BREAKER_PAUSE_S
+                n = 0
+                for o in self.open:
+                    rec = self.ledger.orders.get(o["id"])
+                    if rec and rec["layer"] == "fatfinger" and self.pol(o["ex"], o["side"]) == direction:
+                        n += bool(self.ex.cancel(o, reason="fat-finger breaker"))
+                msg = (f"FAT-FINGER BREAKER pro-{direction}: fat-finger fills in {len(ms)} markets within 10 min on one side "
+                       f"(news): {n} {direction}-side fat-finger bids pulled for 30 min")
+                self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+                self.event("BREAKER", msg)
+                self.night.line(msg)
 
     RELEASE_SUBS = ("inventory", "mm", "sniper")            # never: pair sets, manual (AK/RI), ladder tranches, fresh fat-finger
 
@@ -1100,6 +1306,10 @@ class Engine:
                 if held_fair is not None and sale > 0:
                     w += (held_fair - sale) / sale * sale * f["qty"]
         return dict(sig=round(sig, 2), avg_cost=round(w / sig, 4) if sig else None)
+
+    def cover_why(self, ex, side, why):
+        if self.coverage is not None and f"{ex}|{side}" in self.coverage["reasons"]:
+            self.coverage["reasons"][f"{ex}|{side}"] = why  # the specific reason replaces "being placed"
 
     def reserve_ok(self, ex, w):
         """Day 2 §3.2: only these may spend the opportunity reserve (down to the floor): fat-finger levels, sniper takes on
@@ -1196,9 +1406,20 @@ class Engine:
         """Sniper (night plan §5.5): every 60 s, the 20 newest tournament markets (1 read). A market not seen before is
         mapped to Polymarket strictly; without a confident match: alert, no trade. With one: it gets a MarketBot, and its
         first plans take asks far below fair (sniper caps), then MM and ladders pick it up."""
-        if now - self.scan_t < 60 or not self.controls.on("sniper"):
+        if now - self.scan_t < 60 or not (self.controls.on("sniper") or self.controls.on("fatfinger")):
             return
         self.scan_t = now
+        if now - getattr(self, "remap_t", 0) >= 600 and self.unmapped_new:      # retry unmapped new markets every 10 min
+            self.remap_t = now
+            for ex in list(self.unmapped_new):
+                try:
+                    mp = pm.map_one(self.unmapped_markets[ex])
+                except Exception:
+                    mp = None
+                if mp:
+                    self.mp.append(mp)
+                    self.unmapped_new.discard(ex)
+                    self.night.line(f"NEW MARKET {self.name(ex)} now mapped to Polymarket {mp['pm_ids']}: full coverage")
         try:
             ms = api.recent_markets(20)
         except Exception as err:
@@ -1217,10 +1438,17 @@ class Engine:
                 mp = None
                 self.event("ERR", f"map new market: {str(err)[:120]}")
             if not mp:
-                msg = f"NEW MARKET {m['title']} (ex {ex}): no confident Polymarket match, not traded"
+                msg = (f"NEW MARKET UNMAPPED {m['title']} (ex {ex}): no confident Polymarket match; only 0.05 fat-finger bids, half size, "
+                       f"both sides; mapping retried every 10 min")
                 self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
                 self.event("NEW", msg)
                 self.night.line(msg)
+                bot = bots.MarketBot(ex, self.meta[ex])
+                self.bots.append(bot)
+                self.owner[ex] = bot
+                self.unmapped_new.add(ex)
+                self.unmapped_markets[ex] = m
+                self.new_markets[ex] = now
                 continue
             self.mp.append(mp)
             bot = bots.MarketBot(ex, self.meta[ex])
@@ -2146,7 +2374,7 @@ class Engine:
         reserve_used = max(0.0, min(float(OPPORTUNITY_RESERVE), CASH_RESERVE + OPPORTUNITY_RESERVE - (money["cash"] - committed)))
         tgt, tdate = self.release_target()
         rel = self.released_today_view()
-        return dict(cash=money["cash"], holdings_sig=money["holdings_sig"], holdings_fair=round(money["fair"]["account"] - money["cash"], 2),
+        return dict(cash=money["cash"], free_cash=round(money["cash"] - CASH_RESERVE, 2), holdings_sig=money["holdings_sig"], holdings_fair=round(money["fair"]["account"] - money["cash"], 2),
                     floor=CASH_RESERVE, reserve=OPPORTUNITY_RESERVE, reserve_used=round(reserve_used, 2), committed=round(committed, 2),
                     free_to_trade=round(money["cash"] - CASH_RESERVE - OPPORTUNITY_RESERVE - committed, 2),
                     target=tgt, target_date=tdate, released_today=rel, buckets=out)
@@ -2269,7 +2497,19 @@ class Engine:
         except OSError as e:
             self.event("ERR", f"daily_pnl.csv: {e!r}")
         lm = self.leader_meta()
+        cov = None
+        if self.coverage is not None:
+            c_ = self.coverage
+            un = [dict(ex=k.split("|")[0], market=self.name(k.split("|")[0]), side=k.split("|")[1], reason=v)
+                  for k, v in sorted(c_["reasons"].items())]
+            cov = dict(pct=round(100 * c_["covered"] / c_["eligible"], 1) if c_["eligible"] else None, eligible=c_["eligible"],
+                       covered=c_["covered"], uncovered=un[:200])
+            for ex, t0 in self.new_markets.items():
+                if ex not in self.cov_logged and not any(u["ex"] == ex for u in un):
+                    self.cov_logged.add(ex)
+                    self.night.line(f"NEW MARKET {self.name(ex)} covered {time.time() - t0:.0f} s after it was seen")
         return dict(money=money, daily=daily, series=self.series_view(), capital=capital, strategies=self.strategies_view(stats),
+                    coverage=cov,
                     holdings=self.holdings_view(), activity=self.activity_view(), leader_thresholds=lm.get("thresholds"))
 
     def layer_note(self, layer):

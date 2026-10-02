@@ -113,7 +113,17 @@ LAYER_CAPS = {
     "ladder": {"filled": (3_000, 15_000, 25_000), "resting": (10_000, 60_000, 80_000)},
     "pairs": {"capital": (3_000, 10_000, 15_000)},
     "sniper": {"per_market": (1_000, 3_000, 3_000), "per_day": (10_000, 10_000, 10_000)},
+    "fatfinger": {"resting": (8_000, 40_000, 60_000), "filled": (30_000, 30_000, 40_000)},   # resting = policy (no cash lock)
 }
+# fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
+FAT_LEVELS = [0.12, 0.08, 0.05]
+FAT_SIZES = {"A": {0.12: 5_000, 0.08: 10_000, 0.05: 20_000}, "B": {0.08: 3_000, 0.05: 6_000}}   # shares
+FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP = 0.35, 0.60, 0.25   # eligible side; unmapped: SIG ref >= 0.60 (half size)
+FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S = 24 * 3600, 2 * 3600, 600
+FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S = 0.15, 600, 1800
+FAT_MOVE = 0.10                 # re-place only when fair moves > 10c (or crosses FAT_MIN_FAIR)
+FAT_CAPACITY_SHARE = 0.30       # initial placement uses <= 30% of measured SIG capacity
+FAT_BOOK_READS = 3              # queue reads (order books) per loop
 KAPPA_FROM_OCT30 = 0.03         # D3: capital discount from Oct 30 (election-night cash)
 LOSS_STOP = 2_000               # D5: bot-owned P&L at fair, rolling 24 h
 OPPORTUNITY_RESERVE = 10_000    # day 2 §3.2: on top of the floor; only fat-finger fills, new-market snipes, >= 8c takes use it

@@ -1,4 +1,9 @@
-"""G. DASHBOARD v2: served by the engine process, http://127.0.0.1:8765/?t=<token> (localhost only).
+"""G. DASHBOARD v3: served by the engine process, http://127.0.0.1:8765/?t=<token> (localhost only).
+
+  The page answers four questions, in order: how much do I have (account value at SIG marks, rank), how did I do today
+  (P&L split realized / unrealized, daily bars), where is my money (capital buckets, holdings), what is the engine doing
+  (strategies, fills as sentences, health). Payload: docs/dashboard_v3_contract.md (v2 keys + money, daily, series,
+  capital, strategies, holdings, activity, leaders.thresholds); any v3 key may be missing or null.
 
   create_app(get_state, controls, market_detail=None, token=None) -> FastAPI app
       get_state()            the engine's latest dashboard payload (Engine.dash_state(): a copy, never mutated after)
@@ -9,7 +14,8 @@
   render(payload)            the static fallback (data/dashboard.html, no controls): the engine writes it <= every 60 s
 
   token     a random token printed at startup and stored in data/dashboard_url.txt; every route needs it
-  stream    /events: one snapshot, then deltas (changed sections, changed market rows, new events) at most 2 a second
+  stream    /events: one snapshot, then deltas at most 2 a second: changed sections, changed market and holding rows by
+            ex (plus removed ones), new events and activity by id
   confirm   destructive controls need {"confirm": true} (the page asks twice); read-only mode refuses every control
             except turning read-only off
 """
@@ -42,23 +48,38 @@ def dumps(obj):
     return json.dumps(_finite(obj), separators=(",", ":"), default=str)
 
 
+ROWS = {"markets": "ex", "holdings": "ex"}       # sections diffed row by row (changed rows + removed keys)
+APPEND = {"events", "activity"}                   # newest-first lists: only entries with a new id are sent
+
+
 def diff(old, new):
-    """What changed from old to new: whole sections, market rows by ex (plus removed ones), new events (by id)."""
+    """What changed from old to new: whole sections; market and holding rows by ex (plus removed ones); new events and
+    activity entries (by id). A section that is not a list on either side is sent whole."""
     d = {}
     for k, v in new.items():
-        if k == "markets":
-            om = {r["ex"]: r for r in (old.get("markets") or [])}
-            rows = [r for r in v if om.get(r["ex"]) != r]
-            gone = sorted(set(om) - {r["ex"] for r in v})
+        ov = old.get(k)
+        if k in ROWS and isinstance(v, list) and isinstance(ov, list):
+            key = ROWS[k]
+            om = {r.get(key): r for r in ov if isinstance(r, dict)}
+            rows = [r for r in v if not isinstance(r, dict) or om.get(r.get(key)) != r]
+            gone = sorted(set(om) - {r.get(key) for r in v if isinstance(r, dict)}, key=str)
             if rows or gone:
-                d["markets"] = dict(rows=rows, gone=gone)
-        elif k == "events":
-            last = max((e["id"] for e in old.get("events") or []), default=0)
-            new_ev = [e for e in v if e["id"] > last]
+                d[k] = dict(rows=rows, gone=gone)
+        elif k in APPEND and isinstance(v, list) and isinstance(ov, list):
+            try:
+                ids = [e.get("id") for e in ov if isinstance(e, dict) and e.get("id") is not None]
+                last = max(ids) if ids else None
+                new_ev = [e for e in v if isinstance(e, dict) and (last is None or (e.get("id") is not None and e["id"] > last))]
+            except TypeError:                               # ids of mixed types: send what is not on the page yet
+                seen = [e.get("id") for e in ov if isinstance(e, dict)]
+                new_ev = [e for e in v if isinstance(e, dict) and e.get("id") not in seen]
             if new_ev:
-                d["events"] = new_ev
-        elif old.get(k) != v:
+                d[k] = new_ev
+        elif ov != v:
             d[k] = v
+    for k in old:
+        if k not in new:
+            d[k] = None                                     # a section the engine stopped sending: "not available"
     return d
 
 
@@ -236,191 +257,804 @@ PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SIG engine</title>
 <style>
-:root{--bg:#f6f7f9;--card:#fff;--ink:#16181d;--mute:#6b7280;--line:#e5e7eb;--acc:#2563eb;--good:#15803d;--bad:#b91c1c;--warn:#b45309;--chip:#eef2ff}
-@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#0f1115;--card:#171a21;--ink:#e6e8ee;--mute:#9aa3b2;--line:#2a2f3a;--acc:#60a5fa;--good:#4ade80;--bad:#f87171;--warn:#fbbf24;--chip:#1e2633}}
-:root[data-theme=dark]{--bg:#0f1115;--card:#171a21;--ink:#e6e8ee;--mute:#9aa3b2;--line:#2a2f3a;--acc:#60a5fa;--good:#4ade80;--bad:#f87171;--warn:#fbbf24;--chip:#1e2633}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+:root{color-scheme:light;--bg:#f4f4f1;--card:#fff;--ink:#0b0b0b;--ink2:#52514e;--mute:#6b6a65;--line:#e4e3dc;--axis:#c3c2b7;--acc:#2a78d6;
+--good:#006300;--bad:#b42323;--warn:#8a5300;--chip:#efeee9;--neutral:#aaa8a0;--warnbg:#fff5dd;--badbg:#fdeceb;--shadow:rgba(0,0,0,.14);
+--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#4a3aa7;--s8:#e34948;
+--st-good:#0ca30c;--st-warn:#fab219;--st-crit:#d03b3b}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){color-scheme:dark;--bg:#0d0d0d;--card:#1a1a19;--ink:#fff;--ink2:#c3c2b7;--mute:#9a988f;
+--line:#2c2c2a;--axis:#4a4a45;--acc:#3987e5;--good:#3cc23c;--bad:#f07272;--warn:#f5b83d;--chip:#262624;--neutral:#62615b;--warnbg:#2a2210;--badbg:#2e1616;
+--shadow:rgba(0,0,0,.5);--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767}}
+:root[data-theme=dark]{color-scheme:dark;--bg:#0d0d0d;--card:#1a1a19;--ink:#fff;--ink2:#c3c2b7;--mute:#9a988f;
+--line:#2c2c2a;--axis:#4a4a45;--acc:#3987e5;--good:#3cc23c;--bad:#f07272;--warn:#f5b83d;--chip:#262624;--neutral:#62615b;--warnbg:#2a2210;--badbg:#2e1616;
+--shadow:rgba(0,0,0,.5);--s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line);padding:8px 16px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-header h1{font-size:16px;margin:0 12px 0 0}nav{display:flex;flex-wrap:wrap;gap:4px}
-nav button,.btn{border:1px solid var(--line);background:var(--card);color:var(--ink);padding:5px 10px;border-radius:6px;cursor:pointer;font:inherit}
+header h1{font-size:16px;margin:0 10px 0 0}nav{display:flex;flex-wrap:wrap;gap:4px}
+nav button,.btn{border:1px solid var(--line);background:var(--card);color:var(--ink);padding:5px 11px;border-radius:7px;cursor:pointer;font:inherit}
 nav button.on{background:var(--acc);color:#fff;border-color:var(--acc)}.btn.danger{border-color:var(--bad);color:var(--bad)}.btn.arm{background:var(--bad);color:#fff}
-.spacer{flex:1}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--mute);margin-right:6px}.dot.ok{background:var(--good)}.dot.bad{background:var(--bad)}
-main{padding:16px;max-width:1400px;margin:0 auto}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}.card h3{margin:0 0 6px;font-size:12px;color:var(--mute);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.spacer{flex:1}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--mute);margin-right:6px}.dot.ok{background:var(--st-good)}.dot.bad{background:var(--st-crit)}
+#live{font-size:12.5px;color:var(--ink2)}
+main{padding:16px;max-width:1440px;margin:0 auto}
+section{margin:6px 0 30px;scroll-margin-top:64px}
+h2{font-size:19px;margin:0 0 10px;letter-spacing:-.01em}h2 .q{font-size:13px;color:var(--mute);font-weight:400;margin-left:8px}
+h3{margin:0 0 6px;font-size:13px;color:var(--ink2);font-weight:600}
+.jump{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.jump a{color:var(--ink2);text-decoration:none;font-size:13px;padding:3px 10px;border:1px solid var(--line);border-radius:14px;background:var(--card)}
+.jump a:hover{color:var(--ink);border-color:var(--axis)}
+.grid,.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;min-width:0}
+.card.soft{background:transparent}section>.card,section>details.card,.tiles+.card{margin-top:12px}
+.tiles.t8{grid-template-columns:repeat(4,minmax(0,1fr))}
+.lab{font-size:12.5px;color:var(--ink2);font-weight:600}.lab[title],.info{cursor:help}
+.info{display:inline-block;width:15px;height:15px;line-height:14px;text-align:center;border-radius:50%;border:1px solid var(--axis);color:var(--mute);font-size:10px;font-weight:700;margin-left:4px;vertical-align:1px}
+.hero .v{font-size:48px;font-weight:650;letter-spacing:-.02em;line-height:1.08;margin:4px 0 2px}
+.v2{font-size:30px;font-weight:650;line-height:1.15;margin:4px 0 2px;letter-spacing:-.01em}.v3{font-size:20px;font-weight:600;margin:3px 0 1px}
+.sub{color:var(--ink2);font-size:13px;margin-top:4px}.sub b:not(.good):not(.bad){color:var(--ink)}
 .big{font-size:34px;font-weight:700}.mid{font-size:20px;font-weight:600}.mute{color:var(--mute)}.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}
-table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:hidden}
-th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}th{font-size:12px;color:var(--mute);font-weight:600}
-td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}tr.click{cursor:pointer}tr.click:hover{background:var(--chip)}
-.chip{display:inline-block;padding:1px 7px;border-radius:10px;background:var(--chip);font-size:12px;margin-right:3px}
-.chip.full{background:var(--good);color:#fff}.chip.pilot{background:var(--warn);color:#fff}.chip.off{background:var(--line)}.chip.killed{background:var(--bad);color:#fff}
-.wrap{overflow-x:auto}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}
-input,select{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:4px 6px;font:inherit}input[type=number]{width:80px}
-.msg{position:fixed;right:16px;bottom:16px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 12px;max-width:420px;display:none}
-.alert{border-left:4px solid var(--bad);padding:6px 10px;margin:6px 0;background:var(--card)}
-.drawer{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin:12px 0}
-svg text{fill:var(--mute);font-size:11px}.ro .ctl{display:none!important}
-@media (max-width:640px){main{padding:8px}.big{font-size:26px}header{padding:8px}}
+.na{color:var(--mute);font-style:italic;padding:8px 0}
+table{width:100%;border-collapse:collapse;background:var(--card)}
+.wrap{overflow-x:auto;max-width:100%;border:1px solid var(--line);border-radius:10px;background:var(--card)}.wrap table{border:0}
+th,td{padding:6px 9px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}th{font-size:12px;color:var(--ink2);font-weight:600;vertical-align:bottom}
+tr:last-child td{border-bottom:0}td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}tr.click{cursor:pointer}tr.click:hover{background:var(--chip)}
+td.txt{white-space:normal;min-width:260px}td.wide{white-space:normal;min-width:180px;max-width:340px}th.grp{text-align:center;border-bottom:1px solid var(--axis)}
+th.sort{cursor:pointer;user-select:none}th.sort:hover{color:var(--ink)}th .ar{font-size:10px;margin-left:3px;color:var(--acc)}
+tfoot td{font-weight:600;border-top:1px solid var(--axis)}
+.chip{display:inline-block;padding:1px 8px;border-radius:10px;background:var(--chip);font-size:12px;margin-right:3px}
+.chip.full{background:var(--st-good);color:#fff}.chip.pilot{background:var(--st-warn);color:#1d1400}.chip.off{background:var(--line);color:var(--ink2)}.chip.killed{background:var(--st-crit);color:#fff}
+.ld{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;flex:none}.tag{display:inline-flex;align-items:center;white-space:nowrap}
+.badge{display:inline-block;padding:0 7px;border-radius:9px;font-size:11px;font-weight:600;border:1px solid var(--acc);color:var(--acc);margin-left:6px;vertical-align:1px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}
+input,select{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:5px 7px;font:inherit;max-width:100%}input[type=number]{width:80px}
+.msg{position:fixed;right:16px;bottom:16px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 12px;max-width:420px;display:none;z-index:30}
+.alert{border-left:4px solid var(--st-crit);padding:8px 12px;margin:0 0 10px;background:var(--badbg);border-radius:6px}.alert.w{border-left-color:var(--st-warn);background:var(--warnbg)}
+.drawer{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin:8px 0;white-space:normal}
+details>summary{cursor:pointer;color:var(--ink2);font-weight:600;padding:2px 0}details.more{margin-top:10px}details.more>summary{font-size:13px}
+details.card>summary{font-size:14px}details[open]>summary{margin-bottom:10px}
+.legend{display:flex;flex-wrap:wrap;gap:4px 16px;font-size:12.5px;color:var(--ink2);margin:0 0 8px}.legend span{display:inline-flex;align-items:center}
+.sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;flex:none}.tk{display:inline-block;width:14px;height:2px;background:var(--ink);margin-right:6px;border-radius:1px}
+.lk{display:inline-block;width:16px;height:2px;margin-right:6px;border-radius:1px}
+.chead{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px}.chead h3{margin:0}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}.seg button{border:0;background:var(--card);color:var(--ink2);padding:4px 11px;font:inherit;font-size:12.5px;cursor:pointer}
+.seg button.on{background:var(--acc);color:#fff}
+.pbar{position:relative;height:14px;margin:12px 0 8px;background:var(--chip);border-radius:4px}.pbar i{position:absolute;top:0;bottom:0}
+.pbar .z{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--axis)}.pbar .t{position:absolute;top:-5px;bottom:-5px;width:3px;margin-left:-1px;background:var(--ink);border-radius:2px}
+.eq{font-size:13px;color:var(--ink2);line-height:1.6}.eq b:not(.good):not(.bad){color:var(--ink)}
+.pscale{display:flex;justify-content:space-between;font-size:11px;color:var(--mute);margin:-4px 0 6px}
+.more-btn{margin-top:8px}
+.ok{color:var(--good);font-size:12.5px;margin-top:6px}.nok{color:var(--bad);font-size:12.5px;margin-top:6px;font-weight:600}
+.sbar{display:flex;gap:2px;height:24px;border-radius:5px;overflow:hidden;margin:4px 0 10px;background:var(--card)}.sbar i{display:block;height:100%;min-width:3px}
+.meter{height:6px;background:var(--chip);border-radius:3px;overflow:hidden;margin-top:7px}.meter i{display:block;height:100%;background:var(--acc)}
+.chart svg{display:block;max-width:100%}
+svg text{fill:var(--mute);font-size:11px;font-family:inherit}svg .lbl{fill:var(--ink2)}svg .vl{fill:var(--ink);font-weight:600;font-size:11.5px}
+svg .gl{stroke:var(--line);stroke-width:1}svg .zl{stroke:var(--axis);stroke-width:1}svg .tot{stroke:var(--ink);stroke-width:2;stroke-linecap:round}
+svg .ln{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}svg .ring{stroke:var(--card);stroke-width:2}svg .xh{stroke:var(--ink2);stroke-width:1}
+#tip{position:fixed;z-index:20;pointer-events:none;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:12.5px;
+box-shadow:0 6px 18px var(--shadow);display:none;max-width:300px;line-height:1.5}#tip .sw{vertical-align:-1px}
+.ro .ctl{display:none!important}
+@media (max-width:760px){.tiles.t8{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:640px){main{padding:10px}.hero .v{font-size:38px}.v2{font-size:25px}header{padding:8px 10px}h2 .q{display:block;margin:2px 0 0}.card{padding:12px}}
 </style></head><body>
-<header><h1>SIG engine</h1><nav id="tabs"></nav><span class="spacer"></span>
-<span id="live" class="mute"><span class="dot"></span>…</span>
-<span class="ctl"><button class="btn" id="pauseBtn"></button></span>
-<span class="ctl"><button class="btn danger" data-confirm="1" id="pullBtn">Pause + pull engine quotes</button></span>
-<span class="ctl">κ <input type="number" id="kv" min="0" max="3" step="0.5" placeholder="¢"> for <input type="number" id="km" min="1" max="1440" value="60"> min <button class="btn" data-confirm="1" id="kBtn">Set κ</button></span>
-<button class="btn" id="roBtn"></button>
-</header>
-<main id="main"></main><div class="msg" id="msg"></div>
+<header><h1>SIG engine</h1><nav id="tabs"></nav><span class="spacer"></span><span id="live"><span class="dot"></span>…</span><span id="risk"></span>
+<button class="btn" id="themeBtn" title="Light / dark theme">Theme</button></header>
+<main id="main"></main><div class="msg" id="msg"></div><div id="tip"></div>
 <script id="data" type="application/json">__DATA__</script>
 <script>
 const LIVE = __LIVE__, TOKEN = "__TOKEN__";
-let S = JSON.parse(document.getElementById("data").textContent || "{}");
-const ui = {tab: "overview", page: 0, q: "", layer: "", haspos: false, mis: "", ev: "", evq: "", open: null, detail: null, updated: Date.now(), connected: false};
-const TABS = {overview: "Overview", strategies: "Strategies", markets: "Markets", pairs: "Pairs", positions: "Positions", leaders: "Leaders", events: "Events"};
-const LAYERS = ["recycler", "mm", "ladder", "pairs", "sniper", "position", "leaders"];
-const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
-const num = (x, d = 0) => x == null || isNaN(x) ? "–" : Number(x).toLocaleString("en-US", {minimumFractionDigits: d, maximumFractionDigits: d});
-const sgn = (x, d = 0) => x == null || isNaN(x) ? "–" : (x > 0 ? "+" : "") + num(x, d);
-const cls = x => x == null ? "" : x > 0 ? "good" : x < 0 ? "bad" : "";
-const c2 = x => x == null ? "–" : sgn(x * 100, 1) + "¢";
-const px = x => x == null ? "–" : Number(x).toFixed(3);
-const ago = t => t == null ? "–" : (s => s < 90 ? s + " s" : s < 5400 ? Math.round(s / 60) + " min" : Math.round(s / 3600) + " h")(Math.max(0, Math.round(Date.now() / 1000 - t)));
-const chip = (st, killed) => killed ? `<span class="chip killed">killed</span>` : `<span class="chip ${esc(st)}">${esc(st)}</span>`;
+let S = {};
+try { S = JSON.parse(document.getElementById("data").textContent || "{}") || {}; } catch (e) { S = {error: "could not read the page data: " + e}; }
+const ui = {tab: "overview", shown: null, cache: {}, basis: "sig", hsort: {k: "value_sig", dir: -1}, hq: "", hl: "", hr: false, hall: false, al: "", aq: "", aall: false,
+  page: 0, q: "", layer: "", haspos: false, mis: "", ev: "", evq: "", open: null, detail: null, updated: Date.now(), connected: false, errors: [], theme: "auto"};
+const TABS = {overview: "Overview", leaders: "Leaders", controls: "Controls"};
+const LAYERS = ["recycler", "mm", "ladder", "pairs", "sniper", "position", "leaders"];          // controls (engine layer names)
+const ORDER = ["position", "mm", "ladder", "pairs", "sniper", "fatfinger", "recycler", "release"];  // colour slots 1..8, fixed per layer
+const SLOT = {position: 1, manual: 1, mm: 2, ladder: 3, pairs: 4, sniper: 5, fatfinger: 6, recycler: 7, inventory: 7, release: 8};
+const NAMES = {position: "Position exits (AK, RI)", manual: "AK / RI manual positions", recycler: "Recycler", inventory: "Older inventory (recycler)",
+  release: "Capital release", mm: "Market maker", ladder: "Deep ladders", pairs: "Pair sets", sniper: "Sniper", fatfinger: "Fat-finger catcher",
+  leaders: "Leaderboard logger", cash: "Cash", "old engine": "Old engine"};
+const FILTERS = new Set(["hq", "b-hlopts", "hr", "b-alopts", "aq", "b-evkinds", "evq", "q", "lf", "hp", "mis"]);
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const CH = {};                                   // chart id -> geometry + series, for the hover crosshair
+const HOLD_FIRST = 30, ACT_FIRST = 40;           // rows shown before "Show all"
+
+// ------------------------------------------------------------------------------------------- formatting
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const arr = x => Array.isArray(x) ? x : [];
+const obj = x => x && typeof x === "object" && !Array.isArray(x) ? x : {};
+const val = x => x == null || x === "" || typeof x === "boolean" || isNaN(x) ? null : Number(x);
+const num = (x, d = 0) => (x = val(x)) == null ? "–" : (x < 0 && Math.abs(x) >= 0.5 * Math.pow(10, -d) ? "−" : "") + Math.abs(x).toLocaleString("en-US", {minimumFractionDigits: d, maximumFractionDigits: d});
+const sgn = (x, d = 0) => (x = val(x)) == null ? "–" : (x > 0 && x >= 0.5 * Math.pow(10, -d) ? "+" : "") + num(x, d);
+const cls = x => (x = val(x)) == null ? "" : x > 0 ? "good" : x < 0 ? "bad" : "";
+const c2 = x => val(x) == null ? "–" : sgn(x * 100, 1) + "¢";
+const px = x => val(x) == null ? "–" : Number(x).toFixed(3);
+const pct = (x, d = 1) => val(x) == null ? "–" : num(x * 100, d) + "%";
+const ago = t => val(t) == null ? "–" : (s => s < 90 ? s + " s" : s < 5400 ? Math.round(s / 60) + " min" : Math.round(s / 3600) + " h")(Math.max(0, Math.round(Date.now() / 1000 - t)));
+const na = t => `<div class="na">${esc(t)}</div>`;
+const info = t => `<span class="info" title="${esc(t)}">?</span>`;
+const colorOf = k => SLOT[k] ? `var(--s${SLOT[k]})` : "var(--neutral)";
+const nameOf = k => { const s = arr(S.strategies).find(r => r && r.key === k); return (s && s.label) || NAMES[k] || (k == null || k === "" ? "–" : String(k)); };
+const tag = k => `<span class="tag"><i class="ld" style="background:${colorOf(k)}"></i>${esc(nameOf(k))}</span>`;
+const dday = s => { const m = /^(\d{4})-(\d\d)-(\d\d)/.exec(String(s || "")); return m ? MON[+m[2] - 1] + " " + (+m[3]) : String(s || "–"); };
+const STATE = {full: ["On", "Running at full size"], pilot: ["Pilot", "Running with small pilot caps"], off: ["Off", "Not trading"]};
+const chip = (st, killed) => killed ? `<span class="chip killed" title="${esc(obj(killed).reason || "stopped by a kill rule")}">stopped</span>`
+  : `<span class="chip ${esc(st)}" title="${esc((STATE[st] || [])[1] || "")}">${esc((STATE[st] || [st])[0])}</span>`;
+let fmtT = null, fmtD = null;
+try { fmtT = new Intl.DateTimeFormat("en-US", {timeZone: "America/Los_Angeles", hour: "2-digit", minute: "2-digit", hourCycle: "h23"});
+      fmtD = new Intl.DateTimeFormat("en-US", {timeZone: "America/Los_Angeles", month: "short", day: "numeric"}); } catch (e) { }
+const hm = t => fmtT ? fmtT.format(new Date(t * 1000)) : new Date(t * 1000).toISOString().slice(11, 16);
+const md = t => fmtD ? fmtD.format(new Date(t * 1000)) : new Date(t * 1000).toISOString().slice(5, 10);
+function when(t) {                               // "2026-10-02 13:02:11" -> "13:02:11" today, "Oct 1 13:02" another day
+  if (typeof t === "number") return md(t) + " " + hm(t);
+  const s = String(t || ""), today = String(S.t || "").slice(0, 10);
+  return s.length < 19 ? s || "–" : s.slice(0, 10) === today ? s.slice(11, 19) : dday(s) + " " + s.slice(11, 16);
+}
+function tzOff(t) {                              // minutes PT is ahead of UTC at t (−420 in PDT)
+  if (!fmtT) return 0;
+  const [h, m] = fmtT.format(new Date(t * 1000)).split(":").map(Number), d = new Date(t * 1000);
+  let o = (h * 60 + m) - (d.getUTCHours() * 60 + d.getUTCMinutes());
+  if (o > 720) o -= 1440; if (o < -720) o += 1440; return o;
+}
+
+// ------------------------------------------------------------------------------------------- chart helpers
+const f1 = v => Math.round(v * 10) / 10;
+function ticks(lo, hi, n) {
+  if (!(hi > lo)) { hi = lo + 1; }
+  const raw = (hi - lo) / n, mag = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / mag;
+  const step = (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * mag, a = Math.floor(lo / step + 1e-9) * step, b = Math.ceil(hi / step - 1e-9) * step, out = [];
+  for (let v = a; v <= b + step / 2; v += step) out.push(Math.round(v / step) * step);
+  return {lo: a, hi: b, step, ticks: out};
+}
+const kf = (v, step) => v === 0 ? "0" : Math.abs(step) >= 1000 ? num(v / 1000, step % 1000 ? 1 : 0) + "k" : num(v, step < 1 ? 2 : 0);
+function pad(lo, hi, f) { const s = (hi - lo) || Math.abs(hi) || 1; return [lo < 0 ? lo - s * f : lo, hi > 0 ? hi + s * f : hi]; }
+function barPath(x, w, y0, y1, round) {           // a bar from the baseline y0 to y1, 4px rounded at the far end only
+  const h = Math.abs(y1 - y0); if (h < 0.4) return "";
+  const r = round ? Math.min(4, h, w / 2) : 0, up = y1 < y0, s = up ? 1 : -1;
+  x = f1(x); w = f1(w); y0 = f1(y0); y1 = f1(y1);
+  return `M${x},${y0}V${f1(y1 + s * r)}Q${x},${y1} ${f1(x + r)},${y1}H${f1(x + w - r)}Q${f1(x + w)},${y1} ${f1(x + w)},${f1(y1 + s * r)}V${y0}Z`;
+}
+function width(id) { const el = document.getElementById("b-" + id), w = el && el.clientWidth; return Math.max(300, Math.min(1600, w || 900)); }
+function linePath(pts, X, Y) {                  // pts [[t, v]], a gap (null) starts a new segment
+  let d = "", pen = false;
+  for (const [t, v] of pts) { if (v == null) { pen = false; continue; } d += (pen ? "L" : "M") + f1(X(t)) + "," + f1(Y(v)); pen = true; }
+  return d;
+}
+function nearest(ts, t) { let lo = 0, hi = ts.length - 1; if (hi < 0) return -1; while (hi - lo > 1) { const m = (lo + hi) >> 1; if (ts[m] < t) lo = m; else hi = m; } return Math.abs(ts[lo] - t) <= Math.abs(ts[hi] - t) ? lo : hi; }
+function timeTicks(t0, t1, w) {
+  const span = Math.max(1, t1 - t0), steps = [1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800];
+  const step = steps.find(s => span / s <= Math.max(2, w / 85)) || 604800, off = tzOff(t0) * 60, out = [];
+  for (let t = Math.ceil((t0 + off) / step) * step - off; t <= t1; t += step) out.push(t);
+  return {step, ticks: out, label: t => { const day = ((t + off) % 86400 + 86400) % 86400 === 0; return step >= 86400 || day ? md(t) : hm(t); }};
+}
+const tipAttr = html => ` data-tip="${esc(html)}"`;
+const legend = items => `<div class="legend">${items.map(([mark, text]) => `<span>${mark}${text}</span>`).join("")}</div>`;
+const sw = c => `<i class="sw" style="background:${c}"></i>`;
+
+// ------------------------------------------------------------------------------------------- Money
+function banner() {
+  const out = [], t = obj(obj(S.money).total), start = val(obj(S.money).start) ?? 100000;
+  if (S.error) out.push(`<div class="alert">${esc(S.error)}</div>`);
+  if (S.stopped) out.push(`<div class="alert">The engine is stopped: nothing is trading.</div>`);
+  if (Object.keys(t).length && (t.ok === false || Math.abs(val(t.diff) || 0) > 50)) {
+    out.push(`<div class="alert recon" id="recon-warn"><b>Warning: the P&L split does not add up.</b> Realized ${sgn(t.realized)} + unrealized ${sgn(t.unrealized)} = ${sgn(t.sum)},
+      but account − ${num(start)} = ${sgn(t.account_minus_start)} (off by ${sgn(t.diff)}). Trust the account value; treat the split as unreliable until this clears.</div>`);
+  }
+  for (const a of arr(S.alerts)) out.push(`<div class="alert w">${esc(a)}</div>`);
+  return out.join("");
+}
+
+function money() {
+  const m = obj(S.money), o = obj(S.overview), L = obj(S.leaders);
+  const acct = val(m.account_sig) ?? val(o.leaderboard), start = val(m.start) ?? 100000;
+  const vs = val(m.vs_start) ?? (acct == null ? null : acct - start);
+  const ours = arr(L.latest).find(r => r && r.ours), rank = val(m.rank) ?? (ours ? val(ours.rank) : null), nt = val(m.n_traders);
+  const to = obj(m.to_rank), dist = k => { const v = val(to[k]); return v == null ? "" : v > 0 ? `<b>${sgn(v)}</b> to reach #${k}` : `ahead of #${k} by <b>${num(-v)}</b>`; };
+  const dists = ["100", "10"].map(dist).filter(Boolean).join(" · ");
+  const hero = acct == null ? `<div class="card hero"><div class="lab">Account value (SIG)</div>${na("Not available yet.")}</div>` :
+    `<div class="card hero"><div class="lab" title="totalAccountValue from SIG's /portfolio/pnl: the number the leaderboard ranks">Account value (SIG marks)${info("SIG's own valuation of everything we hold plus cash. This is the leaderboard number.")}</div>
+     <div class="v">${num(acct)}</div>
+     <div class="sub"><b class="${cls(vs)}">${sgn(vs)}</b> (${vs == null ? "–" : sgn(vs / start * 100, 1) + "%"}) vs the ${num(start)} start</div>
+     <div class="sub">${rank == null ? "Rank not available yet" : `Rank <b>#${num(rank)}</b>${nt == null ? "" : ` of ${num(nt)}`}`}</div>
+     ${dists ? `<div class="sub">${dists}</div>` : ""}</div>`;
+  const td = m.today && typeof m.today === "object" ? m.today : null;
+  const today = !td ? `<div class="card"><div class="lab">Today's P&L (SIG)</div>${na("Not available yet.")}</div>` :
+    `<div class="card"><div class="lab" title="Change in account value (SIG marks) since ${esc(td.since || "00:00 PT")}">Today's P&L (SIG)</div>
+     <div class="v2 ${cls(td.pnl)}">${sgn(td.pnl)}</div>
+     <div class="sub">${sw("var(--s1)")}Realized today <b class="${cls(td.realized)}">${sgn(td.realized)}</b>${info("Closed trades: cash actually made or lost today.")}</div>
+     <div class="sub">${sw("var(--s2)")}Unrealized change <b class="${cls(td.unrealized_change)}">${sgn(td.unrealized_change)}</b>${info("How much the open positions moved at SIG marks today.")}</div>
+     <div class="sub mute">since ${esc(String(td.since || "").slice(11, 16) || "00:00")} PT</div></div>`;
+  const tt = m.total && typeof m.total === "object" ? m.total : null;
+  let total = `<div class="card"><div class="lab">Total P&L since start (SIG)</div>${na("Not available yet.")}</div>`;
+  if (tt && (val(tt.realized) != null || val(tt.unrealized) != null)) {
+    const r = val(tt.realized) || 0, u = val(tt.unrealized) || 0, sum = val(tt.sum) ?? r + u;
+    const neg = Math.min(0, r) + Math.min(0, u), pos = Math.max(0, r) + Math.max(0, u), lo = Math.min(neg, sum, 0), hi = Math.max(pos, sum, 0), span = (hi - lo) || 1;
+    const P = v => ((v - lo) / span * 100).toFixed(2) + "%";
+    const seg = (a, b, c, t) => `<i style="left:${P(Math.min(a, b))};width:${(Math.abs(b - a) / span * 100).toFixed(2)}%;background:${c}" title="${esc(t)}"></i>`;
+    const rEnd = r, uStart = (u < 0) === (r < 0) ? r : 0;
+    const bad = tt.ok === false || Math.abs(val(tt.diff) || 0) > 50;
+    total = `<div class="card"><div class="lab" title="Realized (closed trades, cash) + unrealized (open positions at SIG marks)">Total P&L since start (SIG)</div>
+     <div class="v2 ${cls(sum)}">${sgn(sum)}</div>
+     <div class="pbar" role="img" aria-label="realized ${sgn(r)} plus unrealized ${sgn(u)} equals ${sgn(sum)}">
+       ${seg(0, rEnd, "var(--s1)", "Realized " + sgn(r))}${seg(uStart, uStart + u, "var(--s2)", "Unrealized " + sgn(u))}
+       <span class="z" style="left:${P(0)}"></span><span class="t" style="left:${P(sum)}" title="Total ${sgn(sum)}"></span></div>
+     <div class="pscale"><span>${lo === 0 ? "0" : sgn(lo)}</span><span>${hi === 0 ? "0" : sgn(hi)}</span></div>
+     <div class="eq">${sw("var(--s1)")}Realized <b class="${cls(r)}">${sgn(r)}</b> <span class="mute">closed trades</span><br>
+       ${sw("var(--s2)")}Unrealized <b class="${cls(u)}">${sgn(u)}</b> <span class="mute">open positions at SIG marks</span><br>
+       <span class="tk"></span>Total <b class="${cls(sum)}">${sgn(sum)}</b></div>
+     ${tt.ok == null && val(tt.diff) == null ? "" : bad ? `<div class="nok">⚠ Does not match account − ${num(start)} (${sgn(tt.account_minus_start)}): off by ${sgn(tt.diff)}</div>`
+       : `<div class="ok" title="realized + unrealized = account − ${num(start)}">✓ Adds up: account − ${num(start)} = ${sgn(tt.account_minus_start ?? vs)}</div>`}</div>`;
+  }
+  const fr = obj(m.fair), fa = val(fr.account) ?? val(o.account_fair), fd = val(fr.vs_sig) ?? (fa != null && acct != null ? fa - acct : null);
+  const fair = `<div class="card soft"><div class="lab" title="Value of everything at Polymarket prices: what we expect at settlement if Polymarket is right">Expected at settlement (Polymarket fair)</div>
+     ${fa == null ? na("Not available yet.") : `<div class="v3">${num(fa)}</div><div class="sub">if Polymarket is right</div>
+     <div class="sub"><b class="${cls(fd)}">${sgn(fd)}</b> vs SIG marks</div><div class="sub">${sgn(fa - start)} vs the ${num(start)} start</div>`}</div>`;
+  return `<div class="cards">${hero}${today}${total}${fair}</div>`;
+}
+
+function basis() {
+  return `<div class="seg" role="group" aria-label="basis">${[["sig", "SIG marks"], ["fair", "Polymarket fair"]].map(([k, t]) =>
+    `<button data-basis="${k}" class="${ui.basis === k ? "on" : ""}">${t}</button>`).join("")}</div>`;
+}
+
+function dailyData() {
+  const fair = ui.basis === "fair";
+  return arr(S.daily).filter(r => r && typeof r === "object").map(r => {
+    const re = val(r.realized), uc = val(r.unrealized_change);
+    const tot = fair ? val(r.pnl_fair) : val(r.pnl_sig) ?? (re != null && uc != null ? re + uc : null);
+    return {d: r.date, partial: !!r.partial, re, un: fair ? (tot != null && re != null ? tot - re : null) : uc, tot};
+  });
+}
+
+function dailyChart() {
+  const data = dailyData(), fair = ui.basis === "fair";
+  if (!data.length) return na("Daily P&L is not available yet (one bar per day since Oct 1).");
+  if (!data.some(x => x.re != null || x.un != null || x.tot != null)) return na(`Daily P&L at ${fair ? "Polymarket fair" : "SIG marks"} is not available yet.`);
+  let lo = 0, hi = 0;
+  for (const x of data) {
+    let p = 0, n = 0;
+    for (const v of [x.re, x.un]) if (v != null) { if (v >= 0) p += v; else n += v; }
+    lo = Math.min(lo, n, x.tot ?? 0); hi = Math.max(hi, p, x.tot ?? 0);
+  }
+  [lo, hi] = pad(lo, hi, 0.14);
+  const W = width("daily"), H = 260, L = 50, R = 14, T = 14, B = 38, tk = ticks(lo, hi, 5);
+  const Y = v => T + (tk.hi - v) / (tk.hi - tk.lo) * (H - T - B);
+  const n = data.length, band = (W - L - R) / Math.max(n, 6), off = L + (W - L - R - n * band) / 2, bw = Math.min(28, band * 0.5);
+  const every = Math.ceil(46 / band);
+  let g = tk.ticks.map(v => `<line x1="${L}" x2="${W - R}" y1="${f1(Y(v))}" y2="${f1(Y(v))}" class="${v === 0 ? "zl" : "gl"}"/><text x="${L - 7}" y="${f1(Y(v)) + 4}" text-anchor="end">${kf(v, tk.step)}</text>`).join("");
+  data.forEach((x, i) => {
+    const bx = off + i * band + (band - bw) / 2, cx = bx + bw / 2, parts = [[x.re, "var(--s1)"], [x.un, "var(--s2)"]];
+    const outer = s => parts.filter(p => p[0] != null && Math.sign(p[0]) === s).pop();
+    const oP = outer(1), oN = outer(-1);
+    let pb = 0, nb = 0;
+    for (const p of parts) {
+      const v = p[0]; if (v == null || v === 0) continue;
+      const a = v > 0 ? pb : nb, b = a + v; if (v > 0) pb = b; else nb = b;
+      let y0 = Y(a); const y1 = Y(b);
+      if (a !== 0) y0 += v > 0 ? -2 : 2;                         // 2px surface gap between stacked segments
+      if (Math.abs(y1 - y0) >= 0.5 && Math.sign(y0 - y1) === Math.sign(v)) g += `<path d="${barPath(bx, bw, y0, y1, p === oP || p === oN)}" fill="${p[1]}"/>`;
+    }
+    if (x.tot != null) {
+      const yt = Y(x.tot), top = Math.min(Y(pb), yt), bot = Math.max(Y(nb), yt);
+      g += `<line x1="${f1(bx - 5)}" x2="${f1(bx + bw + 5)}" y1="${f1(yt)}" y2="${f1(yt)}" class="tot"/>`;
+      g += `<text x="${f1(cx)}" y="${f1(x.tot >= 0 ? top - 7 : bot + 15)}" text-anchor="middle" class="vl">${sgn(x.tot)}</text>`;
+    }
+    if (i % every === 0 || i === n - 1) {
+      g += `<text x="${f1(cx)}" y="${H - B + 17}" text-anchor="middle" class="lbl">${esc(dday(x.d))}</text>`;
+      if (x.partial) g += `<text x="${f1(cx)}" y="${H - B + 31}" text-anchor="middle">so far</text>`;
+    }
+    const tip = `<b>${esc(dday(x.d))}${x.partial ? " (so far)" : ""}</b><div>${sw("var(--s1)")}Realized ${sgn(x.re)}</div>
+      <div>${sw("var(--s2)")}Unrealized change ${sgn(x.un)}</div><div><span class="tk"></span>Total <b>${sgn(x.tot)}</b></div><div class="mute">at ${fair ? "Polymarket fair" : "SIG marks"}</div>`;
+    g += `<rect x="${f1(off + i * band)}" y="${T}" width="${f1(band)}" height="${H - T - B}" fill="transparent"${tipAttr(tip)}/>`;
+  });
+  return legend([[sw("var(--s1)"), "Realized (closed trades)"], [sw("var(--s2)"), `Unrealized change (open positions at ${fair ? "Polymarket fair" : "SIG marks"})`], ['<span class="tk"></span>', "Day total"]])
+    + `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Daily P&L">${g}</svg>`;
+}
+
+function dailyTable() {
+  const rows = arr(S.daily).filter(r => r && typeof r === "object");
+  if (!rows.length) return na("No daily rows yet.");
+  return `<div class="wrap"><table><thead><tr><th>Day</th><th class="n">Account (SIG)</th><th class="n">Account (fair)</th><th class="n">Cash</th><th class="n">Holdings (SIG)</th>
+    <th class="n">Realized</th><th class="n">Unrealized change</th><th class="n">P&L (SIG)</th><th class="n">P&L (fair)</th></tr></thead><tbody>${rows.map(r => `<tr>
+    <td>${esc(dday(r.date))}${r.partial ? ' <span class="mute">so far</span>' : ""}</td><td class="n">${num(r.account_sig)}</td><td class="n">${num(r.account_fair)}</td><td class="n">${num(r.cash)}</td>
+    <td class="n">${num(r.holdings_sig)}</td><td class="n ${cls(r.realized)}">${sgn(r.realized)}</td><td class="n ${cls(r.unrealized_change)}">${sgn(r.unrealized_change)}</td>
+    <td class="n ${cls(r.pnl_sig)}"><b>${sgn(r.pnl_sig)}</b></td><td class="n ${cls(r.pnl_fair)}">${sgn(r.pnl_fair)}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+function accountChart() {
+  const s = obj(S.series), t = arr(s.t), sg = arr(s.account_sig), fr = arr(s.account_fair), rt = arr(s.rank_t), rk = arr(s.rank);
+  const A = t.map((x, i) => [val(x), val(sg[i]), val(fr[i])]).filter(p => p[0] != null && (p[1] != null || p[2] != null));
+  const K = rt.map((x, i) => [val(x), val(rk[i])]).filter(p => p[0] != null && p[1] != null);
+  if (A.length < 2 && K.length < 2) return na("Account history is not available yet (sampled every 2 minutes).");
+  const start = val(obj(S.money).start) ?? 100000, ts = [...A.map(p => p[0]), ...K.map(p => p[0])];
+  const t0 = Math.min(...ts), t1 = Math.max(...ts, t0 + 60);
+  const W = width("account"), L = 56, R = 104, T = 12, H1 = A.length >= 2 ? 210 : 0, G = K.length >= 2 ? (H1 ? 34 : 18) : 0, H2 = K.length >= 2 ? 84 : 0, B = 26, H = T + H1 + G + H2 + B;
+  const X = v => L + (v - t0) / (t1 - t0) * (W - L - R);
+  let g = "";
+  const tt = timeTicks(t0, t1, W - L - R);
+  const series = [];
+  if (H1) {
+    const vs = A.flatMap(p => [p[1], p[2]]).filter(v => v != null).concat([start]);
+    let [lo, hi] = [Math.min(...vs), Math.max(...vs)]; const sp = (hi - lo) || 1000; lo -= sp * 0.06; hi += sp * 0.06;
+    const tk = ticks(lo, hi, 4), Y = v => T + (tk.hi - v) / (tk.hi - tk.lo) * H1;
+    g += tk.ticks.map(v => `<line x1="${L}" x2="${W - R}" y1="${f1(Y(v))}" y2="${f1(Y(v))}" class="gl"/><text x="${L - 7}" y="${f1(Y(v)) + 4}" text-anchor="end">${kf(v, tk.step)}</text>`).join("");
+    g += `<line x1="${L}" x2="${W - R}" y1="${f1(Y(start))}" y2="${f1(Y(start))}" class="zl"/><text x="${L + 4}" y="${f1(Y(start)) - 4}">start ${num(start)}</text>`;
+    const lines = [["SIG marks", "var(--s1)", 1], ["Polymarket fair", "var(--s2)", 2]];
+    const ends = [];
+    for (const [name, c, j] of lines) {
+      const pts = A.map(p => [p[0], p[j]]);
+      if (!pts.some(p => p[1] != null)) continue;
+      g += `<path d="${linePath(pts, X, Y)}" class="ln" stroke="${c}"/>`;
+      const last = pts.filter(p => p[1] != null).pop();
+      ends.push([name, c, last]);
+      series.push({name, color: c, t: pts.filter(p => p[1] != null).map(p => p[0]), v: pts.filter(p => p[1] != null).map(p => p[1]), Y, gap: 1200, fmt: v => num(v)});
+    }
+    const clash = ends.length === 2 && Math.abs(Y(ends[0][2][1]) - Y(ends[1][2][1])) < 15;
+    for (const [name, c, p] of ends) {
+      g += `<circle cx="${f1(X(p[0]))}" cy="${f1(Y(p[1]))}" r="4" fill="${c}" class="ring"/>`;
+      if (!clash) g += `<text x="${f1(X(p[0]) + 9)}" y="${f1(Y(p[1]) + 4)}" class="vl">${num(p[1])}</text>`;
+    }
+  }
+  if (H2) {
+    const y0 = T + H1 + G, rs = K.map(p => p[1]);
+    let lo = Math.min(...rs), hi = Math.max(...rs); if (hi - lo < 4) { lo -= 2; hi += 2; }
+    const tk = ticks(lo, hi, 2), Y2 = v => y0 + (v - tk.lo) / (tk.hi - tk.lo) * H2;    // rank 1 is the top
+    g += `<text x="${L}" y="${y0 - 9}" class="lbl">Our rank (lower is better)</text>`;
+    g += tk.ticks.map(v => `<line x1="${L}" x2="${W - R}" y1="${f1(Y2(v))}" y2="${f1(Y2(v))}" class="gl"/><text x="${L - 7}" y="${f1(Y2(v)) + 4}" text-anchor="end">#${num(v)}</text>`).join("");
+    g += `<path d="${linePath(K, X, Y2)}" class="ln" stroke="var(--ink2)"/>`;
+    const last = K[K.length - 1];
+    g += `<circle cx="${f1(X(last[0]))}" cy="${f1(Y2(last[1]))}" r="4" fill="var(--ink2)" class="ring"/><text x="${f1(X(last[0]) + 9)}" y="${f1(Y2(last[1]) + 4)}" class="vl">#${num(last[1])}</text>`;
+    series.push({name: "Rank", color: "var(--ink2)", t: K.map(p => p[0]), v: rs, Y: Y2, gap: 1800, fmt: v => "#" + num(v)});
+  }
+  const yb = T + H1 + G + H2;
+  g += `<line x1="${L}" x2="${W - R}" y1="${yb}" y2="${yb}" class="zl"/>` + tt.ticks.map(v => `<text x="${f1(X(v))}" y="${yb + 17}" text-anchor="middle">${esc(tt.label(v))}</text>`).join("");
+  g += `<line id="xh-account" class="xh" x1="0" x2="0" y1="${T}" y2="${yb}" display="none"/>` + series.map((s, i) => `<circle id="xh-account-${i}" r="4" fill="${s.color}" class="ring" display="none"/>`).join("");
+  g += `<rect data-chart="account" x="${L}" y="${T}" width="${W - L - R}" height="${yb - T}" fill="transparent"/>`;
+  CH.account = {id: "account", L, R, W, t0, t1, X, series};
+  const leg = [];
+  if (H1) leg.push([`<i class="lk" style="background:var(--s1)"></i>`, "SIG marks (leaderboard)"], [`<i class="lk" style="background:var(--s2)"></i>`, "Polymarket fair"]);
+  if (H2) leg.push([`<i class="lk" style="background:var(--ink2)"></i>`, "Rank"]);
+  return legend(leg) + `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Account value over time">${g}</svg>`;
+}
+
+// ------------------------------------------------------------------------------------------- Capital
+function capital() {
+  const c = S.capital, o = obj(S.overview);
+  if (!c || typeof c !== "object") {
+    if (val(o.free_cash) == null) return na("The capital view is not available yet.");
+    return na("The full capital view is not available yet; the engine's v2 figures:") + `<div class="tiles">
+      <div class="card"><div class="lab">Free cash</div><div class="v3">${num(o.free_cash)}</div></div>
+      <div class="card"><div class="lab">Cash floor</div><div class="v3">${num(o.reserve)}</div></div>
+      <div class="card"><div class="lab">Committed to resting buys</div><div class="v3">${num(o.committed)}</div></div></div>`;
+  }
+  const ft = val(c.free_to_trade), tg = val(c.target), cash = val(c.cash), rel = obj(c.released_today);
+  const tile = (lab, v, sub, tip) => `<div class="card"><div class="lab"${tip ? ` title="${esc(tip)}"` : ""}>${lab}${tip ? info(tip) : ""}</div><div class="v3">${v}</div>${sub ? `<div class="sub">${sub}</div>` : ""}</div>`;
+  const fc = val(c.free_cash) ?? (cash != null && val(c.floor) != null ? cash - c.floor : cash);   // the target excludes the floor
+  const prog = tg && fc != null ? Math.max(0, Math.min(1, fc / tg)) : null;
+  const tiles = [
+    tile("Cash", num(cash), "", "Cash in the SIG account right now."),
+    tile("Holdings", num(c.holdings_sig), `${num(c.holdings_fair)} at Polymarket fair`, "Open positions valued at SIG marks (fair alongside)."),
+    tile("Cash floor", num(c.floor), "never spent", "Cash the engine always keeps."),
+    tile("Opportunity reserve", num(c.reserve), `used ${num(c.reserve_used)}`, "Ring-fenced for big opportunities: fat-finger fills, sniper takes on new markets, takes 8¢+ through fair."),
+    tile("Committed", num(c.committed), "resting buy orders", "Entry buys resting on SIG, counted against cash."),
+    tile("Free to trade", `<span class="${ft != null && ft < 0 ? "bad" : ""}">${num(ft == null ? null : Math.max(0, ft))}</span>`,
+      ft != null && ft < 0 ? `<span class="bad">cash is ${num(-ft)} short of floor + reserve + committed</span>` : "for new entries", "Cash − floor − reserve − committed. What the market maker, ladders and pairs may still spend."),
+    tile("Free-cash target", tg == null ? "–" : `${num(fc)} <span class="mute" style="font-size:14px">of ${num(tg)}</span>`,
+      (c.target_date ? `by ${esc(dday(c.target_date))}` : "") + (prog == null ? "" : `<div class="meter"><i style="width:${(prog * 100).toFixed(1)}%"></i></div>`), "Free cash (cash above the 5k floor) the release layer is working towards."),
+    tile("Released today", val(rel.sig) == null ? "–" : num(rel.sig), val(rel.sig) == null ? "not available yet" : `freed at ${pct(rel.avg_cost)} average cost`,
+      "Cash the release layer freed today by selling where it is cheap, and what it gave up vs fair on average."),
+  ].join("");
+  const bk = arr(c.buckets).filter(b => b && typeof b === "object");
+  let bar = na("Where the capital sits is not available yet.");
+  if (bk.length) {
+    const tot = bk.reduce((a, b) => a + Math.max(0, val(b.sig) || 0), 0) || 1, ftot = bk.reduce((a, b) => a + Math.max(0, val(b.fair) || 0), 0);
+    const color = b => b.key === "cash" ? "var(--neutral)" : colorOf(b.key);
+    bar = `<div class="sbar" role="img" aria-label="where the capital sits">${bk.filter(b => (val(b.sig) || 0) > 0).map(b =>
+      `<i style="flex:${(val(b.sig) / tot * 100).toFixed(3)} 1 0;background:${color(b)}"${tipAttr(`${sw(color(b))}<b>${esc(b.label || b.key)}</b><div>${num(b.sig)} at SIG marks (${pct(val(b.sig) / tot)})</div><div>${num(b.fair)} at Polymarket fair</div>`)}></i>`).join("")}</div>
+      <div class="wrap"><table><thead><tr><th>Where</th><th class="n">SIG marks</th><th class="n">Share</th><th class="n">Polymarket fair</th></tr></thead><tbody>${bk.map(b =>
+      `<tr><td><span class="tag">${sw(color(b))}${esc(b.label || nameOf(b.key))}</span></td><td class="n">${num(b.sig)}</td><td class="n">${pct((val(b.sig) || 0) / tot)}</td><td class="n">${num(b.fair)}</td></tr>`).join("")}</tbody>
+      <tfoot><tr><td>Total</td><td class="n">${num(tot)}</td><td class="n">100%</td><td class="n">${num(ftot)}</td></tr></tfoot></table></div>`;
+  }
+  return `<div class="tiles t8">${tiles}</div><div class="card"><h3>Where the capital sits</h3>${bar}</div>`;
+}
+
+// ------------------------------------------------------------------------------------------- Strategies
+function strategies() {
+  const rows = arr(S.strategies).filter(r => r && typeof r === "object");
+  if (!rows.length) {
+    const ls = arr(S.layers).filter(l => l && typeof l === "object");
+    if (!ls.length) return na("Strategies are not available yet.");
+    return na("Strategy P&L at SIG marks is not available yet; the engine's v2 figures (since the night start):") + `<div class="wrap"><table><thead><tr><th>Strategy</th><th>State</th>
+      <th class="n">Fills</th><th class="n">Resting orders</th><th class="n">P&L at fair</th><th class="n">Realized</th></tr></thead><tbody>${ls.map(l => `<tr><td>${tag(l.name)}<div class="mute">${esc(l.note || "")}</div></td>
+      <td>${chip(l.state, l.killed)}</td><td class="n">${num(l.fills)}</td><td class="n">${num(l.resting)}</td><td class="n ${cls(l.pnl_fair)}">${sgn(l.pnl_fair)}</td><td class="n ${cls(l.realized)}">${sgn(l.realized)}</td></tr>`).join("")}</tbody></table></div>`;
+  }
+  const three = p => ["realized", "unrealized_sig", "unrealized_fair"].map(k => { const v = obj(p)[k]; return `<td class="n ${cls(v)}">${sgn(v)}</td>`; }).join("");
+  const tot = (g, k) => rows.reduce((a, r) => a + (val(obj(r[g])[k]) || 0), 0);
+  const body = rows.map(r => `<tr><td class="wide">${tag(r.key)}<div class="mute" style="font-size:12px">${esc(r.what || "")}</div></td>
+    <td>${chip(r.state, r.killed)}${r.killed ? `<div class="bad" style="font-size:12px;white-space:normal">${esc(obj(r.killed).reason || "")}</div>` : ""}</td>
+    ${three(r.today)}${three(r.total)}<td class="n">${num(r.fills_today)}</td><td class="n">${num(r.capital_used)}</td><td class="n">${num(r.resting)}</td>
+    <td class="wide">${esc(r.last_action || "–")}</td></tr>`).join("");
+  const foot = `<tr><td>All strategies</td><td></td>${["today", "total"].map(g => ["realized", "unrealized_sig", "unrealized_fair"].map(k => { const v = tot(g, k); return `<td class="n ${cls(v)}">${sgn(v)}</td>`; }).join("")).join("")}
+    <td class="n">${num(rows.reduce((a, r) => a + (val(r.fills_today) || 0), 0))}</td><td class="n">${num(rows.reduce((a, r) => a + (val(r.capital_used) || 0), 0))}</td><td class="n">${num(rows.reduce((a, r) => a + (val(r.resting) || 0), 0))}</td><td></td></tr>`;
+  const h3 = `<th class="n" title="Closed trades: cash made or lost">Realized</th><th class="n" title="Open positions at SIG marks">Unrealized (SIG)</th><th class="n" title="Open positions at Polymarket fair">Unrealized (fair)</th>`;
+  return `<div class="wrap"><table><thead><tr><th rowspan="2">Strategy</th><th rowspan="2">State</th><th colspan="3" class="grp">Today</th><th colspan="3" class="grp">Since start</th>
+    <th rowspan="2" class="n">Fills today</th><th rowspan="2" class="n" title="Capital in this strategy's positions, at SIG marks">Capital used</th><th rowspan="2" class="n">Resting orders</th><th rowspan="2">Last action</th></tr>
+    <tr>${h3}${h3}</tr></thead><tbody>${body}</tbody><tfoot>${foot}</tfoot></table></div>`;
+}
+
+function layersChart() {
+  const rows = arr(S.daily).filter(r => r && typeof r === "object");
+  const v = (r, k) => { const l = obj(obj(r.layers)[k]), a = val(l.realized), b = val(l.unrealized); return a == null && b == null ? null : (a || 0) + (b || 0); };
+  const found = new Set(rows.flatMap(r => Object.keys(obj(r.layers))));
+  const keys = [...ORDER, ...[...found].filter(k => !ORDER.includes(k)).sort()].filter(k => rows.some(r => v(r, k) != null));
+  if (!rows.length || !keys.length) return na("P&L by strategy per day is not available yet.");
+  let lo = 0, hi = 0;
+  for (const r of rows) for (const k of keys) { const x = v(r, k); if (x != null) { lo = Math.min(lo, x); hi = Math.max(hi, x); } }
+  [lo, hi] = pad(lo, hi, 0.14);
+  const W = width("layers"), H = 250, L = 50, R = 14, T = 14, B = 30, tk = ticks(lo, hi, 5), Y = x => T + (tk.hi - x) / (tk.hi - tk.lo) * (H - T - B);
+  const n = rows.length, band = (W - L - R) / Math.max(n, 3), off = L + (W - L - R - n * band) / 2, k = keys.length;
+  const bw = Math.max(3, Math.min(18, (band * 0.82 - 2 * (k - 1)) / k)), gw = k * bw + 2 * (k - 1);
+  let g = tk.ticks.map(x => `<line x1="${L}" x2="${W - R}" y1="${f1(Y(x))}" y2="${f1(Y(x))}" class="${x === 0 ? "zl" : "gl"}"/><text x="${L - 7}" y="${f1(Y(x)) + 4}" text-anchor="end">${kf(x, tk.step)}</text>`).join("");
+  rows.forEach((r, i) => {
+    const gx = off + i * band + (band - gw) / 2;
+    keys.forEach((key, j) => {
+      const x = v(r, key), bx = gx + j * (bw + 2), l = obj(obj(r.layers)[key]);
+      if (x == null) return;
+      g += `<path d="${barPath(bx, bw, Y(0), Y(x), true)}" fill="${colorOf(key)}"/>`;
+      g += `<rect x="${f1(bx - 1)}" y="${T}" width="${f1(bw + 2)}" height="${H - T - B}" fill="transparent"${tipAttr(`<b>${esc(dday(r.date))}${r.partial ? " (so far)" : ""}</b><div>${sw(colorOf(key))}${esc(nameOf(key))}</div><div>Realized ${sgn(l.realized)} · unrealized ${sgn(l.unrealized)}</div><div>Total <b>${sgn(x)}</b> at SIG marks</div>`)}/>`;
+    });
+    g += `<text x="${f1(off + i * band + band / 2)}" y="${H - B + 17}" text-anchor="middle" class="lbl">${esc(dday(r.date))}${r.partial ? " (so far)" : ""}</text>`;
+  });
+  return legend(keys.map(key => [sw(colorOf(key)), esc(nameOf(key))])) + `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="P&L by strategy per day">${g}</svg>
+    <div class="mute" style="font-size:12px">Realized + unrealized, at SIG marks. Hover a bar for the split.</div>`;
+}
+
+function pairsView() {
+  const p = S.pairs;
+  if (!p || typeof p !== "object") return na("Pair sets are not available.");
+  const rows = arr(p.sets).map(s => `<tr><td>${esc(s.race)}</td><td>${esc(s.side)}</td><td class="n">${num(s.qty)}</td><td class="n good">${sgn(s.locked, 2)}</td>
+    <td class="n">${num(s.unwind_value, 3)}</td><td class="n">${num(s.threshold, 3)}</td><td class="n ${s.residue ? "warn" : ""}">${num(s.residue)}</td><td class="n">${num(s.capital)}</td><td>${esc(s.state || "")}</td></tr>`).join("");
+  return `<div class="row">capital used <b>${num(p.used)}</b> of the ${num(p.cap)} cap · profit locked in <b class="good">${sgn(p.locked, 2)}</b></div>
+    <div class="wrap"><table><thead><tr><th>Race</th><th>Set</th><th class="n">Sets</th><th class="n" title="Profit locked in if every leg settles">Locked</th><th class="n" title="What one set sells for now">Unwind value</th>
+    <th class="n" title="Unwind early above this">Unwind at</th><th class="n" title="Shares left on one leg only">One-leg residue</th><th class="n">Capital</th><th>State</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="9" class="mute">no open sets</td></tr>'}</tbody></table></div>`;
+}
+
+function laddersView() {
+  const ps = arr(S.positions).filter(p => p && typeof p === "object");
+  if (!ps.length) return na("No position exit ladders.");
+  return ps.map(p => `<div style="margin-bottom:14px"><h3>${esc(p.name)} · ${esc(p.market || "")}</h3>
+    <div class="sub">holding <b>${esc(String(p.side || "").toUpperCase())} ${num(p.held)}</b> · ladder sub-book ${num(p.manual)}${p.tranche ? ` · D1 tranche <b>${num(p.tranche.qty)}</b> (${esc(p.tranche.state)})` : ""} · ${esc(p.status || "")}</div>
+    <div class="wrap" style="margin-top:6px"><table><thead><tr><th class="n">Sell at</th><th class="n">YES-equivalent</th><th class="n">Shares</th><th>State</th></tr></thead><tbody>${arr(p.ladder).map(l =>
+    `<tr><td class="n">${px(l.px)}</td><td class="n">${px(l.yes_px)}</td><td class="n">${num(l.qty)}</td><td>${esc(l.state)}</td></tr>`).join("")}</tbody></table></div></div>`).join("");
+}
+
+// ------------------------------------------------------------------------------------------- Holdings
+const HCOLS = [
+  {k: "market", t: "Market"}, {k: "side", t: "Side"}, {k: "shares", t: "Shares", n: 1}, {k: "avg_cost", t: "Avg cost", n: 1, tip: "Average price paid per share (held side)"},
+  {k: "sig_mark", t: "SIG mark", n: 1, tip: "SIG's valuation of one share: what the leaderboard uses"}, {k: "sig_bid", t: "SIG bid", n: 1, tip: "Best price we could sell at on SIG now"},
+  {k: "fair", t: "PM fair", n: 1, tip: "Polymarket's price for the held side"}, {k: "value_sig", t: "Value (SIG)", n: 1, tip: "shares × SIG mark"},
+  {k: "unreal_sig", t: "Unrealized (SIG)", n: 1, tip: "shares × (SIG mark − avg cost)"}, {k: "unreal_fair", t: "Unrealized (fair)", n: 1, tip: "shares × (PM fair − avg cost)"},
+  {k: "cost_to_free", t: "Cost to free", n: 1, tip: "(fair − bid) / bid: what selling into the SIG bid now gives up vs Polymarket fair. Negative: the bid is above fair."},
+  {k: "layer", t: "Strategy", tip: "The strategy that owns most of the position"}];
+function holdRows() {
+  const q = ui.hq.trim().toLowerCase(), {k, dir} = ui.hsort, numeric = (HCOLS.find(c => c.k === k) || {}).n;
+  const rows = arr(S.holdings).filter(h => h && typeof h === "object" && (!ui.hl || h.layer === ui.hl) && (!ui.hr || h.release_candidate)
+    && (!q || (String(h.market || "") + " " + h.ex).toLowerCase().includes(q)));
+  const key = h => k === "layer" ? nameOf(h.layer) : numeric ? val(h[k]) : (h[k] == null ? null : String(h[k]));
+  return rows.sort((a, b) => { const x = key(a), y = key(b); if (x == null || y == null) return x == null ? (y == null ? 0 : 1) : -1;
+    return (numeric ? x - y : x.localeCompare(y)) * dir; });
+}
+function hlopts() {
+  const ks = new Set(arr(S.holdings).map(h => h && h.layer).filter(Boolean)), keys = [...ORDER, "inventory", ...[...ks].filter(k => !ORDER.includes(k) && k !== "inventory").sort()].filter(k => ks.has(k));
+  return `<option value="">All strategies</option>` + keys.map(k => `<option value="${esc(k)}" ${k === ui.hl ? "selected" : ""}>${esc(nameOf(k))}</option>`).join("");
+}
+function holdings() {
+  if (!Array.isArray(S.holdings)) {
+    const ms = arr(S.markets).filter(m => m && val(m.pos));
+    if (!ms.length) return na("Holdings are not available yet.");
+    return na("Holdings with cost and P&L are not available yet; net positions from the markets list:") + `<div class="wrap"><table><thead><tr><th>Market</th><th>Side</th>
+      <th class="n">Shares</th><th class="n">PM fair (YES)</th><th class="n">SIG bid / ask (YES)</th></tr></thead><tbody>${ms.map(m => `<tr><td>${esc(m.race)} <b>${esc(m.party)}</b></td>
+      <td>${m.pos > 0 ? "YES" : "NO"}</td><td class="n">${num(Math.abs(m.pos))}</td><td class="n">${px(m.fair)}</td><td class="n">${px(m.bid)} / ${px(m.ask)}</td></tr>`).join("")}</tbody></table></div>`;
+  }
+  const all = arr(S.holdings).filter(h => h && typeof h === "object"), rows = holdRows(), sum = k => rows.reduce((a, h) => a + (val(h[k]) || 0), 0);
+  const shown = ui.hall ? rows : rows.slice(0, HOLD_FIRST);
+  const nrel = all.filter(h => h.release_candidate).length;
+  const head = HCOLS.map(c => `<th class="sort${c.n ? " n" : ""}" data-sort="${c.k}"${c.tip ? ` title="${esc(c.tip)}"` : ""} aria-sort="${ui.hsort.k === c.k ? (ui.hsort.dir > 0 ? "ascending" : "descending") : "none"}">${c.t}${ui.hsort.k === c.k ? `<span class="ar">${ui.hsort.dir > 0 ? "▲" : "▼"}</span>` : ""}</th>`).join("");
+  const body = shown.map(h => {
+    const ctf = val(h.cost_to_free);
+    return `<tr class="click" data-ex="${esc(h.ex)}" data-layer="${esc(h.layer)}"><td>${esc(h.market || h.ex)}${h.release_candidate ? '<span class="badge" title="The release layer would sell this now: freeing the cash costs little">release candidate</span>' : ""}</td>
+    <td>${esc(String(h.side || "").toUpperCase())}</td><td class="n">${num(h.shares)}</td><td class="n">${px(h.avg_cost)}</td><td class="n">${px(h.sig_mark)}</td><td class="n">${px(h.sig_bid)}</td>
+    <td class="n">${px(h.fair)}</td><td class="n">${num(h.value_sig)}</td><td class="n ${cls(h.unreal_sig)}">${sgn(h.unreal_sig)}</td><td class="n ${cls(h.unreal_fair)}">${sgn(h.unreal_fair)}</td>
+    <td class="n ${ctf != null && ctf < 0 ? "good" : ""}"${ctf != null && ctf < 0 ? ' title="The SIG bid is above fair: selling gains vs fair"' : ""}>${ctf == null ? "–" : num(ctf * 100, 1) + "%"}</td><td>${tag(h.layer)}</td></tr>
+    ${ui.open === h.ex ? `<tr><td colspan="${HCOLS.length}">${detail(arr(S.markets).find(m => m && m.ex === h.ex) || {ex: h.ex})}</td></tr>` : ""}`;
+  }).join("");
+  return `<div class="sub" style="margin:0 0 8px">${rows.length === all.length ? `<b>${all.length}</b> positions` : `<b>${rows.length}</b> of ${all.length} positions match`} · value <b>${num(sum("value_sig"))}</b> at SIG marks, ${num(sum("value_fair"))} at fair ·
+    unrealized <b class="${cls(sum("unreal_sig"))}">${sgn(sum("unreal_sig"))}</b> SIG, <span class="${cls(sum("unreal_fair"))}">${sgn(sum("unreal_fair"))}</span> fair · ${nrel} release candidate${nrel === 1 ? "" : "s"} · click a row for its orders and fills</div>
+    <div class="wrap"><table><thead><tr>${head}</tr></thead><tbody>${body || `<tr><td colspan="${HCOLS.length}" class="mute">${all.length ? "No positions match the filter." : "No open positions."}</td></tr>`}</tbody>
+    ${rows.length ? `<tfoot><tr><td colspan="7">Total of the ${rows.length} position${rows.length === 1 ? "" : "s"}${shown.length < rows.length ? ` (${shown.length} shown)` : ""}</td><td class="n">${num(sum("value_sig"))}</td><td class="n ${cls(sum("unreal_sig"))}">${sgn(sum("unreal_sig"))}</td><td class="n ${cls(sum("unreal_fair"))}">${sgn(sum("unreal_fair"))}</td><td colspan="2"></td></tr></tfoot>` : ""}</table></div>
+    ${rows.length > HOLD_FIRST ? `<button class="btn more-btn" data-more="hall">${ui.hall ? `Show the first ${HOLD_FIRST}` : `Show all ${rows.length}`}</button>` : ""}`;
+}
+
+// ------------------------------------------------------------------------------------------- Activity
+function alopts() {
+  const ks = new Set(arr(S.activity).map(a => a && a.layer).filter(Boolean)), keys = [...ORDER.filter(k => ks.has(k)), ...[...ks].filter(k => !ORDER.includes(k)).sort()];
+  return `<option value="">All strategies</option>` + keys.map(k => `<option value="${esc(k)}" ${k === ui.al ? "selected" : ""}>${esc(nameOf(k))}</option>`).join("");
+}
+function activity() {
+  if (!Array.isArray(S.activity)) return na("Fills as sentences are not available yet.");
+  const q = ui.aq.trim().toLowerCase();
+  const rows = S.activity.filter(a => a && typeof a === "object" && (!ui.al || a.layer === ui.al) && (!q || String(a.text || "").toLowerCase().includes(q)))
+    .sort((a, b) => (val(b.id) ?? -1) - (val(a.id) ?? -1)).slice(0, 300);
+  if (!rows.length) return `<div class="na">${S.activity.length ? "No fills match the filter." : "No fills yet."}</div>`;
+  const shown = ui.aall ? rows : rows.slice(0, ACT_FIRST);
+  return `<div class="sub" style="margin:0 0 8px">${rows.length} fill${rows.length === 1 ? "" : "s"}, newest first${shown.length < rows.length ? ` (${shown.length} shown)` : ""}</div><div class="wrap"><table><tbody>${shown.map(a =>
+    `<tr data-id="${esc(a.id)}" data-layer="${esc(a.layer)}"><td class="mute" style="width:1%">${esc(when(a.t))}</td><td style="width:1%">${tag(a.layer)}</td><td class="txt">${esc(a.text)}</td></tr>`).join("")}</tbody></table></div>
+    ${rows.length > ACT_FIRST ? `<button class="btn more-btn" data-more="aall">${ui.aall ? `Show the newest ${ACT_FIRST}` : `Show all ${rows.length}`}</button>` : ""}`;
+}
+
+// ------------------------------------------------------------------------------------------- Health + engine log
+function problems() {
+  const h = obj(S.health), sig = obj(h.sig), ex = obj(h.executor), o = obj(S.overview), out = [];
+  if (LIVE) for (const [k, t] of Object.entries(obj(h.feeds))) if (val(t) != null && Date.now() / 1000 - t > 120) out.push(`${k} is ${ago(t)} old`);
+  if (val(h.errors) > 0) out.push(`${num(h.errors)} errors in the last hour`);
+  if (val(ex.unknown) > 0) out.push(`${num(ex.unknown)} orders in an unknown state`);
+  if (ex.halted) out.push("the order executor is halted");
+  for (const [k, v] of [["reads", obj(sig.read)], ["writes", obj(sig.write)]]) if (val(v.bad_rate) > 0.1) out.push(`SIG ${k} failing ${pct(v.bad_rate, 0)}`);
+  if (obj(o.loss_stop).tripped) out.push("the loss stop tripped");
+  return out;
+}
+function covsum() {                             // morning_plan Part 3: coverage = covered sides / eligible sides
+  const c = obj(S.coverage);
+  if (val(c.pct) == null) return `<span class="mute">· not available yet (fat-finger layer off)</span>`;
+  const n = arr(c.uncovered).length;
+  return `<b class="${c.pct >= 99.95 ? "good" : "warn"}">${num(c.pct, 1)}%</b> <span class="mute" style="font-weight:400">· ${num(c.covered)} of ${num(c.eligible)} eligible sides covered${n ? ` · ${num(n)} uncovered, with the reason` : ""}</span>`;
+}
+function cov() {
+  const un = arr(obj(S.coverage).uncovered);
+  if (!un.length) return val(obj(S.coverage).pct) == null ? na("Coverage is not available yet.") : `<div class="mute">Every eligible side has its fat-finger bids resting.</div>`;
+  return `<div class="wrap"><table><thead><tr><th>Market</th><th>Side</th><th>Why not covered</th></tr></thead><tbody>${un.map(u =>
+    `<tr><td>${esc(u.market || u.ex)}</td><td>${esc(String(u.side || "").toUpperCase())}</td><td>${esc(u.reason || "")}</td></tr>`).join("")}</tbody></table></div>`;
+}
+function healthsum() {
+  if (!S.health || typeof S.health !== "object") return `<span class="mute">· not available yet</span>`;
+  const p = problems();
+  return (p.length ? `<span class="warn">⚠ ${p.length} to look at: ${esc(p.slice(0, 3).join("; "))}</span>` : `<span class="good">✓ all clear</span>`)
+    + ` <span class="mute" style="font-weight:400">· latencies, API budgets, queues, feeds, engine log</span>`;
+}
+function health() {
+  const o = obj(S.overview), h = obj(S.health), sig = obj(h.sig), rd = obj(sig.read), wr = obj(sig.write), ex = obj(h.executor);
+  if (!Object.keys(h).length && !Object.keys(o).length) return na("Engine health is not available yet.");
+  const feeds = Object.entries(obj(h.feeds)).map(([k, t]) => `<div>${esc(k)}: <b>${ago(t)}</b></div>`).join("") || '<div class="mute">–</div>';
+  const LAT = {fill_to_queued: "fill → exit queued", pm_to_defend: "Polymarket move → quotes defended", plan_cycle: "planning cycle", cancel_to_sent: "cancel → sent"};
+  const lat = Object.entries(obj(h.latency)).map(([k, v]) => `<div>${esc(LAT[k] || k)}: p50 <b>${num(obj(v).p50, 2)} s</b> · p90 ${num(obj(v).p90, 2)} s <span class="mute">(${num(obj(v).n)})</span></div>`).join("") || '<div class="mute">–</div>';
+  const rt = Object.entries(obj(h.realtime)).map(([k, v]) => `<div>${esc(k === "sig" ? "SIG" : k === "pm" ? "Polymarket" : k)}: ${esc(Object.entries(obj(v)).map(([a, b]) => `${a} ${b}`).join(" · ") || "–")}</div>`).join("") || '<div class="mute">–</div>';
+  const ls = obj(o.loss_stop);
+  return `<div class="grid">
+    <div class="card"><h3>New risk</h3><div class="mid ${o.paused ? "bad" : "good"}">${o.paused ? "PAUSED" : "on"}</div><div class="mute">exits, rebounds, unwinds, repairs always run</div></div>
+    <div class="card"><h3>κ (capital discount)</h3><div class="mid">${val(o.kappa) == null ? "–" : (o.kappa * 100).toFixed(1) + "¢"}</div><div class="mute">${esc(o.kappa_src || "")}</div></div>
+    <div class="card"><h3>Loss stop (bot P&L at fair, 24 h)</h3><div class="mid ${ls.tripped ? "bad" : ""}">${o.loss_stop ? (ls.tripped ? "TRIPPED" : "ok") : "–"}</div><div class="mute">${o.loss_stop ? sgn(ls.pnl) + " of −" + num(ls.limit) : ""}</div></div>
+    <div class="card"><h3>Engine's fair-value account</h3><div class="mid">${num(o.account_fair)}</div><div class="mute">since 00:00 ${sgn(o.change_today)} · since night start ${sgn(o.change_start)} · realized today ${sgn(o.realized_today)}</div></div>
+    <div class="card"><h3>Free cash vs floor</h3><div class="mid">${num(o.free_cash)}</div><div class="mute">floor ${num(o.reserve)} · committed entries ${num(o.committed)}</div></div>
+    <div class="card"><h3>SIG reads</h3><div>p50 <b>${num(rd.p50, 2)} s</b> · p90 <b>${num(rd.p90, 2)} s</b></div><div>5xx/timeouts <b class="${rd.bad_rate > .1 ? "bad" : ""}">${num((rd.bad_rate || 0) * 100, 1)}%</b></div><div>used <b>${num(sig.reads_last_min)}</b> / ${num(sig.read_limit)} per min</div></div>
+    <div class="card"><h3>SIG writes</h3><div>p50 <b>${num(wr.p50, 2)} s</b> · p90 <b>${num(wr.p90, 2)} s</b></div><div>5xx/timeouts <b class="${wr.bad_rate > .1 ? "bad" : ""}">${num((wr.bad_rate || 0) * 100, 1)}%</b></div><div>used <b>${num(sig.writes_last_min)}</b> / ${num(sig.write_limit)} per min</div></div>
+    <div class="card"><h3>Executor</h3><div>queue <b>${esc(JSON.stringify(ex.queue || {}))}</b></div><div>in flight <b>${num(ex.in_flight)}</b> · capacity <b>${num(ex.capacity_ewma, 1)}</b>/min · batch ${num(ex.batch_cap)}</div><div>journal UNKNOWN <b class="${ex.unknown ? "bad" : ""}">${num(ex.unknown)}</b> · stale dropped ${num(ex.dropped_stale)}</div></div>
+    <div class="card"><h3>Feeds (age)</h3>${feeds}<div>loop <b>${num(h.loop_s, 1)} s</b> · errors last hour <b class="${h.errors ? "bad" : ""}">${num(h.errors)}</b></div></div>
+    <div class="card"><h3>Latency</h3>${lat}</div><div class="card"><h3>Realtime feeds</h3>${rt}</div></div>`;
+}
+function evkinds() {
+  const kinds = [...new Set(arr(S.events).map(e => e && e.kind).filter(Boolean))].sort();
+  return `<option value="">all kinds</option>` + kinds.map(k => `<option ${k === ui.ev ? "selected" : ""}>${esc(k)}</option>`).join("");
+}
+function events() {
+  if (!Array.isArray(S.events)) return na("The engine log is not available.");
+  const q = ui.evq.toLowerCase(), rows = S.events.filter(e => e && (!ui.ev || e.kind === ui.ev) && (!q || String(e.text || "").toLowerCase().includes(q)));
+  return `<div class="wrap"><table><thead><tr><th>Time</th><th>Kind</th><th>Event</th></tr></thead><tbody>${rows.map(e => `<tr><td class="mute">${esc(e.t)}</td><td><span class="chip">${esc(e.kind)}</span></td><td class="txt">${esc(e.text)}</td></tr>`).join("")
+    || '<tr><td colspan="3" class="mute">nothing logged</td></tr>'}</tbody></table></div>`;
+}
+
+// ------------------------------------------------------------------------------------------- Leaders
+function lead() {
+  const Ld = obj(S.leaders), series = arr(Ld.series).filter(s => s && arr(s.points).length), th = obj(Ld.thresholds), m = obj(S.money);
+  const ours = arr(Ld.latest).find(r => r && r.ours), mine = val(m.vs_start) ?? (ours ? val(ours.value) : null);
+  const tiles = ["10", "25", "50", "100"].filter(k => val(th[k]) != null).map(k => { const gap = mine == null ? null : th[k] - mine;
+    return `<div class="card"><div class="lab">#${k} has</div><div class="v3">${sgn(th[k])}</div><div class="sub">${gap == null ? "" : gap > 0 ? `we need <b>${sgn(gap)}</b>` : `we are ahead by <b>${num(-gap)}</b>`}</div></div>`; }).join("");
+  let out = tiles ? `<div class="tiles">${tiles}</div>` : na("Rank thresholds (#10 / #25 / #50 / #100) are not available yet.");
+  if (!series.length) return out + na("No leaderboard samples yet (logged every 10 min to data/leaders.csv).");
+  const W = width("lead"), H = 330, L = 60, R = 16, T = 12, B = 26;
+  const xs = series.flatMap(s => s.points.map(p => val(p[0]))).filter(v => v != null), ys = series.flatMap(s => s.points.map(p => val(p[1]))).filter(v => v != null);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs, x0 + 60), tk = ticks(Math.min(...ys, 0), Math.max(...ys), 5);
+  const X = x => L + (x - x0) / (x1 - x0) * (W - L - R), Y = y => T + (tk.hi - y) / (tk.hi - tk.lo) * (H - T - B), tt = timeTicks(x0, x1, W - L - R);
+  let g = tk.ticks.map(v => `<line x1="${L}" x2="${W - R}" y1="${f1(Y(v))}" y2="${f1(Y(v))}" class="${v === 0 ? "zl" : "gl"}"/><text x="${L - 7}" y="${f1(Y(v)) + 4}" text-anchor="end">${kf(v, tk.step)}</text>`).join("");
+  g += tt.ticks.map(v => `<text x="${f1(X(v))}" y="${H - B + 17}" text-anchor="middle">${esc(tt.label(v))}</text>`).join("");
+  for (const s of [...series.filter(s => !s.ours), ...series.filter(s => s.ours)])
+    g += `<path d="${linePath(s.points.map(p => [val(p[0]), val(p[1])]), X, Y)}" class="ln" stroke="${s.ours ? "var(--s1)" : "var(--neutral)"}" stroke-width="${s.ours ? 2.5 : 1.2}" opacity="${s.ours ? 1 : .7}"><title>${esc(s.name)}</title></path>`;
+  const me = series.find(s => s.ours), lp = me && me.points.filter(p => val(p[1]) != null).pop();
+  if (lp) g += `<circle cx="${f1(X(lp[0]))}" cy="${f1(Y(lp[1]))}" r="4" fill="var(--s1)" class="ring"/><text x="${f1(X(lp[0]) - 8)}" y="${f1(Y(lp[1]) - 9)}" text-anchor="end" class="vl">us ${sgn(lp[1])}</text>`;
+  const rows = arr(Ld.latest).map(r => `<tr${r.ours ? ' style="font-weight:700"' : ""}><td class="n">${num(r.rank)}</td><td>${esc(r.name)}${r.ours ? " (us)" : ""}</td><td class="n">${num(r.value)}</td><td class="n">${num(r.trades)}</td></tr>`).join("");
+  return out + `<div class="card chart"><div class="chead"><h3>Leaderboard P&L over time</h3></div>${legend([['<i class="lk" style="background:var(--s1)"></i>', "Our account"], ['<i class="lk" style="background:var(--neutral)"></i>', "Top 20"]])}
+    <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Leaderboard over time">${g}</svg></div>
+    <div class="wrap" style="margin-top:12px"><table><thead><tr><th class="n">Rank</th><th>Account</th><th class="n">P&L</th><th class="n">Trades</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+// ------------------------------------------------------------------------------------------- Controls (v2, unchanged behaviour)
+function ctlbar() {
+  const o = obj(S.overview), k = val(o.kappa);
+  return `<div class="card"><div class="row" style="margin-top:0"><b>New risk:</b> ${o.paused ? '<span class="chip killed">PAUSED</span>' : '<span class="chip full">on</span>'}
+    <span class="mute">Exits, rebounds, unwinds and repairs always run.</span></div>
+    <div class="row ctl"><button class="btn" id="pauseBtn">${o.paused ? "Resume new risk" : "Pause new risk"}</button>
+      <button class="btn danger" data-confirm="1" id="pullBtn">Pause + pull engine quotes</button></div>
+    <div class="row ctl">κ (capital discount) now <b>${k == null ? "–" : (k * 100).toFixed(1) + "¢"}</b> <span class="mute">${esc(o.kappa_src || "")}</span> · override
+      <input type="number" id="kv" min="0" max="3" step="0.5" placeholder="¢">¢ for <input type="number" id="km" min="1" max="1440" value="60"> min <button class="btn" data-confirm="1" id="kBtn">Set κ</button></div>
+    <div class="row" style="margin-bottom:0"><button class="btn" id="roBtn">${!LIVE ? "static snapshot" : o.read_only ? "Unlock controls" : "Read-only"}</button>
+      <span class="mute">${!LIVE ? "This is a saved snapshot: controls are off." : o.read_only ? "Read-only mode: every control is refused until you unlock." : "Destructive actions ask twice."}</span></div></div>`;
+}
+function ctllayers() {
+  const rows = arr(S.layers).filter(l => l && typeof l === "object").map(l => {
+    const caps = Object.entries(obj(l.caps)).map(([k, c]) => `<div>${esc(k)}: <b>${num(c.used)}</b> / ${num(c.cap)}
+      <span class="ctl"><input type="number" data-cap="${esc(l.name)}:${esc(k)}" min="${esc(c.min)}" max="${esc(c.max)}" value="${esc(c.cap)}"></span></div>`).join("") || "–";
+    const kills = arr(l.kill).map(k => `<div class="${k.hit ? "bad" : "mute"}">${esc(k.rule)}: ${esc(k.value)}</div>`).join("") || "–";
+    return `<tr><td><b>${esc(l.name)}</b><div class="mute">${esc(l.note || "")}</div></td><td>${chip(l.state, l.killed)}<div class="mute">${l.killed ? esc(l.killed.reason) : "since " + ago(l.since)}</div>
+      <div class="ctl"><select data-state="${esc(l.name)}">${["off", "pilot", "full"].map(s => `<option ${s === l.state ? "selected" : ""}>${s}</option>`).join("")}</select>
+      <button class="btn" data-confirm="1" data-act="state" data-layer="${esc(l.name)}">Apply</button></div></td>
+      <td>${caps}${Object.keys(obj(l.caps)).length ? `<div class="ctl"><button class="btn" data-confirm="1" data-act="caps" data-layer="${esc(l.name)}">Set caps</button></div>` : ""}</td>
+      <td class="n">${num(l.resting)}</td><td class="n">${num(l.fills)}</td><td class="n">${c2(l.edge)}</td><td class="n">${c2(l.markout30)}</td>
+      <td class="n ${cls(l.pnl_fair)}">${sgn(l.pnl_fair)}</td><td class="n ${cls(l.realized)}">${sgn(l.realized)}</td><td>${kills}</td></tr>`;
+  }).join("");
+  if (!rows) return na("No strategy layers reported.");
+  return `<div class="wrap"><table><thead><tr><th>Layer</th><th>Flag</th><th>Caps (used / cap)</th><th class="n">Resting</th><th class="n">Fills</th><th class="n">Edge vs fair</th><th class="n">Mark-out 30m</th>
+    <th class="n">P&L @ fair</th><th class="n">Realized</th><th>Kill rules</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+function ctlmarkets() {
+  let rows = arr(S.markets).filter(r => r && typeof r === "object");
+  const q = ui.q.toLowerCase(), mis = parseFloat(ui.mis);
+  rows = rows.filter(r => (!q || (r.title + " " + r.race + " " + r.ex).toLowerCase().includes(q)) && (!ui.haspos || r.pos)
+    && (!ui.layer || obj(r.resting)[ui.layer]) && (isNaN(mis) || (r.mis != null && Math.abs(r.mis) * 100 >= mis)));
+  rows.sort((a, b) => Math.abs(b.mis || 0) - Math.abs(a.mis || 0));
+  const per = 50, pages = Math.max(1, Math.ceil(rows.length / per)); ui.page = Math.min(ui.page, pages - 1);
+  const body = rows.slice(ui.page * per, ui.page * per + per).map(r => `<tr class="click" data-ex="${esc(r.ex)}"><td>${esc(r.race)} <b>${esc(r.party)}</b>${r.paused ? ' <span class="chip killed">paused</span>' : ""}</td>
+    <td class="n">${px(r.fair)}${r.u != null ? ` <span class="mute">±${(r.u * 100).toFixed(1)}</span>` : ""}</td><td class="n">${px(r.bid)} / ${px(r.ask)}</td><td class="n ${cls(r.mis && -r.mis)}">${c2(r.mis)}</td>
+    <td class="n">${r.pos ? sgn(r.pos) : "–"}</td><td>${Object.entries(obj(r.subs)).map(([k, v]) => `<span class="chip">${esc(k)} ${sgn(v)}</span>`).join("")}</td>
+    <td>${Object.entries(obj(r.resting)).map(([k, v]) => `<span class="chip">${esc(k)} ${esc(v)}</span>`).join("")}</td><td class="mute">${esc(r.last_fill || "")}</td></tr>
+    ${ui.open === r.ex ? `<tr><td colspan="8">${detail(r)}</td></tr>` : ""}`).join("");
+  return `<div class="row"><span class="mute">${rows.length} markets · click a row to pause it, exclude strategies, or see its orders and fills</span><span class="spacer"></span>
+    <button class="btn" id="prev">‹</button> ${ui.page + 1}/${pages} <button class="btn" id="next">›</button></div>
+    <div class="wrap"><table><thead><tr><th>Market</th><th class="n">PM fair ±u¢</th><th class="n">SIG bid / ask</th><th class="n">SIG mid − fair</th><th class="n">Net YES</th><th>Sub-books</th><th>Our resting</th><th>Last fill</th></tr></thead>
+    <tbody>${body || '<tr><td colspan="8" class="mute">no markets</td></tr>'}</tbody></table></div>`;
+}
+
+function detail(r) {
+  const d = ui.detail && ui.detail.ex === r.ex ? ui.detail : null;
+  const ctl = `<div class="row ctl"><button class="btn" data-confirm="1" data-act="mpause" data-ex="${esc(r.ex)}">${r.paused ? "Resume market" : "Pause market"}</button>
+    exclude from: ${["recycler", "mm", "ladder", "pairs", "sniper"].map(l => `<label><input type="checkbox" data-excl="${l}" ${arr(r.exclude).includes(l) ? "checked" : ""}> ${l}</label>`).join(" ")}
+    <button class="btn" data-confirm="1" data-act="mexcl" data-ex="${esc(r.ex)}">Apply exclusions</button></div>`;
+  if (!d) return `<div class="drawer">${ctl}<div class="mute">${LIVE ? "loading history…" : "history is only available on the live page"}</div></div>`;
+  const ord = arr(d.orders).map(o => `<tr><td class="mute">${esc(o.placed)}</td><td>${esc(o.bot)}</td><td>${esc(o.layer)}</td><td>${esc(o.action)} ${esc(o.side)}</td><td class="n">${px(o.price)}</td><td class="n">${num(o.qty)}</td><td class="n">${num(o.filled)}</td><td>${esc(o.status)}</td></tr>`).join("");
+  const fl = arr(d.fills).map(f => `<tr><td class="mute">${esc(f.t)}</td><td>${esc(f.bot)}</td><td>${esc(f.layer)}</td><td>${esc(f.action)} ${esc(f.side)}</td><td class="n">${px(f.price)}</td><td class="n">${num(f.qty)}</td><td class="n">${c2(f.edge)}</td><td class="n">${c2(f.mo30)}</td></tr>`).join("");
+  return `<div class="drawer">${ctl}<h3>Orders</h3><div class="wrap"><table><thead><tr><th>Placed</th><th>Bot</th><th>Layer</th><th>Order</th><th class="n">Price</th><th class="n">Qty</th><th class="n">Filled</th><th>Status</th></tr></thead><tbody>${ord || '<tr><td colspan="8" class="mute">none</td></tr>'}</tbody></table></div>
+    <h3 style="margin-top:10px">Fills</h3><div class="wrap"><table><thead><tr><th>Time</th><th>Bot</th><th>Layer</th><th>Trade</th><th class="n">Price</th><th class="n">Qty</th><th class="n">Edge vs fair</th><th class="n">Mark-out 30m</th></tr></thead><tbody>${fl || '<tr><td colspan="8" class="mute">none</td></tr>'}</tbody></table></div></div>`;
+}
+
+// ------------------------------------------------------------------------------------------- layout: tabs -> static skeleton + blocks
+const SKEL = {
+  overview: () => `<div id="b-banner"></div>
+    <nav class="jump">${[["money", "Money"], ["capital", "Capital"], ["strategies", "Strategies"], ["holdings", "Holdings"], ["activity", "Activity"], ["health", "Health"]].map(([k, v]) => `<a href="#sec-${k}">${v}</a>`).join("")}</nav>
+    <section id="sec-money"><h2>Money <span class="q">How much do I have? How did I do today?</span></h2><div id="b-money"></div>
+      <details class="card more" id="covBox"><summary>Fat-finger coverage <span id="b-covsum"></span></summary><div id="b-cov"></div></details>
+      <div class="card chart" style="margin-top:12px"><div class="chead"><h3>Daily P&L since Oct 1</h3><span class="spacer"></span><span id="b-basis"></span></div><div id="b-daily"></div>
+        <details class="more"><summary>Daily numbers as a table</summary><div id="b-dailytab"></div></details></div>
+      <div class="card chart"><div class="chead"><h3>Account value over time</h3></div><div id="b-account"></div></div></section>
+    <section id="sec-capital"><h2>Capital <span class="q">Where is my money?</span></h2><div id="b-capital"></div></section>
+    <section id="sec-strategies"><h2>Strategies <span class="q">What is the engine doing?</span></h2><div id="b-strategies"></div>
+      <div class="card chart" style="margin-top:12px"><div class="chead"><h3>P&L by strategy per day</h3></div><div id="b-layers"></div></div>
+      <details class="card more"><summary>Pair sets</summary><div id="b-pairs"></div></details>
+      <details class="card more"><summary>AK / RI exit ladders</summary><div id="b-ladders"></div></details></section>
+    <section id="sec-holdings"><h2>Holdings <span class="q">Every open position, sortable</span></h2>
+      <div class="row"><input id="hq" placeholder="search market" value="${esc(ui.hq)}"> <select id="b-hlopts" aria-label="strategy"></select>
+        <label><input type="checkbox" id="hr" ${ui.hr ? "checked" : ""}> release candidates only</label></div><div id="b-holdings"></div></section>
+    <section id="sec-activity"><h2>Activity <span class="q">Fills in plain words, newest first</span></h2>
+      <div class="row"><select id="b-alopts" aria-label="strategy"></select> <input id="aq" placeholder="search fills" value="${esc(ui.aq)}"></div><div id="b-activity"></div></section>
+    <section id="sec-health"><details class="card" id="healthBox"><summary>Health <span id="b-healthsum"></span></summary><div id="b-health"></div>
+      <h3 style="margin-top:16px">Engine log</h3><div class="row"><select id="b-evkinds" aria-label="kind"></select> <input id="evq" placeholder="filter" value="${esc(ui.evq)}"></div><div id="b-events"></div></details></section>`,
+  leaders: () => `<section><h2>Leaders <span class="q">Where we stand on the SIG leaderboard</span></h2><div id="b-lead"></div></section>`,
+  controls: () => `<section><h2>Controls</h2><div id="b-ctlbar"></div></section>
+    <section><h2>Strategy flags and caps <span class="q">off / pilot / full, and the caps of each layer</span></h2><div id="b-ctllayers"></div></section>
+    <section><h2>Markets <span class="q">pause a market or exclude strategies from it</span></h2>
+      <div class="row"><input id="q" placeholder="search market" value="${esc(ui.q)}"> <select id="lf"><option value="">any layer</option>${LAYERS.map(l => `<option ${l === ui.layer ? "selected" : ""}>${l}</option>`).join("")}</select>
+        <label><input type="checkbox" id="hp" ${ui.haspos ? "checked" : ""}> has position</label> mispriced &gt; <input type="number" id="mis" value="${esc(ui.mis)}" step="0.5">¢</div>
+      <div id="b-ctlmarkets"></div></section>`,
+};
+const BLOCKS = {
+  overview: {banner, money, covsum, cov, basis, daily: dailyChart, dailytab: dailyTable, account: accountChart, capital, strategies, layers: layersChart, pairs: pairsView,
+             ladders: laddersView, hlopts, holdings, alopts, activity, healthsum, health, evkinds, events},
+  leaders: {lead},
+  controls: {ctlbar, ctllayers, ctlmarkets},
+};
+const OPTIONAL = new Set(["banner"]);           // blocks that are empty when all is well
+
+function block(id, fn) {
+  try { return fn(); }
+  catch (e) { ui.errors.push(id + ": " + (e && e.stack || e)); ui.errors = ui.errors.slice(-20); return `<div class="na">This part could not be drawn (${esc(e && e.message)}).</div>`; }
+}
+function put(id, html) {
+  if (ui.cache[id] === html) return;                // unchanged: leave the DOM (selection, scroll, open drawers) alone
+  const el = document.getElementById("b-" + id); if (!el) return;
+  ui.cache[id] = html;
+  const w = el.querySelector && el.querySelector(".wrap"), sl = w ? w.scrollLeft : 0;
+  const a = document.activeElement, aid = a && a.id && el.contains && el.contains(a) ? a.id : null;
+  el.innerHTML = html;
+  if (sl) { const w2 = el.querySelector(".wrap"); if (w2) w2.scrollLeft = sl; }
+  if (aid) { const e2 = document.getElementById(aid); if (e2 && e2.focus) e2.focus(); }
+}
+function setHTML(id, html) { const el = document.getElementById(id); if (el && el._h !== html) { el._h = html; el.innerHTML = html; } }
 
 function editing() {
   const a = document.activeElement;
-  return a && a.closest && a.closest("#main") && /^(INPUT|SELECT)$/.test(a.tagName) && !["q", "mis", "evq"].includes(a.id);
+  return a && a.closest && a.closest("#main") && /^(INPUT|SELECT)$/.test(a.tagName) && !FILTERS.has(a.id);
 }
 document.addEventListener("focusout", () => setTimeout(() => { if (ui.dirty && !editing()) { ui.dirty = false; draw(); } }, 0));
 
+function draw() {
+  const o = obj(S.overview);
+  document.body.classList.toggle("ro", !LIVE || !!o.read_only);
+  setHTML("tabs", Object.entries(TABS).map(([k, v]) => `<button data-tab="${k}" class="${k === ui.tab ? "on" : ""}">${v}</button>`).join(""));
+  setHTML("live", `<span class="dot ${LIVE && ui.connected ? "ok" : LIVE ? "bad" : ""}"></span>${LIVE ? (ui.connected ? "live" : "reconnecting") : "snapshot"} · ${esc(S.t || "")} · loop ${num(S.loop)}`);
+  setHTML("risk", o.read_only ? '<span class="chip pilot">read-only</span>' : o.paused ? '<span class="chip killed" title="New risk is paused; exits keep running">new risk paused</span>' : "");
+  setHTML("themeBtn", {auto: "Theme: auto", light: "Theme: light", dark: "Theme: dark"}[ui.theme] || "Theme");
+  if (ui.shown !== ui.tab) { document.getElementById("main").innerHTML = SKEL[ui.tab](); ui.shown = ui.tab; ui.cache = {}; }
+  for (const [id, fn] of Object.entries(BLOCKS[ui.tab])) put(id, block(id, fn));
+}
+
 function apply(msg, kind) {
-  if (kind === "snapshot") { S = msg; }
-  else {
-    for (const [k, v] of Object.entries(msg)) {
-      if (k === "markets") {
-        const by = new Map((S.markets || []).map(r => [r.ex, r]));
-        for (const r of v.rows) by.set(r.ex, r);
-        for (const ex of v.gone) by.delete(ex);
-        S.markets = [...by.values()];
-      } else if (k === "events") { S.events = [...v, ...(S.events || [])].slice(0, 300); }
-      else S[k] = v;
-    }
+  if (kind === "snapshot") S = obj(msg);
+  else for (const [k, v] of Object.entries(obj(msg))) {
+    if ((k === "markets" || k === "holdings") && v && !Array.isArray(v) && Array.isArray(v.rows)) {
+      const by = new Map(arr(S[k]).map(r => [r && r.ex, r]));
+      for (const r of v.rows) by.set(r && r.ex, r);
+      for (const ex of arr(v.gone)) by.delete(ex);
+      S[k] = [...by.values()];
+    } else if ((k === "events" || k === "activity") && Array.isArray(v) && Array.isArray(S[k])) {
+      const have = new Set(S[k].map(e => e && e.id));
+      S[k] = [...v.filter(e => !have.has(e && e.id)), ...S[k]].slice(0, 300);
+    } else S[k] = v;
   }
   ui.updated = Date.now();
   if (editing()) { ui.dirty = true; return; }          // never redraw under a caps/state input being edited
   draw();
 }
 
-function views() {
-  const o = S.overview || {}, h = S.health || {};
-  return {
-  overview() {
-    const sig = h.sig || {}, rd = sig.read || {}, wr = sig.write || {}, ex = h.executor || {};
-    const feeds = Object.entries(h.feeds || {}).map(([k, t]) => `<div>${esc(k)}: <b>${ago(t)}</b></div>`).join("");
-    const alerts = (S.alerts || []).map(a => `<div class="alert">${esc(a)}</div>`).join("");
-    return `${S.error ? `<div class="alert">${esc(S.error)}</div>` : ""}${alerts}
-    <div class="grid">
-      <div class="card" style="grid-column:span 2"><h3>Account @ PM fair (the score basis)</h3><div class="big">${num(o.account_fair)}</div>
-        <div>since 00:00 <b class="${cls(o.change_today)}">${sgn(o.change_today)}</b> · since night start <b class="${cls(o.change_start)}">${sgn(o.change_start)}</b> · since 100k start <b class="${cls(o.account_fair - 100000)}">${sgn(o.account_fair - 100000)}</b></div></div>
-      <div class="card"><h3>Realized today</h3><div class="mid ${cls(o.realized_today)}">${sgn(o.realized_today)}</div></div>
-      <div class="card"><h3>Free cash vs reserve</h3><div class="mid">${num(o.free_cash)}</div><div class="mute">reserve ${num(o.reserve)} · committed entries ${num(o.committed)}</div></div>
-      <div class="card"><h3>κ (capital discount)</h3><div class="mid">${o.kappa == null ? "–" : (o.kappa * 100).toFixed(1) + "¢"}</div><div class="mute">${esc(o.kappa_src || "")}</div></div>
-      <div class="card"><h3>Loss stop (bot P&L at fair, 24 h)</h3><div class="mid ${o.loss_stop && o.loss_stop.tripped ? "bad" : ""}">${o.loss_stop ? (o.loss_stop.tripped ? "TRIPPED" : "ok") : "–"}</div><div class="mute">${o.loss_stop ? sgn(o.loss_stop.pnl) + " of −" + num(o.loss_stop.limit) : ""}</div></div>
-      <div class="card"><h3>Leaderboard value</h3><div class="mid">${num(o.leaderboard)}</div><div class="mute">SIG marks, not the score</div></div>
-      <div class="card"><h3>New risk</h3><div class="mid ${o.paused ? "bad" : "good"}">${o.paused ? "PAUSED" : "on"}</div><div class="mute">exits, rebounds, unwinds, repairs always run</div></div>
-    </div>
-    <h3 style="margin:18px 0 8px">Health</h3>
-    <div class="grid">
-      <div class="card"><h3>SIG reads</h3><div>p50 <b>${num(rd.p50, 2)} s</b> · p90 <b>${num(rd.p90, 2)} s</b></div><div>5xx/timeouts <b class="${rd.bad_rate > .1 ? "bad" : ""}">${num((rd.bad_rate || 0) * 100, 1)}%</b></div><div>used <b>${num(sig.reads_last_min)}</b> / ${num(sig.read_limit)} per min</div></div>
-      <div class="card"><h3>SIG writes</h3><div>p50 <b>${num(wr.p50, 2)} s</b> · p90 <b>${num(wr.p90, 2)} s</b></div><div>5xx/timeouts <b class="${wr.bad_rate > .1 ? "bad" : ""}">${num((wr.bad_rate || 0) * 100, 1)}%</b></div><div>used <b>${num(sig.writes_last_min)}</b> / ${num(sig.write_limit)} per min</div></div>
-      <div class="card"><h3>Executor</h3><div>queue <b>${esc(JSON.stringify(ex.queue || {}))}</b></div><div>in flight <b>${num(ex.in_flight)}</b> · capacity <b>${num(ex.capacity_ewma, 1)}</b>/min · batch ${num(ex.batch_cap)}</div><div>journal UNKNOWN <b class="${ex.unknown ? "bad" : ""}">${num(ex.unknown)}</b> · stale dropped ${num(ex.dropped_stale)}</div></div>
-      <div class="card"><h3>Feeds (age)</h3>${feeds}<div>loop <b>${num(h.loop_s, 1)} s</b> · errors last hour <b class="${h.errors ? "bad" : ""}">${num(h.errors)}</b></div></div>
-    </div>`;
-  },
-  strategies() {
-    const rows = (S.layers || []).map(l => {
-      const caps = Object.entries(l.caps || {}).map(([k, c]) => `<div>${esc(k)}: <b>${num(c.used)}</b> / ${num(c.cap)}
-        <span class="ctl"><input type="number" data-cap="${esc(l.name)}:${esc(k)}" min="${c.min}" max="${c.max}" value="${c.cap}"></span></div>`).join("") || "–";
-      const kills = (l.kill || []).map(k => `<div class="${k.hit ? "bad" : "mute"}">${esc(k.rule)}: ${esc(k.value)}</div>`).join("") || "–";
-      return `<tr><td><b>${esc(l.name)}</b><div class="mute">${esc(l.note || "")}</div></td><td>${chip(l.state, l.killed)}<div class="mute">${l.killed ? esc(l.killed.reason) : "since " + ago(l.since)}</div>
-        <div class="ctl"><select data-state="${esc(l.name)}">${["off", "pilot", "full"].map(s => `<option ${s === l.state ? "selected" : ""}>${s}</option>`).join("")}</select>
-        <button class="btn" data-confirm="1" data-act="state" data-layer="${esc(l.name)}">Apply</button></div></td>
-        <td>${caps}${Object.keys(l.caps || {}).length ? `<div class="ctl"><button class="btn" data-confirm="1" data-act="caps" data-layer="${esc(l.name)}">Set caps</button></div>` : ""}</td>
-        <td class="n">${num(l.resting)}</td><td class="n">${num(l.fills)}</td><td class="n">${c2(l.edge)}</td><td class="n">${c2(l.markout30)}</td>
-        <td class="n ${cls(l.pnl_fair)}">${sgn(l.pnl_fair)}</td><td class="n ${cls(l.realized)}">${sgn(l.realized)}</td><td>${kills}</td></tr>`;
-    }).join("");
-    return `<div class="wrap"><table><tr><th>Layer</th><th>Flag</th><th>Caps (used / cap)</th><th class="n">Resting</th><th class="n">Fills</th><th class="n">Edge vs fair</th><th class="n">Mark-out 30m</th><th class="n">P&L @ fair</th><th class="n">Realized</th><th>Kill rules</th></tr>${rows}</table></div>`;
-  },
-  markets() {
-    let rows = S.markets || [];
-    const q = ui.q.toLowerCase(), mis = parseFloat(ui.mis);
-    rows = rows.filter(r => (!q || (r.title + " " + r.race + " " + r.ex).toLowerCase().includes(q)) && (!ui.haspos || r.pos)
-      && (!ui.layer || (r.resting || {})[ui.layer]) && (isNaN(mis) || (r.mis != null && Math.abs(r.mis) * 100 >= mis)));
-    rows.sort((a, b) => Math.abs(b.mis || 0) - Math.abs(a.mis || 0));
-    const per = 50, pages = Math.max(1, Math.ceil(rows.length / per)); ui.page = Math.min(ui.page, pages - 1);
-    const body = rows.slice(ui.page * per, ui.page * per + per).map(r => `<tr class="click" data-ex="${esc(r.ex)}"><td>${esc(r.race)} <b>${esc(r.party)}</b>${r.paused ? ' <span class="chip killed">paused</span>' : ""}</td>
-      <td class="n">${px(r.fair)}${r.u != null ? ` <span class="mute">±${(r.u * 100).toFixed(1)}</span>` : ""}</td><td class="n">${px(r.bid)} / ${px(r.ask)}</td><td class="n ${cls(r.mis && -r.mis)}">${c2(r.mis)}</td>
-      <td class="n">${r.pos ? sgn(r.pos) : "–"}</td><td>${Object.entries(r.subs || {}).map(([k, v]) => `<span class="chip">${esc(k)} ${sgn(v)}</span>`).join("")}</td>
-      <td>${Object.entries(r.resting || {}).map(([k, v]) => `<span class="chip">${esc(k)} ${v}</span>`).join("")}</td><td class="mute">${esc(r.last_fill || "")}</td></tr>
-      ${ui.open === r.ex ? `<tr><td colspan="8">${detail(r)}</td></tr>` : ""}`).join("");
-    return `<div class="row"><input id="q" placeholder="search market" value="${esc(ui.q)}"> <select id="lf"><option value="">any layer</option>${LAYERS.map(l => `<option ${l === ui.layer ? "selected" : ""}>${l}</option>`).join("")}</select>
-      <label><input type="checkbox" id="hp" ${ui.haspos ? "checked" : ""}> has position</label> mispriced > <input type="number" id="mis" value="${esc(ui.mis)}" step="0.5">¢
-      <span class="mute">${rows.length} markets</span><span class="spacer"></span><button class="btn" id="prev">‹</button> ${ui.page + 1}/${pages} <button class="btn" id="next">›</button></div>
-      <div class="wrap"><table><tr><th>Market</th><th class="n">PM fair ±u¢</th><th class="n">SIG bid / ask</th><th class="n">SIG mid − fair</th><th class="n">Net YES</th><th>Sub-books</th><th>Our resting</th><th>Last fill</th></tr>${body}</table></div>`;
-  },
-  pairs() {
-    const p = S.pairs || {}, rows = (p.sets || []).map(s => `<tr><td>${esc(s.race)}</td><td>${esc(s.side)}</td><td class="n">${num(s.qty)}</td><td class="n good">${sgn(s.locked, 2)}</td>
-      <td class="n">${num(s.unwind_value, 2)}</td><td class="n">${num(s.threshold, 3)}</td><td class="n ${s.residue ? "warn" : ""}">${num(s.residue)}</td><td class="n">${num(s.capital)}</td><td>${esc(s.state || "")}</td></tr>`).join("");
-    return `<div class="row">capital used <b>${num(p.used)}</b> / cap ${num(p.cap)} · locked total <b class="good">${sgn(p.locked, 2)}</b></div>
-      <div class="wrap"><table><tr><th>Race</th><th>Set</th><th class="n">Sets</th><th class="n">Locked</th><th class="n">Unwind value</th><th class="n">Unwind at</th><th class="n">One-leg residue</th><th class="n">Capital</th><th>State</th></tr>${rows || '<tr><td colspan="9" class="mute">no open sets</td></tr>'}</table></div>`;
-  },
-  positions() {
-    return (S.positions || []).map(p => `<div class="card" style="margin-bottom:12px"><h3>${esc(p.name)} · ${esc(p.market || "")}</h3>
-      <div>holding <b>${esc((p.side || "").toUpperCase())} ${num(p.held)}</b> · ladder sub-book ${num(p.manual)} ${p.tranche ? `· D1 tranche <b>${num(p.tranche.qty)}</b> (${esc(p.tranche.state)})` : ""} · status ${esc(p.status || "")}</div>
-      <div class="wrap"><table><tr><th class="n">Price</th><th class="n">YES-equivalent</th><th class="n">Qty</th><th>State</th></tr>${(p.ladder || []).map(l => `<tr><td class="n">${px(l.px)}</td><td class="n">${px(l.yes_px)}</td><td class="n">${num(l.qty)}</td><td>${esc(l.state)}</td></tr>`).join("")}</table></div></div>`).join("") || '<div class="mute">no position bots</div>';
-  },
-  leaders() {
-    const L = S.leaders || {}, series = L.series || [];
-    if (!series.length) return '<div class="mute">no leaderboard samples yet (logged every 10 min to data/leaders.csv)</div>';
-    const W = 900, H = 320, xs = series.flatMap(s => s.points.map(p => p[0])), ys = series.flatMap(s => s.points.map(p => p[1]));
-    const x0 = Math.min(...xs), x1 = Math.max(...xs, x0 + 1), y0 = Math.min(...ys), y1 = Math.max(...ys, y0 + 1);
-    const X = x => 50 + (x - x0) / (x1 - x0) * (W - 60), Y = y => H - 20 - (y - y0) / (y1 - y0) * (H - 40);
-    const lines = series.map(s => `<polyline fill="none" stroke="${s.ours ? "var(--bad)" : "var(--acc)"}" stroke-width="${s.ours ? 3 : 1}" opacity="${s.ours ? 1 : .45}" points="${s.points.map(p => X(p[0]) + "," + Y(p[1])).join(" ")}"><title>${esc(s.name)}</title></polyline>`).join("");
-    const rows = (L.latest || []).map(r => `<tr${r.ours ? ' style="font-weight:700"' : ""}><td class="n">${num(r.rank)}</td><td>${esc(r.name)}</td><td class="n">${num(r.value)}</td><td class="n">${num(r.trades)}</td></tr>`).join("");
-    return `<div class="card"><svg viewBox="0 0 ${W} ${H}" width="100%"><text x="4" y="14">${num(y1)}</text><text x="4" y="${H - 22}">${num(y0)}</text>${lines}</svg><div class="mute">top 20 (blue) and our account (red), SIG leaderboard values</div></div>
-      <div class="wrap" style="margin-top:12px"><table><tr><th class="n">Rank</th><th>Account</th><th class="n">Value</th><th class="n">Trades</th></tr>${rows}</table></div>`;
-  },
-  events() {
-    const kinds = [...new Set((S.events || []).map(e => e.kind))].sort();
-    const q = ui.evq.toLowerCase(), rows = (S.events || []).filter(e => (!ui.ev || e.kind === ui.ev) && (!q || e.text.toLowerCase().includes(q)));
-    return `<div class="row"><select id="evk"><option value="">all kinds</option>${kinds.map(k => `<option ${k === ui.ev ? "selected" : ""}>${esc(k)}</option>`).join("")}</select> <input id="evq" placeholder="filter" value="${esc(ui.evq)}"></div>
-      <div class="wrap"><table><tr><th>Time</th><th>Kind</th><th>Event</th></tr>${rows.map(e => `<tr><td class="mute">${esc(e.t)}</td><td><span class="chip">${esc(e.kind)}</span></td><td style="white-space:normal">${esc(e.text)}</td></tr>`).join("")}</table></div>`;
-  }};
+// ------------------------------------------------------------------------------------------- tooltips + crosshair
+function showTip(html, e) {
+  const t = document.getElementById("tip"); if (!t) return;
+  if (t._h !== html) { t._h = html; t.innerHTML = html; }
+  t.style.display = "block";
+  const w = t.offsetWidth || 200, h = t.offsetHeight || 60, vw = window.innerWidth, vh = window.innerHeight;
+  t.style.left = Math.max(8, Math.min(e.clientX + 14, vw - w - 8)) + "px";
+  t.style.top = (e.clientY + 16 + h > vh ? Math.max(8, e.clientY - h - 12) : e.clientY + 16) + "px";
 }
-
-function detail(r) {
-  const d = ui.detail && ui.detail.ex === r.ex ? ui.detail : null;
-  const ctl = `<div class="row ctl"><button class="btn" data-confirm="1" data-act="mpause" data-ex="${esc(r.ex)}">${r.paused ? "Resume market" : "Pause market"}</button>
-    exclude from: ${["recycler", "mm", "ladder", "pairs", "sniper"].map(l => `<label><input type="checkbox" data-excl="${l}" ${(r.exclude || []).includes(l) ? "checked" : ""}> ${l}</label>`).join(" ")}
-    <button class="btn" data-confirm="1" data-act="mexcl" data-ex="${esc(r.ex)}">Apply exclusions</button></div>`;
-  if (!d) return `<div class="drawer">${ctl}<div class="mute">loading history…</div></div>`;
-  const ord = (d.orders || []).map(o => `<tr><td class="mute">${esc(o.placed)}</td><td>${esc(o.bot)}</td><td>${esc(o.layer)}</td><td>${esc(o.action)} ${esc(o.side)}</td><td class="n">${px(o.price)}</td><td class="n">${num(o.qty)}</td><td class="n">${num(o.filled)}</td><td>${esc(o.status)}</td></tr>`).join("");
-  const fl = (d.fills || []).map(f => `<tr><td class="mute">${esc(f.t)}</td><td>${esc(f.bot)}</td><td>${esc(f.layer)}</td><td>${esc(f.action)} ${esc(f.side)}</td><td class="n">${px(f.price)}</td><td class="n">${num(f.qty)}</td><td class="n">${c2(f.edge)}</td><td class="n">${c2(f.mo30)}</td></tr>`).join("");
-  return `<div class="drawer">${ctl}<h3>Orders</h3><div class="wrap"><table><tr><th>Placed</th><th>Bot</th><th>Layer</th><th>Order</th><th class="n">Price</th><th class="n">Qty</th><th class="n">Filled</th><th>Status</th></tr>${ord || '<tr><td colspan="8" class="mute">none</td></tr>'}</table></div>
-    <h3>Fills</h3><div class="wrap"><table><tr><th>Time</th><th>Bot</th><th>Layer</th><th>Trade</th><th class="n">Price</th><th class="n">Qty</th><th class="n">Edge vs fair</th><th class="n">Mark-out 30m</th></tr>${fl || '<tr><td colspan="8" class="mute">none</td></tr>'}</table></div></div>`;
+function hideTip() {
+  const t = document.getElementById("tip"); if (t && t.style.display !== "none") t.style.display = "none";
+  for (const C of Object.values(CH)) { const x = document.getElementById("xh-" + C.id); if (x) x.setAttribute("display", "none"); C.series.forEach((s, i) => { const d = document.getElementById(`xh-${C.id}-${i}`); if (d) d.setAttribute("display", "none"); }); }
 }
-
-function draw() {
-  const o = S.overview || {};
-  document.body.classList.toggle("ro", !LIVE || !!o.read_only);
-  document.getElementById("tabs").innerHTML = Object.entries(TABS).map(([k, v]) => `<button data-tab="${k}" class="${k === ui.tab ? "on" : ""}">${v}</button>`).join("");
-  document.getElementById("pauseBtn").textContent = o.paused ? "Resume new risk" : "Pause new risk";
-  document.getElementById("roBtn").textContent = !LIVE ? "static snapshot" : o.read_only ? "Unlock controls" : "Read-only";
-  const age = Math.round((Date.now() - ui.updated) / 1000);
-  document.getElementById("live").innerHTML = `<span class="dot ${LIVE && ui.connected ? "ok" : LIVE ? "bad" : ""}"></span>${LIVE ? (ui.connected ? "live" : "reconnecting") : "snapshot " + esc(S.t || "")} · ${esc(S.t || "")} · loop ${num(S.loop)}`;
-  const active = document.activeElement && document.activeElement.id;
-  document.getElementById("main").innerHTML = views()[ui.tab]();
-  if (active && document.getElementById(active)) { const el = document.getElementById(active); el.focus(); if (el.setSelectionRange && el.type !== "number") el.setSelectionRange(el.value.length, el.value.length); }
+function lineHover(el, e) {
+  const C = CH[el.getAttribute("data-chart")], svg = el.ownerSVGElement; if (!C || !svg) return hideTip();
+  const r = svg.getBoundingClientRect(), t = C.t0 + (e.clientX - r.left - C.L) / (C.W - C.L - C.R) * (C.t1 - C.t0), lines = [];
+  C.series.forEach((s, i) => {
+    const j = nearest(s.t, t), d = document.getElementById(`xh-${C.id}-${i}`);
+    if (j < 0 || Math.abs(s.t[j] - t) > s.gap || s.v[j] == null) { if (d) d.setAttribute("display", "none"); return; }
+    if (d) { d.setAttribute("cx", f1(C.X(s.t[j]))); d.setAttribute("cy", f1(s.Y(s.v[j]))); d.removeAttribute("display"); }
+    lines.push(`<div>${sw(s.color)}${esc(s.name)} <b>${s.fmt(s.v[j])}</b></div>`);
+  });
+  const x = document.getElementById("xh-" + C.id), cx = f1(C.X(Math.max(C.t0, Math.min(C.t1, t))));
+  if (x) { x.setAttribute("x1", cx); x.setAttribute("x2", cx); x.removeAttribute("display"); }
+  showTip(`<div class="mute">${esc(md(t) + " " + hm(t))} PT</div>` + (lines.join("") || '<div class="mute">no sample here</div>'), e);
 }
+document.addEventListener("mousemove", e => {
+  const t = e.target; if (!t || !t.closest) return;
+  const a = t.closest("[data-tip]"); if (a) { hideTip(); return showTip(a.getAttribute("data-tip"), e); }
+  const c = t.closest("[data-chart]"); if (c) return lineHover(c, e);
+  hideTip();
+});
 
+// ------------------------------------------------------------------------------------------- controls + interactions
 function say(t, bad) { const m = document.getElementById("msg"); m.textContent = t; m.style.display = "block"; m.className = "msg " + (bad ? "bad" : ""); clearTimeout(say.t); say.t = setTimeout(() => m.style.display = "none", 6000); }
 
 async function send(action, args, confirm) {
@@ -445,21 +1079,35 @@ async function openMarket(ex) {
   try { const r = await fetch(`/api/market/${encodeURIComponent(ex)}?t=${encodeURIComponent(TOKEN)}`); ui.detail = Object.assign(await r.json(), {ex}); draw(); } catch (e) { say("history: " + e, true); }
 }
 
+function setTheme(t) {
+  ui.theme = t; const r = document.documentElement;
+  if (r && r.setAttribute) { if (t === "auto") r.removeAttribute("data-theme"); else r.setAttribute("data-theme", t); }
+  try { localStorage.setItem("sig-dash-theme", t); } catch (e) { }
+}
+try { const t = localStorage.getItem("sig-dash-theme"); if (t === "light" || t === "dark") setTheme(t); } catch (e) { }
+
 document.addEventListener("click", e => {
-  const b = e.target.closest("button, tr.click"); if (!b) return;
+  const t = e.target; if (!t || !t.closest) return;
+  const th = t.closest("th[data-sort]");
+  if (th) { const k = th.dataset.sort, c = HCOLS.find(c => c.k === k) || {}; ui.hsort = {k, dir: ui.hsort.k === k ? -ui.hsort.dir : c.n ? -1 : 1}; draw(); return; }
+  const bs = t.closest("[data-basis]"); if (bs) { ui.basis = bs.dataset.basis; draw(); return; }
+  const mo = t.closest("[data-more]"); if (mo) { ui[mo.dataset.more] = !ui[mo.dataset.more]; draw(); return; }
+  const tp = t.closest("[data-tip]"); if (tp) showTip(tp.getAttribute("data-tip"), e);      // touch screens: tap for the tooltip
+  const b = t.closest("button, tr.click"); if (!b) return;
   if (b.dataset.tab) { ui.tab = b.dataset.tab; ui.open = null; draw(); return; }
-  if (b.matches("tr.click")) { if (!e.target.closest(".drawer")) openMarket(b.dataset.ex); return; }
+  if (b.id === "themeBtn") { setTheme({auto: "light", light: "dark", dark: "auto"}[ui.theme] || "auto"); draw(); return; }
+  if (b.matches("tr.click")) { if (!t.closest(".drawer")) openMarket(b.dataset.ex); return; }
   if (b.id === "prev") { ui.page = Math.max(0, ui.page - 1); draw(); return; }
   if (b.id === "next") { ui.page++; draw(); return; }
   if (!armed(b)) return;
-  const o = S.overview || {};
+  const o = obj(S.overview);
   if (b.id === "pauseBtn") send(o.paused ? "resume" : "pause", {});
   else if (b.id === "pullBtn") send("pull_quotes", {}, true);
   else if (b.id === "kBtn") { const v = document.getElementById("kv").value; send("kappa", {value: v === "" ? null : parseFloat(v) / 100, minutes: parseFloat(document.getElementById("km").value || "60")}, true); }
   else if (b.id === "roBtn") send("read_only", {on: !o.read_only});
   else if (b.dataset.act === "state") send("layer_state", {layer: b.dataset.layer, state: document.querySelector(`select[data-state="${b.dataset.layer}"]`).value}, true);
   else if (b.dataset.act === "caps") { const caps = {}; document.querySelectorAll(`input[data-cap^="${b.dataset.layer}:"]`).forEach(i => caps[i.dataset.cap.split(":")[1]] = parseFloat(i.value)); send("layer_caps", {layer: b.dataset.layer, caps}, true); }
-  else if (b.dataset.act === "mpause") { const r = (S.markets || []).find(m => m.ex === b.dataset.ex) || {}; send("market", {ex: b.dataset.ex, paused: !r.paused}, true); }
+  else if (b.dataset.act === "mpause") { const r = arr(S.markets).find(m => m.ex === b.dataset.ex) || {}; send("market", {ex: b.dataset.ex, paused: !r.paused}, true); }
   else if (b.dataset.act === "mexcl") { const ex = []; b.closest(".drawer").querySelectorAll("input[data-excl]").forEach(i => { if (i.checked) ex.push(i.dataset.excl); }); send("market", {ex: b.dataset.ex, exclude: ex}, true); }
 });
 document.addEventListener("input", e => {
@@ -467,13 +1115,21 @@ document.addEventListener("input", e => {
   if (id === "q") { ui.q = e.target.value; ui.page = 0; draw(); }
   else if (id === "mis") { ui.mis = e.target.value; ui.page = 0; draw(); }
   else if (id === "evq") { ui.evq = e.target.value; draw(); }
+  else if (id === "hq") { ui.hq = e.target.value; draw(); }
+  else if (id === "aq") { ui.aq = e.target.value; draw(); }
 });
 document.addEventListener("change", e => {
   const id = e.target.id;
   if (id === "lf") { ui.layer = e.target.value; ui.page = 0; draw(); }
   else if (id === "hp") { ui.haspos = e.target.checked; ui.page = 0; draw(); }
-  else if (id === "evk") { ui.ev = e.target.value; draw(); }
+  else if (id === "b-evkinds") { ui.ev = e.target.value; draw(); }
+  else if (id === "b-hlopts") { ui.hl = e.target.value; draw(); }
+  else if (id === "hr") { ui.hr = e.target.checked; draw(); }
+  else if (id === "b-alopts") { ui.al = e.target.value; draw(); }
 });
+if (typeof window !== "undefined" && window.addEventListener) {
+  let rz = 0; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(draw, 150); });
+}
 
 draw();
 if (LIVE) {
