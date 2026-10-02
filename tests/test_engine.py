@@ -1187,6 +1187,23 @@ class FatFingerTests(EngineCase):
         self.assertTrue(all(px <= 0.12 + 1e-9 for _, px, _ in lv))
         self.assertTrue(all(px <= 0.075 + 1e-9 for _, px, _ in eng.fat_levels(ex, side, 0.30, 1.0, "A")), "cap: 25% of a 0.30 side")
 
+    def test_queue_read_ignores_our_own_bids(self):
+        fake, eng = self.rig()
+        self.settle(eng, fake)
+        o = next(x for x in self.fat_orders(eng, fake) if eng.side_fair(x["ex"], x["side"]) and eng.side_fair(x["ex"], x["side"]) >= 0.48)
+        ex, side = o["ex"], o["side"]
+        ours = [x for x in self.fat_orders(eng, fake, ex) if x["side"] == side]
+        yes = lambda x: x["price"] if side == "yes" else round(1 - x["price"], 3)
+        book = [(yes(x), x["qty"]) for x in ours] + [((0.05 if side == "yes" else 0.95), 500.0)]
+        real = fake.orderbook
+        fake.orderbook = lambda e_, depth=10: ((sorted([b_ for b_ in book if b_[0] < 0.5], reverse=True), []) if side == "yes"
+                                               else ([], sorted(b_ for b_ in book if b_[0] > 0.5))) if e_ == ex else real(e_, depth)
+        eng.fat_book[ex] = (0, [], [])
+        loop(eng, fake)
+        _, yb, ya = eng.fat_book[ex]
+        self.assertEqual([p for p, _ in (yb or ya)], [0.05 if side == "yes" else 0.95], "only the rival is left in the queue")
+        self.assertEqual(sorted(px for _, px, _ in eng.fat_levels(ex, side, eng.side_fair(ex, side), 1.0, "A")), [0.055, 0.08, 0.12])
+
     def test_max_sweep_fills_best_price_first_and_logs_value(self):
         fake, eng = self.rig()
         self.settle(eng, fake)
@@ -1242,6 +1259,20 @@ class FatFingerTests(EngineCase):
             fake2.fill(x["id"], 10)
         loop(eng2, fake2)
         self.assertGreater(eng2.breaker.get(("fat", "D"), 0), time.time())
+
+    def test_pilot_gate(self):
+        fake, eng = self.rig()
+        self.settle(eng, fake, 3)
+        c = eng.controls
+        now = time.time()
+        c.layer("fatfinger").update(state="pilot", since=now - 2 * 3600 - 60)
+        eng.fat_sent.clear()
+        eng.fat_fills.append((now - 600, 0.80, 0.60))                   # filled 20c from fair: the gate holds
+        eng.controller(now)
+        self.assertEqual(c.state("fatfinger"), "pilot")
+        eng.fat_fills[:] = [(now - 600, 0.80, 0.05)]                    # a real fat-finger catch: promote
+        eng.controller(now)
+        self.assertEqual(c.state("fatfinger"), "full")
 
     def test_write_budget_is_about_zero_after_placement(self):
         fake, eng = self.rig()

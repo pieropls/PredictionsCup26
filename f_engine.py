@@ -14,6 +14,7 @@ Every loop:
 import csv
 import fcntl
 from concurrent.futures import ThreadPoolExecutor
+import collections
 import json
 import math
 import os
@@ -42,7 +43,8 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       LADDER_PILOT_MARKETS, PILOT_S, REQUOTE_CANCELS_PER_MIN, BREAKER_FAIR_MOVE, AK_RELEASE,
                       OPPORTUNITY_RESERVE, ROC_MIN, ROC_MIN_TIGHT, RELEASE_EVERY_S, RELEASE_MARKETS, RELEASE_PILOT_TARGET,
                       FAT_LEVELS, FAT_SIZES, FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP, FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S,
-                      FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S, FAT_MOVE, FAT_CAPACITY_SHARE, FAT_BOOK_READS, QTY_TOL)
+                      FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S, FAT_MOVE, FAT_CAPACITY_SHARE, FAT_BOOK_READS, QTY_TOL,
+                      FAT_REFRESH_MAX_H)
 from d_ledger import Ledger, stamp, write_atomic
 
 
@@ -314,6 +316,7 @@ class Engine:
         self.pilot_sets, self.sweep_rank = {}, {}
         self.release_now, self.release_t, self.depth_cache = {}, 0.0, {}
         self.fat_book, self.fat_anchor, self.fat_block, self.fair_hist, self.fat_now = {}, {}, {}, {}, {}
+        self.fat_fills, self.fat_sent = [], collections.deque(maxlen=5000)   # (t, fair, price) per fill; placement times
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
@@ -873,6 +876,7 @@ class Engine:
                                    "being placed (paced at 30% of SIG capacity)")
                     continue
                 self.fat_quota -= 1
+                self.fat_sent.append(time.time())
                 used["fat_resting"] += n
                 out.append(w)
                 continue
@@ -934,7 +938,7 @@ class Engine:
                 c.kill(l, f"{hit[0]['rule']}: {hit[0]['value']}")
                 self.alerts.append(f"{time.strftime('%H:%M')} layer {l} killed: {hit[0]['rule']} ({hit[0]['value']})")
         # promotions (pilot -> full) and pilot extensions
-        for l in ("mm", "ladder", "pairs", "release"):
+        for l in ("mm", "ladder", "pairs", "release", "fatfinger"):
             if c.state(l) != "pilot":
                 continue
             st, age = stats.get(l, {}), now - since[l]
@@ -964,6 +968,19 @@ class Engine:
                                                                                    r["avg_cost"] <= self.release_max_cost() + 0.005):
                     ok, why = True, (f"pilot target reached (free cash {free:,.0f})" if free >= RELEASE_PILOT_TARGET else "2 h pilot") + \
                         f", freed {r['sig']:,.0f} at {(r['avg_cost'] or 0) * 100:.1f}% average cost, no I2 trims"
+            if l == "fatfinger" and age >= PILOT_S:         # morning_plan 1.10: pilot tier A 2 h -> full tiers A + B
+                close = [x for x in self.fat_fills if x[0] >= since[l] and x[1] is not None and x[1] - x[2] < 0.25]
+                trims = self.ex.trims.get("fatfinger", 0)
+                thr = api.health(PILOT_S).get("throttled", 0)
+                late = sum(1 for t in self.fat_sent if t >= now - 3600)   # after 2 h the initial placement is older than this
+                if not close and trims == 0 and thr == 0 and late <= FAT_REFRESH_MAX_H:
+                    n_f = sum(1 for x in self.fat_fills if x[0] >= since[l])
+                    ok, why = True, (f"2 h pilot: {n_f} fills, none within 25c of fair; no I2 trims; no HTTP 429s; "
+                                     f"{late} placements in the last hour")
+                elif now - night.get(f"{l}_ext", 0) >= PILOT_S:
+                    night[f"{l}_ext"] = now
+                    self.night.line(f"layer fatfinger stays pilot: {len(close)} fills within 25c of fair, {trims} I2 trims, "
+                                    f"{thr} HTTP 429s, {late} placements last hour (review)")
             if l == "pairs":
                 done = [bk for bk in self.ledger.baskets if bk.get("ts", 0) >= since[l] and bk.get("state") in ("held", "unwound", "done")
                         and self.ledger.matched(bk) > 0 and not self.basket_residue(bk)]
@@ -1138,7 +1155,20 @@ class Engine:
         for ex in stale[:FAT_BOOK_READS]:
             try:
                 bids, asks = api.orderbook(ex, depth=50)
-                self.fat_book[ex] = (now, [(p, q) for p, q in bids if p <= 0.15], [(p, q) for p, q in asks if p >= 0.85])
+                mine = collections.Counter()                # I4: our own resting orders are not the queue
+                for o in self.open:
+                    if o["ex"] == ex:
+                        yes_px = o["price"] if o["side"] == "yes" else 1 - o["price"]
+                        mine[("b" if (o["side"] == "yes") == (o["action"] == "buy") else "a", round(yes_px, 3))] += o["qty"]
+                def strip(rows, k):
+                    out = []
+                    for p, q in rows:
+                        cut = min(q, mine[(k, round(p, 3))])
+                        mine[(k, round(p, 3))] -= cut       # drawn down once, even if a price shows on several rows
+                        if q - cut > QTY_TOL:
+                            out.append((p, q - cut))
+                    return out
+                self.fat_book[ex] = (now, strip([r for r in bids if r[0] <= 0.15], "b"), strip([r for r in asks if r[0] >= 0.85], "a"))
             except Exception as err:
                 self.event("ERR", f"fat-finger queue read {self.name(ex)}: {str(err)[:80]}")
                 break
@@ -1205,6 +1235,7 @@ class Engine:
                 continue
             fv = self.side_fair(f["ex"], f["side"])
             cap = None if fv is None else (fv - f["price"]) * f["qty"]
+            self.fat_fills.append((time.time(), fv, f["price"]))
             msg = (f"FATFINGER FILL {self.name(f['ex'])}: bought {f['qty']:,.0f} {f['side'].upper()} at {f['price']:.3f}"
                    + ("" if fv is None else f" (fair {fv:.3f}): value captured {cap:+,.0f}"))
             self.event("FATFINGER", msg)

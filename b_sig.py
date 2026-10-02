@@ -29,6 +29,7 @@ T = {}                  # tournament {id, slug}, set by init()
 _writes = deque()       # timestamps of writes in the last minute
 _wlock = threading.RLock()  # the executor's cancel and placement lanes write from two threads
 _calls = deque(maxlen=2000)  # (time, "read"|"write", seconds, status) of every request: the dashboard's health panel
+_throttled = deque(maxlen=1000)  # times of HTTP 429 answers (the fat-finger pilot gate: write usage under the limit)
 
 
 def _req(method, path, timeout=None, **kw):
@@ -54,6 +55,7 @@ def _req(method, path, timeout=None, **kw):
             break
         time.sleep(1 + attempt)
     if r.status_code == 429:
+        _throttled.append(time.time())
         if method != "GET":                                    # writes: let the executor pause its lanes instead of blocking
             raise RateLimited(float(r.headers.get("Retry-After", 60)))
         time.sleep(float(r.headers.get("Retry-After", 60)))
@@ -84,6 +86,7 @@ def health(window_s=600):
     out["reads_last_min"] = sum(1 for c in calls if c[1] == "read" and c[0] >= now - 60)
     out["writes_last_min"] = WRITES_PER_MIN - writes_left()
     out["read_limit"], out["write_limit"] = 100, 30
+    out["throttled"] = sum(1 for t in list(_throttled) if t >= now - window_s)
     out["last_ok"] = max((c[0] + c[2] for c in calls if 0 < c[3] < 500), default=None)
     return out
 
