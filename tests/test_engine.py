@@ -572,6 +572,20 @@ class DashboardWiringTests(EngineCase):
         self.assertEqual(main_with(None), "engine would start", "a VM identifies itself with data/host_id")
 
 
+class PayloadTests(EngineCase):
+    def test_payload_with_a_one_leg_basket(self):
+        """Live ledgers hold sets with legs that never filled (no average price): the payload must still build."""
+        fake = new_fake()
+        eng = engine(fake)
+        loop(eng, fake)
+        oid = next(iter(eng.ledger.orders))
+        eng.ledger.baskets.append(dict(id="x:1", race="MA Gov", side="no", qty=100, margin=0.01, legs=2, orders=[oid, "missing"],
+                                       repaired=True, ts=0))
+        eng.ledger.orders[oid]["filled"], eng.ledger.orders[oid]["cost"] = 50.0, 20.0
+        s = eng.dash_state()
+        self.assertTrue(s["pairs"]["sets"])
+
+
 class ControlTests(EngineCase):
     def test_position_only_by_flags_places_only_the_exits(self):
         fresh_data(layers=dict(position=dict(state="full")))

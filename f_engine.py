@@ -1048,11 +1048,11 @@ class Engine:
         sets, used, locked = [], 0.0, 0.0
         for bk in self.ledger.baskets[-200:]:
             legs = self.ledger.basket_fills(bk)
-            if not legs:
+            if not any(l[3] for l in legs):
                 continue
             m = self.ledger.matched(bk)
             res = sum(l[3] for l in legs) - m * bk["legs"]
-            cap_ = sum(l[3] * l[4] for l in legs)
+            cap_ = sum(l[3] * (l[4] or 0) for l in legs)            # a leg with no fill has no average price
             used += cap_
             locked += m * bk["margin"]
             sets.append(dict(race=bk["race"], side=bk["side"], qty=m, locked=round(m * bk["margin"], 2), residue=round(res),
