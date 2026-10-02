@@ -1,8 +1,9 @@
 """I. REALTIME: event triggers; REST stays the truth (plan_review A7, A14; night plan §6).
 
   SigUserFeed   SIG's user channel (Supabase realtime, `user:<profileId>`): `account_batch` broadcasts with our fills and
-                order updates, revision-numbered. A duplicate revision is ignored. A gap, a (re)connect or a token refresh
-                means "resync": the engine re-reads REST before acting. The token is refreshed every 3 h.
+                order updates, revision-numbered, and `notification` broadcasts (order_filled, ...) that carry no market. A
+                duplicate revision is ignored; a gap (previousRevision > last accepted), `resyncRequired`, a (re)connect or
+                a token refresh means "resync": the engine re-reads REST before acting. The token is refreshed every 3 h.
                 (Market channels deliver nothing (RECAP §11, 9.1): SIG books stay on REST /exchanges/prices.)
   PolyFeed      Polymarket's CLOB market websocket for the mapped YES tokens (clobTokenIds[0], only where outcomes[0] is
                 "Yes"): best bid/ask per token, summed per SIG market like c_polymarket.fairs(); the engine feeds them to its
@@ -35,6 +36,14 @@ class SigUserFeed:
         if msg.get("event") != "broadcast":
             return None
         p = msg.get("payload") or {}
+        if p.get("event") == "notification":                # e.g. order_filled: arrives even when account_batch lags
+            typ = str((p.get("payload") or {}).get("type") or "")
+            if typ.startswith("order_"):
+                self.stats["notifications"] = self.stats.get("notifications", 0) + 1
+                self.last_msg_t = self.clock()
+                self.on_event("fills" if "fill" in typ else "orders", set(), self.last_msg_t)   # market unknown: REST tells
+                return "notification"
+            return None
         if p.get("event") != "account_batch":
             return None
         b = p.get("payload") or {}
@@ -48,7 +57,7 @@ class SigUserFeed:
         fills, updates = b.get("fills") or [], b.get("orderUpdates") or []
         exs = {str(f.get("exchangeId")) for f in fills if f.get("exchangeId") is not None}
         exs |= {str(u.get("exchangeId")) for u in updates if u.get("exchangeId") is not None}
-        gap = rev is not None and self.last_rev is not None and prev is not None and prev != self.last_rev
+        gap = (rev is not None and self.last_rev is not None and prev is not None and prev > self.last_rev) or bool(b.get("resyncRequired"))
         self.last_rev = rev if rev is not None else self.last_rev
         self.stats["batches"] += 1
         self.stats["fills"] += len(fills)

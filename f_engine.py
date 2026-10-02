@@ -445,8 +445,10 @@ class Engine:
             pos[ex], rows[ex] = pos.get(ex, 0) + api.net(p), p
         self.open, self.px = got["open"], got["px"]
         prev = {ex: (b["pos"], b["row"]) for ex, b in self.book.items()}
+        fill_exs = set()
         for f in self.ledger.sync(self.open, got.get("fills", []), self.bot_of, self.side_fair, self.side_mid, as_of=now,
                                   held=lambda ex: prev.get(ex)):
+            fill_exs.add(f["ex"])
             e = "" if f["edge"] is None else f" | vs PM {f['edge'] * 100:+.1f}c, vs SIG mid {(f['sig_edge'] or 0) * 100:+.1f}c"
             self.event("FILL", f"{f['bot']} [{f['layer'] or '-'}]: {f['action'] or 'trade'} {f['side'].upper()} {f['qty']:,.0f} @ {f['price']:.3f}{e}")
         self.ledger.markouts(self.side_mid)
@@ -557,6 +559,7 @@ class Engine:
         self.t["orders"] = time.time() - t0
         done = time.time()                                  # A7 latency budgets, measured from the realtime event
         for t_ev, kind, exs in events:
+            exs = exs or (fill_exs if kind == "fills" else set())   # a notification names no market: the fills REST found
             if kind == "fills" and exs & placed_exs:
                 self.sample("fill_to_queued", done - t_ev)
             if kind == "pm_move" and exs & cancelled_exs:
@@ -1680,7 +1683,8 @@ class Engine:
             health=dict(sig=api.health(), executor=st, loop_s=self.t.get("loop"), errors=len(self.errors), latency=self.latency_view(),
                         realtime=dict(sig=getattr(self.sig_feed, "stats", None), pm=getattr(self.pm_feed, "stats", None)),
                         feeds={"SIG prices (REST)": self.px_t, "Polymarket": self.fair_t or None,
-                               "SIG realtime": getattr(self, "rt_sig_t", None), "Polymarket realtime": getattr(self, "rt_pm_t", None)}),
+                               "SIG realtime": getattr(self.sig_feed, "last_msg_t", None),
+                               "Polymarket realtime": getattr(self.pm_feed, "last_msg_t", None)}),
             layers=layers, markets=markets, positions=positions,
             pairs=dict(sets=sets[-60:], used=round(used), cap=self.cap("pairs", "capital"), locked=round(locked, 2)),
             leaders=self.leaders_payload(), alerts=list(self.alerts) + [f"decide: {d}" for d in c.d.get("decisions") or []],

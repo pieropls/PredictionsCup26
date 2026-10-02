@@ -36,6 +36,18 @@ class SigFeedTests(unittest.TestCase):
         self.assertEqual([k for k, _ in self.ev], ["fills", "resync", "resync"])
         self.assertEqual(self.f.handle(batch(9, 8, fills=[dict(exchangeId=104)])), "batch", "after a resync: no gap check")
 
+    def test_order_filled_notification_wakes_with_no_market(self):
+        m = dict(event="broadcast", payload=dict(event="notification", payload=dict(id="x", type="order_filled")))
+        self.assertEqual(self.f.handle(m), "notification")
+        self.assertEqual(self.ev, [("fills", set())])
+
+    def test_gap_only_when_previous_revision_is_ahead_and_on_resync_required(self):
+        self.f.handle(batch(10, 9, fills=[dict(exchangeId=1)]))
+        self.assertEqual(self.f.handle(batch(14, 8, fills=[dict(exchangeId=2)])), "batch", "a merged backlog: not a gap")
+        b = batch(15, 14, fills=[dict(exchangeId=3)])
+        b["payload"]["payload"]["resyncRequired"] = True
+        self.assertEqual(self.f.handle(b), "resync")
+
     def test_other_messages_are_ignored(self):
         for m in [dict(event="phx_reply", payload={}), dict(event="broadcast", payload=dict(event="other", payload={}))]:
             self.assertIsNone(self.f.handle(m))
