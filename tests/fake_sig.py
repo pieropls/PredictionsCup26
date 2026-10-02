@@ -125,6 +125,9 @@ class FakeSIG:
     def leaderboard(self, limit=20, offset=0):
         rows = [dict(rank=i + 1, username=f"leader-{i + 1}", profileId=str(i), pnl=500_000.0 - 10_000 * i, tradesCount=100 + i,
                      volume=1.0, roi=1.0) for i in range(30)]
+        if offset >= len(rows):                            # our own row, far down the board
+            rows = rows + [dict(rank=offset + 1, username="us", profileId="me", pnl=-7700.0, tradesCount=900, volume=1.0, roi=-7.7)]
+            return dict(leaderboard=rows[-1:], total=700, myRank=585)
         return dict(leaderboard=rows[offset:offset + limit], total=700, myRank=585)
 
     def recent_markets(self, limit=20):

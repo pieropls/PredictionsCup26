@@ -484,11 +484,12 @@ class Engine:
             s = self.bot_snapshot(b, pos, rows, kappa, cash, used)
             s["own"] = [o for o in mine.get(b.name, []) if o.get("id")]   # I4: our resting orders aren't the market
             wants = self.gate(b, b.plan(s))
-            if b.kind == "market":                                  # a buy against the net holding nets it (I2 caps it at
-                net = pos.get(b.ex, 0)                              # |net| when sent): want what can actually rest, no churn
-                for w in wants:
-                    if w["action"] == "buy" and jx.reduces(w["side"], "buy", net) and w["qty"] > abs(net):
-                        w["qty"] = int(abs(net))
+            if b.kind == "market":                                  # buys against the net holding net it, and I2 caps them
+                net, room_r = pos.get(b.ex, 0), abs(pos.get(b.ex, 0))   # at |net| together: share that capacity, exits and
+                for w in sorted(wants, key=lambda w: not w.get("reduce")):   # rebounds first, then entries (no churn)
+                    if w["action"] == "buy" and jx.reduces(w["side"], "buy", net):
+                        w["qty"] = int(max(0, min(w["qty"], room_r)))
+                        room_r -= w["qty"]
                         if w.get("qmax") is not None:
                             w["qmax"] = min(w["qmax"], w["qty"])
                 wants = [w for w in wants if w["qty"] >= MIN_QTY]
@@ -754,8 +755,14 @@ class Engine:
         SIG 5xx pause, the correlated-fill breaker, and D1 (AK release to the recycler)."""
         c = self.controls
         night = c.d.setdefault("night", {})
+        before = json.dumps(night, sort_keys=True, default=str)
         since = {l: c.layer(l).get("since") or now for l in LAYERS}
         stats = self.layer_stats(since)
+        path = os.path.join(DATA, "market_stats.json")
+        m = os.path.getmtime(path) if os.path.exists(path) else None
+        if m != getattr(self, "pilots_mtime", None):        # new trade-tape stats: refresh the pilot market sets
+            self.pilots_mtime = m
+            self.load_pilots()
         for l in ("recycler", "mm", "ladder", "pairs", "sniper"):
             if not c.on(l):
                 continue
@@ -834,7 +841,8 @@ class Engine:
         # D1: release 25% of the AK position to the recycler once the recycler is on (night plan §1)
         if c.on("recycler") and not night.get("d1_done"):
             self.apply_d1()
-        c.save()
+        if json.dumps(night, sort_keys=True, default=str) != before:
+            c.save()                                        # only on a change: a hand edit on disk is never overwritten
 
     def apply_d1(self):
         c, night = self.controls, self.controls.d.setdefault("night", {})
@@ -1181,8 +1189,8 @@ class Engine:
             owned = {i for i, o in self.ledger.orders.items() if o["status"] == "open" and o["bot"] not in keep and o["bot"] != "manual"}
             out = []
             for o in cands:
-                if o["id"] not in owned or o["action"] != "buy":
-                    continue
+                if o["id"] not in owned or o["action"] != "buy" or self.ledger.orders[o["id"]]["layer"] in self.REDUCING:
+                    continue                                # exits, rebounds, unwinds and repairs only reduce risk: they stay
                 bid, ask, _ = px.get(o["ex"], (None, None, None))
                 best = bid if o["side"] == "yes" else (None if ask is None else 1 - ask)  # best bid of the order's own side
                 gap = -1.0 if best is None else best - o["price"]                          # <= 0: we are the touch

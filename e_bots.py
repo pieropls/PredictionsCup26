@@ -112,7 +112,7 @@ class PositionBot:
         active = [px for px, q in alloc.items() if q > 0]
         if left > 0 and active:
             alloc[min(active)] += left
-        out = [want(side, "sell", px, q, px, px, QTY_TOL, "exit", sub="manual") for px, q in alloc.items() if q >= MIN_QTY]
+        out = [want(side, "sell", px, q, px, px, 0.05, "exit", sub="manual") for px, q in alloc.items() if q >= MIN_QTY]
         if held < self.max_add * self.ref:
             out += [want(side, "buy", px, n / px, px, px, QTY_TOL, "add", sub="manual") for px, n in self.adds if n / px >= MIN_QTY]
         if s.get("recycle") and s.get("fair") is not None:      # D1: the share released to the recycler

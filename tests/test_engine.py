@@ -8,6 +8,7 @@ No network, nothing sent.   python3 -m unittest tests.test_engine
   dashboard         read-only controls, bound to 127.0.0.1
 """
 import contextlib
+import csv
 import io
 import json
 import os
@@ -702,6 +703,246 @@ class ControllerTests(EngineCase):
             log = fh.read()
         self.assertIn("KILL layer mm", log)
         self.assertIn("SIG 5xx/timeouts > 50% for 10 min", log)
+
+
+def mid_market(eng, lo=0.35, hi=0.65):
+    """A mapped market priced near the middle (ROC passes on both sides), no position, no pair."""
+    legs = {ex for pb in eng.pairs for ex in pb.legs}
+    for b in eng.bots:
+        bid, ask, _ = eng.px.get(b.ex, (None, None, None))
+        if b.kind == "market" and bid and ask and lo <= (bid + ask) / 2 <= hi and b.ex not in POS and b.ex in eng.fair:
+            return b.ex
+    raise AssertionError("no mid-priced market in the fixture")
+
+
+def seed_ref(eng, ex, mid=None, minutes=20):
+    b, a, _ = eng.px[ex]
+    mid = (b + a) / 2 if mid is None else mid
+    now = time.time()
+    eng.mids[ex] = [(now - 60 * (minutes - i), mid, a - b) for i in range(minutes + 1)]
+
+
+class LadderTests(EngineCase):
+    def test_ladder_tranche_rebound_and_news_guard(self):
+        fresh_data(layers=dict(position=dict(state="full"), ladder=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)
+        ex = mid_market(eng)
+        seed_ref(eng, ex)
+        for _ in range(4):
+            loop(eng, fake)
+            seed_ref(eng, ex)
+        lad = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders]
+        self.assertTrue(lad and all(eng.ledger.orders[o["id"]]["layer"] == "ladder" for o in lad), lad)
+        ref, f = eng.ref(ex), eng.fair[ex]
+        for o in lad:                                     # entry = min(ref_side - off, fair_side - 2c*s(p)), below the ask
+            fs = f if o["side"] == "yes" else 1 - f
+            self.assertLessEqual(o["price"], fs - 0.02 * bots.s_of(fs) + 1e-9)
+            self.assertTrue(eng.ledger.orders[o["id"]]["sub"].startswith("tranche:"))
+        yes = max((o for o in lad if o["side"] == "yes"), key=lambda o: o["price"])
+        sub = eng.ledger.orders[yes["id"]]["sub"]
+        fake.fill(yes["id"], yes["qty"])                  # a sweep fills the top YES level
+        for _ in range(3):
+            loop(eng, fake)
+            seed_ref(eng, ex)
+        self.assertEqual(eng.ledger.tranches[sub]["state"], "open")
+        rb = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["sub"] == sub
+              and eng.ledger.orders[o["id"]]["layer"] == "rebound"]
+        self.assertEqual(len(rb), 1, "one rebound for the tranche")
+        self.assertEqual((rb[0]["side"], rb[0]["qty"]), ("no", yes["qty"]), "A1: the rebound is the complement buy")
+        self.assertGreaterEqual(1 - rb[0]["price"], f - eng.kappa()[0] - 1e-9, "A2: never below fair - kappa")
+        self.assertGreaterEqual(1 - rb[0]["price"], yes["price"] + 0.01 - 1e-9, "at least fill + 1c")
+        FAIR[ex] = f - eng.ledger.tranches[sub]["off"]     # news: fair drops by more than off/2
+        try:
+            loop(eng, fake)
+            loop(eng, fake)
+        finally:
+            FAIR.pop(ex, None)
+        self.assertEqual(eng.ledger.tranches[sub]["state"], "news")
+        self.assertEqual(eng.ledger.sub(ex, sub), 0)
+        self.assertEqual(eng.ledger.sub(ex, "inventory"), yes["qty"], "the tranche went to the recycler's inventory")
+        self.assertNotIn(int(rb[0]["id"]), fake.book, "its rebound was cancelled")
+
+
+class BreakerTests(EngineCase):
+    def test_correlated_fills_trip_the_breaker(self):
+        fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)
+        loop(eng, fake)
+        mm = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"
+              and not jx.reduces(o["side"], "buy", fake.pos.get(o["ex"], 0))]
+        pro_d, seen = [], set()
+        for o in mm:
+            if eng.pol(o["ex"], o["side"]) == "D" and o["ex"] not in seen:
+                seen.add(o["ex"])
+                pro_d.append(o)
+        self.assertGreaterEqual(len(pro_d), 5)
+        for o in pro_d[:5]:
+            fake.fill(o["id"], o["qty"])
+        loop(eng, fake)
+        self.assertGreater(eng.breaker.get("D", 0), time.time())
+        self.assertTrue(any("BREAKER pro-D" in a for a in eng.alerts))
+        for _ in range(3):
+            loop(eng, fake)
+        left = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"
+                and eng.pol(o["ex"], o["side"]) == "D" and not jx.reduces(o["side"], "buy", fake.pos.get(o["ex"], 0))]
+        self.assertEqual(left, [], "no pro-D MM entries while the breaker holds")
+        self.assertTrue([o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.pol(o["ex"], o["side"]) == "R"],
+                        "pro-R quotes continue")
+
+
+class PairsTests(EngineCase):
+    def setUp(self):
+        super().setUp()
+        fresh_data(layers=dict(position=dict(state="full"), pairs=dict(state="full")))
+
+    def ma_set(self, eng, fake):
+        loop(eng, fake)
+        sets = [b for b in eng.ledger.baskets if b["race"] == "Massachusetts Governor"]
+        self.assertTrue(sets, [e["text"] for e in eng.events if e["kind"] == "PAIR"][-3:])
+        return sets[-1]
+
+    def test_ev_positive_set_then_early_unwind(self):
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        bk = self.ma_set(eng, fake)
+        self.assertEqual((bk["side"], bk["legs"]), ("no", 2))
+        self.assertGreaterEqual(bk["margin"], 0.02 - 1e-9, "A12: >= 2c locked")
+        for oid in bk["orders"]:
+            fake.fill(oid, bk["qty"])
+        loop(eng, fake)
+        self.assertEqual(self.ledger_matched(eng, bk), bk["qty"])
+        fake.px["1059"], fake.px["1060"] = (0.92, 0.93, 0.93), (0.06, 0.07, 0.07)   # YES asks sum 1.00 <= n-1+kappa
+        loop(eng, fake)
+        un = [c for c in fake.calls if c[0] == "multileg"]
+        self.assertTrue(un, "atomic unwind sent")
+        self.assertIn(bk["state"], ("unwinding", "unwound"))
+        self.assertTrue(any(e["kind"] == "UNWIND" for e in eng.events))
+
+    @staticmethod
+    def ledger_matched(eng, bk):
+        return eng.ledger.matched(bk)
+
+    def test_repair_sequence_and_residue_to_inventory(self):
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        bk = self.ma_set(eng, fake)
+        fake.fill(bk["orders"][0], 400)                   # only one leg fills
+        for oid in bk["orders"]:
+            fake.book.pop(int(oid), None)                 # the rest expires
+        bk["ts"] -= a_config.PAIR_TTL_S + 20
+        loop(eng, fake)
+        self.assertEqual(bk.get("repair_state"), "complete", "1: complete the short leg")
+        rep = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "repair"]
+        self.assertEqual(len(rep), 1)
+        fake.book.pop(int(rep[0]["id"]))                  # 2: it expired unfilled (REST shows it gone)
+        bk["repair_t"] -= 20
+        eng.ex.recent.clear()                             # a minute later: no longer 'just acked'
+        loop(eng, fake)
+        self.assertEqual(bk.get("repair_state"), "unwind", "3: unwind the long leg's excess at its average")
+        rep2 = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "repair"]
+        self.assertEqual(len(rep2), 1)
+        fake.book.pop(int(rep2[0]["id"]))
+        bk["repair_t"] -= 20
+        eng.ex.recent.clear()
+        loop(eng, fake)
+        self.assertEqual(bk.get("repair_state"), "done", "4: residue to the recycler")
+        leg_ex = eng.ledger.orders[bk["orders"][0]]["ex"]
+        self.assertEqual(eng.ledger.sub(leg_ex, f"pairset:{bk['id']}"), 0)
+        self.assertTrue(any("residue" in e["text"] for e in eng.events))
+
+    def test_set_with_unknown_write_is_adopted_as_a_set(self):
+        fresh_data(layers=dict(position=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)                                   # exits resting first
+        eng.controls.set_layer("pairs", "full", "test")
+        fake.faults = ["timeout_ok"]                      # the set's atomic write lands, the client hears nothing
+        loop(eng, fake)
+        self.assertTrue(eng.ex.frozen, "UNKNOWN multileg: legs frozen")
+        loop(eng, fake)
+        ad = [b for b in eng.ledger.baskets if b.get("adopted")]
+        self.assertEqual(len(ad), 1, "recorded as a set after the audit")
+        self.assertEqual(len(ad[0]["orders"]), 2)
+
+
+class SniperTests(EngineCase):
+    def test_new_market_mapped_is_sniped_unmapped_is_alerted(self):
+        fresh_data(layers=dict(position=dict(state="full"), sniper=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)
+        good = dict(id="9001", title="Will the Democratic Party win the Test Race?", status="open", exchanges=[dict(id="7777")])
+        bad = dict(id="9002", title="Will the Republican Party win the Unknown Race?", status="open", exchanges=[dict(id="7778")])
+        fake.markets += [bad, good]
+        fake.px["7777"], fake.px["7778"] = (0.40, 0.45, 0.42), (0.40, 0.45, 0.42)
+        NEW_MAPS[good["title"]] = dict(race="Test Race", party="D", mid="9001", ex="7777", pm_ids=["p1"])
+        FAIR["7777"] = 0.60
+        try:
+            eng.scan_t = 0
+            loop(eng, fake)
+            loop(eng, fake)
+        finally:
+            NEW_MAPS.clear()
+            FAIR.pop("7777", None)
+        self.assertIn("7777", eng.owner)
+        self.assertNotIn("7778", eng.owner)
+        takes = [o for o in fake.open_orders() if o["ex"] == "7777" and o["id"] in eng.ledger.orders]
+        self.assertTrue(takes and takes[0]["side"] == "yes" and takes[0]["price"] <= 0.60 - 0.04 * bots.s_of(0.6) + 1e-9, takes)
+        notional = sum(o["qty"] * o["price"] for o in takes)
+        self.assertLessEqual(notional, eng.cap("sniper", "per_market") + 1e-6)
+        self.assertGreater(notional, 1000, "a new market gets the whole per-market cap, not the 150 gap-take size")
+        self.assertTrue(any("no confident Polymarket match" in a for a in eng.alerts))
+
+
+class LeadersTests(EngineCase):
+    def test_logger_and_marks_check(self):
+        fresh_data(layers=dict(position=dict(state="full"), leaders=dict(state="full")))
+        fake = new_fake()
+        eng = engine(fake)
+        loop(eng, fake)
+        with open(os.path.join(TMP, "leaders.csv")) as fh:
+            rows = list(csv.DictReader(fh))
+        self.assertEqual(len(rows), 21)
+        self.assertEqual(sum(r["ours"] == "1" for r in rows), 1)
+        self.assertTrue(eng.dash_state()["leaders"]["series"])
+        with open(os.path.join(TMP, "leaders.csv"), "a", newline="") as fh:   # a sample 6 h later
+            w = csv.writer(fh)
+            later = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() + 6 * 3600 + 60))
+            for r in rows:
+                v = float(r["value"]) + (5000 if r["name"] == "leader-1" else 0)
+                n = int(r["trades"]) + (0 if r["name"] == "leader-1" else 3)
+                w.writerow([later, r["rank"], r["name"], r["profile"], v, n, r["volume"], r["roi"], r["ours"]])
+        eng.leaders_marks_check(time.time())
+        with open(a_config.NIGHT_LOG_FILE) as fh:
+            log = fh.read()
+        self.assertIn("leaders marks check", log)
+        self.assertIn("leader-1 +5,000 on 0 trades", log)
+
+
+class PromotionTests(EngineCase):
+    def test_mm_pilot_promoted_after_its_gate(self):
+        fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="pilot")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        eng.pilot_sets = {}                               # the whole fixture is the pilot
+        loop(eng, fake)
+        loop(eng, fake)
+        mm = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"]
+        for o in mm[:22]:
+            fake.fill(o["id"], o["qty"])
+        old = f_engine.PILOT_S
+        f_engine.PILOT_S = 0
+        try:
+            loop(eng, fake)
+        finally:
+            f_engine.PILOT_S = old
+        self.assertEqual(eng.controls.state("mm"), "full", eng.layer_stats({"mm": 0}).get("mm"))
+        with open(a_config.NIGHT_LOG_FILE) as fh:
+            self.assertIn("layer mm: pilot -> full (engine: pilot gate passed", fh.read())
 
 
 class ControlTests(EngineCase):

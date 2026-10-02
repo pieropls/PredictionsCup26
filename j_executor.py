@@ -105,6 +105,7 @@ class Executor:
         self.capacity = 60.0                                # orders SIG processes per minute (EWMA)
         self.paused_until, self.dropped_stale, self.sent_orders, self.halted = 0.0, 0, 0, False
         self.trims = {}                                     # layer -> I2 trims (an order cut or dropped to fit the position)
+        self.cancels_on_wire = 0                            # DELETEs sent, not answered yet: placements wait for them (I6)
         self.trim_log = []                                  # (time, layer, ex, wanted, sent), last 200
         self.threads, self.running = [], False
 
@@ -271,6 +272,7 @@ class Executor:
                 if not self.cancels or self.clock() < self.paused_until or self._tokens() < 1:
                     return n
                 c = self.cancels.pop(0)
+                self.cancels_on_wire += 1
             key = str(uuid.uuid4())
             self.journal.open(key, "cancel", [("executor", "", "cancel", (c["ex"], "", "cancel", 0, 0))])
             try:
@@ -289,6 +291,9 @@ class Executor:
                 self.journal.close(key, "UNKNOWN", note=str(e)[:160])    # snapshot tells; the plan asks again if needed
                 with self.wake:
                     self.cancelling.discard(c["oid"])
+            finally:
+                with self.wake:
+                    self.cancels_on_wire -= 1
             n += 1
         return n
 
@@ -330,7 +335,7 @@ class Executor:
         """Send the next write if the budget allows (cancels go first). Returns how many orders were sent."""
         with self.wake:
             if (not self.queue or self.halted or self.clock() < self.paused_until or self._tokens() <= self.cancel_reserve
-                    or self.cancels):
+                    or self.cancels or self.cancels_on_wire):     # I6: a placement never goes while a cancel is pending
                 return 0
             parts = self._next_write()
             key = str(uuid.uuid4())                         # the write's idempotency key
