@@ -832,6 +832,23 @@ class FloorTests(EngineCase):
         self.assertTrue(any(e["kind"] == "FLOOR" for e in eng.events))
 
 
+class CashGlitchTests(EngineCase):
+    def test_one_high_cash_read_does_not_open_the_gates(self):
+        fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        tight = dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 500)
+        fake.pnl = lambda: tight
+        eng = engine(fake)
+        for _ in range(3):
+            loop(eng, fake)
+        before = eng.committed()
+        self.assertLessEqual(before, 500 + 1e-6)
+        fake.pnl = lambda: dict(tight, totalAccountValue=tight["totalAccountValue"] + 10_000)   # one glitchy read
+        loop(eng, fake)
+        self.assertLessEqual(eng.committed(), 500 + 1e-6, "admission used the minimum of the last 3 cash reads")
+
+
 class BreakerTests(EngineCase):
     def test_correlated_fills_trip_the_breaker(self):
         fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="full")))

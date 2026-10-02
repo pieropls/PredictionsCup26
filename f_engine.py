@@ -466,7 +466,9 @@ class Engine:
             self.pick_focus()
 
         # F2 context: free cash, kappa, SIG reference mids, tranches, the layer controller, bucket usage
-        cash = (self.acct.get("totalAccountValue") or 0) - (self.acct.get("totalHoldingsValue") or 0)
+        raw = (self.acct.get("totalAccountValue") or 0) - (self.acct.get("totalHoldingsValue") or 0)
+        self.cash_hist = (getattr(self, "cash_hist", []) + [raw])[-3:]
+        cash = min(self.cash_hist)                          # one glitchy read can't open the gates (06:12: +10.7k for a loop)
         self.update_mids(now)
         self.track_tranches(now)
         self.controller(now)
@@ -969,7 +971,7 @@ class Engine:
         quotes stay, so it can slip: cancel resting entries, lowest ROC first, until the deficit is covered (admission
         keeps them from coming back until cash recovers)."""
         a = self.acct or {}
-        cash = (a.get("totalAccountValue") or 0) - (a.get("totalHoldingsValue") or 0)
+        cash = min(getattr(self, "cash_hist", None) or [(a.get("totalAccountValue") or 0) - (a.get("totalHoldingsValue") or 0)])
         deficit = self.committed() + CASH_RESERVE - cash
         if deficit <= 0 or not a:
             return 0
