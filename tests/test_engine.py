@@ -1071,7 +1071,7 @@ class LeadersTests(EngineCase):
         loop(eng, fake)
         with open(os.path.join(TMP, "leaders.csv")) as fh:
             rows = list(csv.DictReader(fh))
-        self.assertEqual(len(rows), 21)
+        self.assertEqual(len(rows), 32, "the fake's 30 leaders, #100 and our own row")
         self.assertEqual(sum(r["ours"] == "1" for r in rows), 1)
         self.assertTrue(eng.dash_state()["leaders"]["series"])
         with open(os.path.join(TMP, "leaders.csv"), "a", newline="") as fh:   # a sample 6 h later
