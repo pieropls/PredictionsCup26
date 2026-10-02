@@ -290,7 +290,7 @@ class MarketBot:
                 need = max(TAKE_EDGE * s_of(sf[side]), TAKE_U_MULT * u)
                 px = tick_down(sf[side] - need)
                 if ask_s is not None and ask_s <= px + EPS:
-                    add_entry(side, px, s.get("take_notional", TAKE_NOTIONAL), "take", px - 0.01, px, TAKE_TTL_S, sub="inventory")
+                    add_entry(side, px, s.get("take_notional", TAKE_NOTIONAL), "take", px - 0.01, px, TAKE_TTL_S, sub="sniper")
 
         self.orders = out
         layers = sorted({w["layer"] for w in out})

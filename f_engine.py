@@ -1026,11 +1026,16 @@ class Engine:
             return
         self.leaders_t = now
         try:
-            d = api.leaderboard(20)
+            d = api.leaderboard(50)                         # top 50 (day 2 §5.1), #100, and our own row: 3 reads / 10 min
             rows = [dict(r, ours=0) for r in d["leaderboard"]]
+            total = d.get("total")
+            if total and total >= 100:
+                rows += [dict(r, ours=0) for r in api.leaderboard(1, offset=99)["leaderboard"][:1] if r.get("rank") == 100]
             if d.get("myRank"):
                 me = api.leaderboard(1, offset=int(d["myRank"]) - 1)["leaderboard"]
                 rows += [dict(r, ours=1) for r in me[:1]]
+            if not api.DRY_RUN:
+                write_atomic(os.path.join(DATA, "leaders_meta.json"), json.dumps(dict(total=total, t=stamp(), my_rank=d.get("myRank"))))
         except Exception as err:
             self.event("ERR", f"leaderboard: {str(err)[:120]}")
             return
@@ -1714,11 +1719,11 @@ class Engine:
         if not os.path.exists(path):
             return {}
         with open(path, newline="") as fh:
-            rows = list(csv.DictReader(fh))[-21 * 300:]
+            rows = list(csv.DictReader(fh))[-52 * 300:]
         if not rows:
             return {}
         last_t = rows[-1]["time"]
-        latest = [r for r in rows if r["time"] == last_t]
+        latest = [r for r in rows if r["time"] == last_t and (r["ours"] == "1" or int(r["rank"] or 999) <= 20)]
         names = {r["name"] for r in latest}
         series = {}
         for r in rows:
@@ -1795,7 +1800,12 @@ class Engine:
                              threshold=bk.get("unwind_at")))
         st = self.ex.stats()
         a = self.acct or {}
-        return dict(
+        try:
+            v3 = self.v3_view(stats)
+        except Exception as err:                            # the dashboard must never stop trading
+            self.event("ERR", f"dashboard v3: {err!r}")
+            v3 = {}
+        out = dict(
             t=stamp(), loop=self.n, live=not api.DRY_RUN, stopped=stopped,
             overview=dict(account_fair=None if fair_now is None else round(fair_now), free_cash=None if cash is None else round(cash),
                           change_today=None if fair_now is None or "day_fair" not in night else round(fair_now - night["day_fair"]),
@@ -1813,6 +1823,338 @@ class Engine:
             pairs=dict(sets=sets[-60:], used=round(used), cap=self.cap("pairs", "capital"), locked=round(locked, 2)),
             leaders=self.leaders_payload(), alerts=list(self.alerts) + [f"decide: {d}" for d in c.d.get("decisions") or []],
             events=[dict(e) for e in self.events[-300:][::-1]])
+        th = v3.pop("leader_thresholds", None)
+        out.update(v3)
+        if isinstance(out.get("leaders"), dict):
+            out["leaders"] = dict(out["leaders"], thresholds=th)
+        return out
+
+    # ------------------------------------------------------------------------------------------------ dashboard v3
+    LABELS = {"position": ("Position exits (AK, RI)", "Resting exit ladders on the manual AK and RI positions"),
+              "recycler": ("Recycler", "Sells older inventory into bids above the Polymarket price"),
+              "release": ("Capital release", "Sells holdings where freeing the cash is cheap"),
+              "mm": ("Market maker", "Quotes both sides around the Polymarket price"),
+              "ladder": ("Deep ladders", "Deep bids that catch sweeps, then sell back"),
+              "pairs": ("Pair sets", "Buys every side of a race when the set costs less than it pays"),
+              "sniper": ("Sniper", "Buys big gaps below fair, and new markets"),
+              "fatfinger": ("Fat-finger catcher", "Cheap bids that catch wrong-side panic orders"),
+              "leaders": ("Leaderboard logger", "Records the top accounts every 10 minutes")}
+
+    @staticmethod
+    def sub_layer(sub):
+        """Which layer owns a sub-book (I3 names)."""
+        if sub == "manual":
+            return "position"
+        for pre, layer in (("recycle:", "recycler"), ("tranche:", "ladder"), ("pairset:", "pairs"), ("fatfinger", "fatfinger"),
+                           ("release", "release")):
+            if sub.startswith(pre):
+                return layer
+        return {"mm": "mm", "sniper": "sniper", "inventory": "inventory"}.get(sub, "inventory")
+
+    def sig_mark(self, ex, side):
+        """SIG valuation of one share of `side` (the leaderboard's mark): the position's currentPrice, else the SIG mid."""
+        row = (self.book.get(ex) or {}).get("row") or {}
+        held = str(row.get("option") or "").lower()
+        if row.get("currentPrice") is not None and held in ("yes", "no"):
+            p = float(row["currentPrice"])
+            return p if side == held else 1 - p
+        return self.side_mid(ex, side)
+
+    def pnl_rows(self):
+        path = PNL_FILE
+        if not os.path.exists(path):
+            return []
+        with open(path, newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        out = []
+        for r in rows:
+            try:
+                out.append(dict(t=time.mktime(time.strptime(r["time"], "%Y-%m-%d %H:%M:%S")), date=r["time"][:10],
+                                sig=float(r["account_value"]), fair=float(r["account_pm"] or r["account_value"]),
+                                unreal=float(r["unrealized"] or 0)))
+            except (ValueError, KeyError):
+                continue
+        return out
+
+    def layer_pnl(self, fills):
+        """{layer: realized, pnl at SIG marks, pnl at fair} for a list of fills (pnl = realized + unrealized)."""
+        out = {}
+        for f in fills:
+            l = self.strategy_of(f["bot"], f["layer"])
+            if l == "old engine":
+                continue
+            r = out.setdefault(l, dict(realized=0.0, sig=0.0, fair=0.0, fills=0))
+            sgn = 1 if f["action"] == "buy" else -1 if f["action"] == "sell" else 0
+            m = self.sig_mark(f["ex"], f["side"])
+            fv = self.side_fair(f["ex"], f["side"])
+            r["realized"] += f.get("realized") or 0
+            r["sig"] += sgn * ((m if m is not None else f["price"]) - f["price"]) * f["qty"]
+            r["fair"] += sgn * ((fv if fv is not None else (m if m is not None else f["price"])) - f["price"]) * f["qty"]
+            r["fills"] += 1
+        return out
+
+    def daily_rows(self, money):
+        """Daily P&L since Oct 1 (SIG marks; fair alongside): data/daily_pnl.csv for closed days (rebuilt from pnl.csv when
+        missing) plus today's partial row. realized = P&L - unrealized change (SIG's own split)."""
+        pts = self.pnl_rows()
+        days = sorted({p["date"] for p in pts})
+        rows, prev = [], dict(sig=float(INITIAL_BALANCE), fair=float(INITIAL_BALANCE), unreal=0.0)
+        today = time.strftime("%Y-%m-%d")
+        for d in days:
+            ps = [p for p in pts if p["date"] == d]
+            close = ps[-1]
+            if d == today and money:
+                close = dict(sig=money["account_sig"], fair=money["fair"]["account"] or close["fair"], unreal=money["total"]["unrealized"])
+            pnl = close["sig"] - prev["sig"]
+            du = close["unreal"] - prev["unreal"]
+            fills = [f for f in self.ledger.fills if f["t"][:10] == d and not f["before_engine"]]
+            lp = self.layer_pnl(fills)
+            rows.append(dict(date=d, account_sig=round(close["sig"], 2), account_fair=round(close["fair"], 2),
+                             cash=round(money["cash"], 2) if d == today and money else None,
+                             holdings_sig=round(money["holdings_sig"], 2) if d == today and money else None,
+                             realized=round(pnl - du, 2), unrealized_change=round(du, 2), pnl_sig=round(pnl, 2),
+                             pnl_fair=round(close["fair"] - prev["fair"], 2), partial=d == today,
+                             layers={l: dict(realized=round(v["realized"], 2), unrealized=round(v["sig"] - v["realized"], 2))
+                                     for l, v in lp.items()}))
+            prev = close
+        if not any(r["date"] == today for r in rows) and money:
+            rows.append(dict(date=today, account_sig=money["account_sig"], account_fair=money["fair"]["account"], cash=money["cash"],
+                             holdings_sig=money["holdings_sig"], realized=money["today"]["realized"],
+                             unrealized_change=money["today"]["unrealized_change"], pnl_sig=money["today"]["pnl"], pnl_fair=None,
+                             partial=True, layers={}))
+        return rows
+
+    def write_daily(self, rows):
+        """data/daily_pnl.csv: one line per closed day (written once the day is over)."""
+        path = os.path.join(DATA, "daily_pnl.csv")
+        have = set()
+        if os.path.exists(path):
+            with open(path, newline="") as fh:
+                have = {r["date"] for r in csv.DictReader(fh)}
+        new = [r for r in rows if not r["partial"] and r["date"] not in have]
+        if not new or api.DRY_RUN:
+            return
+        layers = ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger"]
+        head = ["date", "account_sig", "account_fair", "cash", "holdings_sig", "realized", "unrealized_change", "pnl_sig", "pnl_fair"]
+        head += [f"{l}_{k}" for l in layers for k in ("realized", "unrealized")]
+        with open(path, "a", newline="") as fh:
+            w = csv.writer(fh)
+            if not have:
+                w.writerow(head)
+            for r in new:
+                w.writerow([r.get(h) for h in head[:9]] + [((r["layers"].get(l) or {}).get(k)) for l in layers for k in ("realized", "unrealized")])
+
+    def money_view(self):
+        a = self.acct or {}
+        acct = a.get("totalAccountValue")
+        if acct is None:
+            return None
+        hold = a.get("totalHoldingsValue") or 0.0
+        cash = acct - hold
+        rows = [b["row"] for b in self.book.values()]
+        unreal = sum(float(r.get("unrealizedPnl") or 0) for r in rows)
+        cost = sum(float(r.get("costBasis") or 0) for r in rows)
+        mv = sum(float(r.get("marketValue") or 0) for r in rows)
+        realized = cash + cost - INITIAL_BALANCE
+        diff = (realized + unreal) - (acct - INITIAL_BALANCE)
+        fair_now, _ = self.account_fair()
+        pts = self.pnl_rows()
+        today = time.strftime("%Y-%m-%d")
+        before = [p for p in pts if p["date"] < today]
+        start = before[-1] if before else (pts[0] if pts else None)
+        lb = self.leader_meta()
+        ours = lb.get("ours") or {}
+        mine = ours.get("value")
+        to = {k: (None if lb.get("thresholds", {}).get(k) is None or mine is None else round(lb["thresholds"][k] - mine, 2))
+              for k in ("10", "100")}
+        return dict(account_sig=round(acct, 2), start=INITIAL_BALANCE, vs_start=round(acct - INITIAL_BALANCE, 2),
+                    rank=ours.get("rank"), n_traders=lb.get("total"), to_rank=to,
+                    today=dict(pnl=None if not start else round(acct - start["sig"], 2),
+                               unrealized_change=None if not start else round(unreal - start["unreal"], 2),
+                               realized=None if not start else round((acct - start["sig"]) - (unreal - start["unreal"]), 2),
+                               since=f"{today} 00:00:00"),
+                    total=dict(realized=round(realized, 2), unrealized=round(unreal, 2), sum=round(realized + unreal, 2),
+                               account_minus_start=round(acct - INITIAL_BALANCE, 2), diff=round(diff, 2), ok=abs(diff) <= 50,
+                               positions_value=round(mv, 2)),
+                    fair=dict(account=round(fair_now, 2), vs_sig=round(fair_now - acct, 2)),
+                    cash=round(cash, 2), holdings_sig=round(hold, 2))
+
+    def leader_meta(self):
+        """Latest leaderboard sample: our row, #10/#25/#50/#100 P&L, number of traders (data/leaders.csv + meta)."""
+        meta = read_json(os.path.join(DATA, "leaders_meta.json"), {})
+        path = os.path.join(DATA, "leaders.csv")
+        if not os.path.exists(path):
+            return meta
+        with open(path, newline="") as fh:
+            rows = list(csv.DictReader(fh))[-80:]
+        if not rows:
+            return meta
+        last = [r for r in rows if r["time"] == rows[-1]["time"]]
+        by_rank = {int(r["rank"]): float(r["value"]) for r in last if r["rank"] and r["ours"] != "1"}
+        ours = next((r for r in last if r["ours"] == "1"), None)
+        th = {k: by_rank.get(int(k)) for k in ("10", "25", "50", "100")}
+        th.update({k: v for k, v in (meta.get("thresholds") or {}).items() if th.get(k) is None})
+        return dict(total=meta.get("total"), thresholds=th,
+                    ours=None if not ours else dict(rank=int(ours["rank"]), value=float(ours["value"])))
+
+    def capital_view(self, money):
+        if not money:
+            return None
+        buckets = {}
+        for ex, b in self.book.items():
+            row, q = b["row"], b["pos"]
+            if not q:
+                continue
+            side = "yes" if q > 0 else "no"
+            mark = self.sig_mark(ex, side) or 0.0
+            fv = self.side_fair(ex, side)
+            subs = self.ledger.subbooks.get(ex, {}) or {"inventory": q}
+            tot = sum(abs(v) for v in subs.values() if v * q > 0) or abs(q)
+            for sub, v in subs.items():
+                if v * q <= 0:
+                    continue
+                share = abs(q) * abs(v) / tot
+                key = "manual" if self.sub_layer(sub) == "position" else self.sub_layer(sub)
+                if key == "recycler":
+                    key = "inventory"
+                bk = buckets.setdefault(key, [0.0, 0.0])
+                bk[0] += share * mark
+                bk[1] += share * (fv if fv is not None else mark)
+        labels = {"manual": "AK / RI manual positions", "mm": "Market-maker inventory", "ladder": "Ladder tranches", "pairs": "Pair sets",
+                  "sniper": "Sniper / takes", "fatfinger": "Fat-finger catches", "release": "Being released",
+                  "inventory": "Older inventory (recycler)"}
+        order = ["manual", "mm", "ladder", "pairs", "sniper", "fatfinger", "release", "inventory"]
+        out = [dict(key=k, label=labels[k], sig=round(buckets.get(k, [0, 0])[0], 2), fair=round(buckets.get(k, [0, 0])[1], 2)) for k in order]
+        out.append(dict(key="cash", label="Cash", sig=money["cash"], fair=money["cash"]))
+        committed = self.committed()
+        reserve_used = getattr(self, "reserve_used", 0.0)
+        tgt, tdate = self.release_target()
+        rel = getattr(self, "released_today", dict(sig=0.0, avg_cost=None))
+        return dict(cash=money["cash"], holdings_sig=money["holdings_sig"], holdings_fair=round(money["fair"]["account"] - money["cash"], 2),
+                    floor=CASH_RESERVE, reserve=OPPORTUNITY_RESERVE, reserve_used=round(reserve_used, 2), committed=round(committed, 2),
+                    free_to_trade=round(money["cash"] - CASH_RESERVE - OPPORTUNITY_RESERVE + reserve_used - committed, 2),
+                    target=tgt, target_date=tdate, released_today=rel, buckets=out)
+
+    def release_target(self):
+        """Free-cash target (excluding the floor) by date (day 2 §3.3): 20k by Oct 5, 30k by Oct 20, 40k by Nov 3."""
+        d = time.strftime("%m-%d")
+        for until, tgt, label in (("10-05", 20_000, "2026-10-05"), ("10-20", 30_000, "2026-10-20"), ("11-03", 40_000, "2026-11-03")):
+            if d <= until:
+                return tgt, label
+        return 40_000, "2026-11-03"
+
+    def cost_to_free(self, ex, side):
+        bid = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
+        fv = self.side_fair(ex, side)
+        if bid is None or fv is None or bid <= 0:
+            return None
+        return (fv - bid) / bid
+
+    def holdings_view(self):
+        out = []
+        for ex, b in self.book.items():
+            row, q = b["row"], b["pos"]
+            if not q:
+                continue
+            side = "yes" if q > 0 else "no"
+            shares = abs(q)
+            mark = self.sig_mark(ex, side)
+            fv = self.side_fair(ex, side)
+            bid = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
+            cost = float(row.get("costBasis") or 0) or shares * float(row.get("avgCost") or 0)
+            subs = self.ledger.subbooks.get(ex, {}) or {}
+            owner = max(subs.items(), key=lambda kv: abs(kv[1]) if kv[1] * q > 0 else -1)[0] if subs else "inventory"
+            ctf = self.cost_to_free(ex, side)
+            out.append(dict(ex=ex, market=self.name(ex), side=side, shares=shares, avg_cost=round(cost / shares, 4) if shares else None,
+                            sig_mark=None if mark is None else round(mark, 4), sig_bid=bid, fair=None if fv is None else round(fv, 4),
+                            value_sig=round(float(row.get("marketValue") or 0), 2),
+                            value_fair=None if fv is None else round(shares * fv, 2),
+                            unreal_sig=round(float(row.get("unrealizedPnl") or 0), 2),
+                            unreal_fair=None if fv is None else round(shares * fv - cost, 2),
+                            cost_to_free=None if ctf is None else round(ctf, 4), layer=self.sub_layer(owner),
+                            release_candidate=bool(self.release_ok(ex, side, owner, ctf))))
+        return sorted(out, key=lambda r: -r["value_sig"])
+
+    def release_ok(self, ex, side, owner, ctf):
+        """Would the release layer sell this holding now? (§3.3; the layer itself decides; this is the dashboard badge)."""
+        return ctf is not None and 0 <= ctf <= self.release_max_cost() and self.sub_layer(owner) not in ("pairs", "position", "fatfinger")
+
+    def release_max_cost(self):
+        d = time.strftime("%m-%d")
+        return 0.06 if d >= "10-30" else 0.04 if d >= "10-20" else 0.03
+
+    def fill_sentence(self, f):
+        l = self.strategy_of(f["bot"], f["layer"])
+        label = self.LABELS.get(l, (l,))[0] if l in self.LABELS else "Old engine" if l == "old engine" else l
+        side, px, fair = f["side"], f["price"], f.get("fair")
+        verb = "bought" if f["action"] == "buy" else "sold" if f["action"] == "sell" else "traded"
+        if f["action"] == "buy" and f["layer"] in self.REDUCING:      # a complement buy closes what we held: say "sold"
+            side, px, fair, verb = ("no" if side == "yes" else "yes"), 1 - px, None if fair is None else 1 - fair, "sold"
+        edge = None if fair is None else ((fair - px) if verb == "bought" else (px - fair)) * 100
+        tail = "" if fair is None else f" (fair {fair:.3f}, {edge:+.1f}c)"
+        return f"{label} {verb} {f['qty']:,.0f} {side.upper()} on {self.name(f['ex'])} at {px:.3f}{tail}"
+
+    def strategies_view(self, stats):
+        today = time.strftime("%Y-%m-%d")
+        tf = [f for f in self.ledger.fills if f["t"][:10] == today and not f["before_engine"]]
+        night = self.controls.d.get("night", {})
+        start = night.get("start_t") or "2026-10-01 00:00:00"
+        allf = [f for f in self.ledger.fills if f["t"] >= start and not f["before_engine"]]
+        pt, pa = self.layer_pnl(tf), self.layer_pnl(allf)
+        cap = {b["key"]: b["sig"] for b in (getattr(self, "last_capital", None) or {}).get("buckets", [])}
+        last = {}
+        for f in self.ledger.fills[-600:]:
+            last[self.strategy_of(f["bot"], f["layer"])] = f"{f['t'][11:16]} " + self.fill_sentence(f).split(" ", 1)[1] \
+                if " " in self.fill_sentence(f) else ""
+        out = []
+        for l in ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "leaders"]:
+            label, what = self.LABELS[l]
+            v = self.controls.layer(l)
+            t_, a_ = pt.get(l, {}), pa.get(l, {})
+            out.append(dict(key=l, label=label, what=what, state=self.controls.state(l), killed=v.get("killed"),
+                            today=dict(realized=round(t_.get("realized", 0), 2), unrealized_sig=round(t_.get("sig", 0) - t_.get("realized", 0), 2),
+                                       unrealized_fair=round(t_.get("fair", 0) - t_.get("realized", 0), 2)),
+                            total=dict(realized=round(a_.get("realized", 0), 2), unrealized_sig=round(a_.get("sig", 0) - a_.get("realized", 0), 2),
+                                       unrealized_fair=round(a_.get("fair", 0) - a_.get("realized", 0), 2)),
+                            fills_today=t_.get("fills", 0), capital_used=round(cap.get("manual" if l == "position" else l, 0.0), 2),
+                            resting=stats.get(l, {}).get("resting", 0), last_action=last.get(l)))
+        return out
+
+    def activity_view(self):
+        out = []
+        for i, f in enumerate(self.ledger.fills[-300:]):
+            if f["before_engine"]:
+                continue
+            out.append(dict(id=len(self.ledger.fills) - 300 + i if len(self.ledger.fills) > 300 else i, t=f["t"],
+                            layer=self.strategy_of(f["bot"], f["layer"]), text=self.fill_sentence(f)))
+        return out[::-1]
+
+    def series_view(self):
+        pts = self.pnl_rows()[-1500:]
+        rank_t, rank = [], []
+        path = os.path.join(DATA, "leaders.csv")
+        if os.path.exists(path):
+            with open(path, newline="") as fh:
+                for r in csv.DictReader(fh):
+                    if r["ours"] == "1" and r["rank"]:
+                        rank_t.append(time.mktime(time.strptime(r["time"], "%Y-%m-%d %H:%M:%S")))
+                        rank.append(int(r["rank"]))
+        return dict(t=[p["t"] for p in pts], account_sig=[p["sig"] for p in pts], account_fair=[p["fair"] for p in pts],
+                    rank_t=rank_t[-300:], rank=rank[-300:])
+
+    def v3_view(self, stats):
+        """Dashboard v3 keys (docs/dashboard_v3_contract.md)."""
+        money = self.money_view()
+        capital = self.capital_view(money)
+        self.last_capital = capital
+        daily = self.daily_rows(money)
+        try:
+            self.write_daily(daily)
+        except OSError as e:
+            self.event("ERR", f"daily_pnl.csv: {e!r}")
+        lm = self.leader_meta()
+        return dict(money=money, daily=daily, series=self.series_view(), capital=capital, strategies=self.strategies_view(stats),
+                    holdings=self.holdings_view(), activity=self.activity_view(), leader_thresholds=lm.get("thresholds"))
 
     def layer_note(self, layer):
         return {"position": "AK + RI exit ladders (always on)", "recycler": "sells inventory into bids >= fair + 0.5c",

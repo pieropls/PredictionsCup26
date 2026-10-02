@@ -1130,6 +1130,42 @@ class RealtimeTests(EngineCase):
         self.assertIn("latency", eng.dash_state()["health"])
 
 
+class DashV3PayloadTests(EngineCase):
+    def test_payload_follows_the_v3_contract(self):
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        eng.leaders_t = 0
+        for _ in range(3):
+            loop(eng, fake)
+        mm = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"]
+        fake.fill(mm[0]["id"], mm[0]["qty"])
+        loop(eng, fake)
+        s = eng.dash_state()
+        for k in ("money", "daily", "series", "capital", "strategies", "holdings", "activity"):
+            self.assertIn(k, s)
+        m = s["money"]
+        for k in ("account_sig", "start", "vs_start", "rank", "n_traders", "to_rank", "today", "total", "fair"):
+            self.assertIn(k, m)
+        self.assertEqual(m["rank"], 585)
+        self.assertEqual(m["n_traders"], 700)
+        t = m["total"]
+        self.assertAlmostEqual(t["sum"], t["realized"] + t["unrealized"], places=2)
+        self.assertEqual(t["ok"], abs(t["diff"]) <= 50)
+        self.assertEqual(s["daily"][-1]["partial"], True)
+        cap = s["capital"]
+        self.assertEqual([b["key"] for b in cap["buckets"]][-1], "cash")
+        self.assertTrue(all(b["sig"] >= 0 for b in cap["buckets"]))
+        self.assertEqual([r["key"] for r in s["strategies"]],
+                         ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "leaders"])
+        self.assertTrue(all(h["side"] in ("yes", "no") and h["shares"] > 0 for h in s["holdings"]))
+        mm_row = next(r for r in s["strategies"] if r["key"] == "mm")
+        self.assertEqual(mm_row["fills_today"], 1)
+        self.assertTrue(s["activity"] and s["activity"][0]["text"].startswith("Market maker bought"), s["activity"][:1])
+        self.assertIn("thresholds", s["leaders"])
+        import g_dashboard as dashboard
+        self.assertLess(len(dashboard.dumps(s)), 300_000)
+
+
 class ControlTests(EngineCase):
     def test_position_only_by_flags_places_only_the_exits(self):
         fresh_data(layers=dict(position=dict(state="full")))
