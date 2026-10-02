@@ -318,6 +318,9 @@ class RestartTests(EngineCase):
         save), with prices moving while it is down: zero duplicates, I2 holds, and every order sent after a restart was
         wanted by a plan made after that restart."""
         fake = new_fake(writes_per_min=10_000)
+        for k, v in (("ROC_HOLD_MIN", a_config.ROC_MIN), ("OPPORTUNITY_RESERVE", 10_000)):   # restart safety needs many MM
+            self.addCleanup(setattr, f_engine, k, getattr(f_engine, k))                     # requotes, not the afternoon's
+            setattr(f_engine, k, v)                                                         # 10% hold rule / 25k reserve
         eng = engine(fake)
         loop(eng, fake)
         loop(eng, fake)
@@ -918,11 +921,14 @@ class ReleaseTests(EngineCase):
         side, bid = "yes", fake.px[ex][0]
         cost = eng.cost_to_free(ex, side)
         self.assertTrue(0 <= cost <= eng.release_max_cost(), cost)
-        rel = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "release"]
+        allrel = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "release"]
+        rel = [o for o in allrel if o["ex"] == ex]
         self.assertEqual([(o["ex"], o["side"], o["price"]) for o in rel], [(ex, "no", round(1 - bid, 3))], "sell YES at the bid")
         self.assertLessEqual(sum(o["qty"] for o in rel), 1000, "<= top-of-book depth (fake: 1,000)")
-        self.assertFalse([o for o in fake.open_orders() if o["ex"] in (AK, RI, MA) and o["id"] in eng.ledger.orders
-                          and eng.ledger.orders[o["id"]]["layer"] == "release"], "manual and > 3% holdings are kept")
+        self.assertFalse([o for o in allrel if o["ex"] in (AK, RI)], "manual holdings are kept")
+        for o in allrel:                                  # anything else released costs <= the max (5% now)
+            held = "yes" if o["side"] == "no" else "no"
+            self.assertLessEqual(eng.cost_to_free(o["ex"], held), eng.release_max_cost() + 1e-9, o)
         rec = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders
                and eng.ledger.orders[o["id"]]["layer"] == "recycle"]
         self.assertLessEqual(sum(o["qty"] for o in rec) + sum(o["qty"] for o in rel), 2000, "the recycler steps aside (I2)")
@@ -1328,6 +1334,55 @@ class FatFingerTests(EngineCase):
         fill["price"] = 0.05                                             # a real fat-finger catch: promote
         eng.controller(now)
         self.assertEqual(c.state("fatfinger"), "full")
+
+    def test_full_cap_covers_95_percent(self):
+        fake, eng = self.rig(cash_above_floor=40_000)
+        eng.controls.layer("fatfinger")["state"] = "full"
+        self.settle(eng, fake, 25)
+        cov = eng.dash_state()["coverage"]
+        self.assertGreaterEqual(cov["pct"], 95.0, cov["uncovered"][:5])
+
+    def test_cash_short_balance_below_zero_twice(self):
+        fake, eng = self.rig()
+        self.settle(eng, fake, 3)
+        self.assertTrue(self.fat_orders(eng, fake))
+        exits = [o for o in fake.open_orders() if o["ex"] == AK and o["action"] == "sell"]
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] - 500)
+        loop(eng, fake)
+        self.assertIsNone(eng.cash_short, "one negative read is not enough")
+        loop(eng, fake)
+        self.assertIsNotNone(eng.cash_short)
+        self.assertTrue(eng.controls.paused, "new risk paused")
+        for _ in range(3):
+            loop(eng, fake)
+        self.assertEqual(self.fat_orders(eng, fake), [], "entry orders cancelled")
+        self.assertEqual(sorted((o["price"], o["qty"]) for o in fake.open_orders() if o["ex"] == AK and o["action"] == "sell"),
+                         sorted((o["price"], o["qty"]) for o in exits), "position exits untouched")
+        self.assertTrue(any(e["kind"] == "CASHSHORT" for e in eng.events))
+        self.assertTrue(os.path.exists(os.path.join(TMP, "cash_short.jsonl")))
+
+    def test_cash_short_on_a_funds_reject(self):
+        fake, eng = self.rig()
+        self.settle(eng, fake, 2)
+        eng.ex.cash_reject('{"error":{"code":"INSUFFICIENT_BALANCE","message":"Insufficient buying power"}}')
+        eng.ex.cash_reject('{"error":{"code":"PRICE_INVALID"}}')     # other rejects don't count
+        loop(eng, fake)
+        self.assertIsNotNone(eng.cash_short)
+        self.assertEqual(len(eng.cash_short["why"]), 1)
+
+    def test_cash_short_on_partial_fill_whose_rest_vanished(self):
+        fake, eng = self.rig()
+        self.settle(eng, fake, 3)
+        o = self.fat_orders(eng, fake)[0]
+        eng.ledger.orders[o["id"]]["ts"] -= 600           # resting for 10 min
+        fake.fill(o["id"], 100)                           # part of it fills ...
+        with fake.lock:
+            fake.book.pop(next(k for k in fake.book if str(k) == o["id"]))   # ... and SIG drops the rest (not our cancel)
+        for _ in range(3):
+            loop(eng, fake)
+        self.assertIsNotNone(eng.cash_short, [e["text"] for e in eng.events if e["kind"] == "ERR"][-3:])
+        self.assertIn("vanished", eng.cash_short["why"][0])
 
     def test_write_budget_is_about_zero_after_placement(self):
         fake, eng = self.rig()

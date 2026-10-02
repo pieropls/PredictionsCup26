@@ -81,6 +81,8 @@ PM_EXTRA = {
 # A5b. strategy layers v2 (night plan §4-5; plan_review A2-A6, A9) -----------------------------------------------------
 ROC_MIN, ROC_REF = 0.04, 0.08   # D4: entries need edge/price >= 4%; size scales with roc / 8%, clipped 0.5x..2x
 ROC_MIN_TIGHT = 0.06            # day 2 §3.4: while free cash is below its target; also MM on a held side with fair >= 0.95
+ROC_HOLD_MIN = 0.10             # afternoon §2.3: hold-to-settlement entries (classic MM v2) need ROC >= 10%
+SETTLE_DATE = "2026-11-04"      # release order: expected return per day to settlement (all markets settle after Nov 3)
 RECYCLE_BID_EDGE = 0.005        # recycler: sell into the SIG bid while it is >= fair_side + this
 RECYCLE_REST_EDGE = 0.01        # ... else rest an exit at max(fair_side + this, best ask - 1 tick)
 RECYCLE_TAKE_TTL_S, RECYCLE_REST_TTL_S = 300, 1800
@@ -114,7 +116,8 @@ LAYER_CAPS = {
     "ladder": {"filled": (3_000, 15_000, 25_000), "resting": (10_000, 60_000, 80_000)},
     "pairs": {"capital": (3_000, 10_000, 15_000)},
     "sniper": {"per_market": (1_000, 3_000, 3_000), "per_day": (10_000, 10_000, 10_000)},
-    "fatfinger": {"resting": (8_000, 40_000, 60_000), "filled": (30_000, 30_000, 40_000)},   # resting = policy (no cash lock)
+    "fatfinger": {"resting": (8_000, 300_000, 400_000), "filled": (30_000, 30_000, 40_000)},  # resting = policy (no cash lock);
+                                                                                               # afternoon D-B: 40k -> 300k
 }
 # fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
 FAT_LEVELS = [0.12, 0.08, 0.05]
@@ -123,8 +126,8 @@ FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP = 0.35, 0.60, 0.25   # eligible sid
 FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S = 24 * 3600, 2 * 3600, 600
 FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S = 0.15, 600, 1800
 FAT_MOVE = 0.10                 # re-place only when fair moves > 10c (or crosses FAT_MIN_FAIR)
-FAT_CAPACITY_SHARE = 0.30
-FAT_REFRESH_MAX_H = 60          # pilot gate: placements per hour after the initial placement (≈ 0: TTL, re-arm, queue steps)       # initial placement uses <= 30% of measured SIG capacity
+FAT_CAPACITY_SHARE = 0.30       # initial placement uses <= 30% of measured SIG capacity
+FAT_REFRESH_MAX_H = 60          # pilot gate: placements per hour after the initial placement (≈ 0: TTL, re-arm, queue steps)
 INTEL_READS, INTEL_REVISIT_S = 2, 1800    # day 2 §5 tape collector: markets a loop (spare reads only); revisit every 30 min
 INTEL_DAILY_HOUR = 7                      # docs/daily + docs/leaders + tier A refresh at 07:00 PT
 HEADLINE_RACES = ["U.S. Senate", "U.S. House", "Rhode Island Senate", "Oklahoma Senate", "Massachusetts Governor",
@@ -132,7 +135,7 @@ HEADLINE_RACES = ["U.S. Senate", "U.S. House", "Rhode Island Senate", "Oklahoma 
 FAT_BOOK_READS = 3              # queue reads (order books) per loop
 KAPPA_FROM_OCT30 = 0.03         # D3: capital discount from Oct 30 (election-night cash)
 LOSS_STOP = 2_000               # D5: bot-owned P&L at fair, rolling 24 h
-OPPORTUNITY_RESERVE = 10_000    # day 2 §3.2: on top of the floor; only fat-finger fills, new-market snipes, >= 8c takes use it
+OPPORTUNITY_RESERVE = 25_000    # afternoon §2 (was 10k): on top of the floor; dump + fat-finger fills, snipes, >= 8c takes
 AK_RELEASE = 0.50               # D1 + D1b (day 2 §1): share of the original AK NO position released to the recycler
 RELEASE_EVERY_S, RELEASE_MARKETS = 30, 3   # release layer (day 2 §3.3): plan every 30 s, <= 3 markets (= order-book reads)
 RELEASE_PILOT_TARGET = 10_000   # pilot: free cash above the floor; full follows the schedule (20k Oct 5, 30k Oct 20, 40k Nov 3)

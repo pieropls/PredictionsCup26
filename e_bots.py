@@ -227,6 +227,8 @@ class MarketBot:
             held = s.get("held", sum(subs.values()))
             if layer == "mm" and sf[side] >= 0.95 and ((side == "yes" and held > 0) or (side == "no" and held < 0)):
                 rmin = max(rmin, ROC_MIN_TIGHT)         # §3.4: no more cheap-return favourites we already hold
+            if layer == "mm":
+                rmin = max(rmin, s.get("roc_hold", 0.0))    # afternoon §2.3: a classic MM entry is held to settlement
             if r < rmin - EPS:
                 return
             n = min(roc_size(notional, r), room[side])

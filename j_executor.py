@@ -20,6 +20,7 @@ import heapq
 import itertools
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -99,6 +100,7 @@ class Executor:
         self.in_flight = {}                                 # key -> job being sent
         self.recent = {}                                    # order id -> (order dict, acked at): acked, not yet in a snapshot
         self.pos, self.book, self.book_t = {}, [], 0.0      # latest REST snapshot from the engine
+        self.on_cash_reject = None                          # afternoon D-B: a write refused for funds -> the engine's CASH SHORT
         self.cancelling = set()                             # ids with a DELETE sent or queued
         self.gone = set()                                   # ids SIG confirmed cancelled since the last snapshot
         self.frozen = {ex: e["key"] for e in journal.unknown() for it in e.get("items", []) for ex in [it["order"][0]]}
@@ -381,6 +383,7 @@ class Executor:
             with self.wake:
                 del self.in_flight[key]
             self.log(f"  ERR placing {len(items)} orders: {str(e)[:160]}")
+            self.cash_reject(str(e))
             return 0
         dt = max(self.clock() - t0, 1e-3)
         placed, results = [], []
@@ -395,6 +398,7 @@ class Executor:
                                              layer=layer), self.clock())
                 elif not ok:
                     self.log(f"  REJECT {b}: {o[2]} {o[1]} {o[4]:,} @ {o[3]:.3f} -> {str(data)[:140]}")
+                    self.cash_reject(str(data))
                 results.append((b, o, ok, data))
             del self.in_flight[key]
         self.journal.close(key, "ACKED", ids=[i for i in placed if i], placed=placed)
@@ -408,6 +412,15 @@ class Executor:
                 except Exception as e:
                     self.log(f"  ERR on_done: {e!r}")
         return len(orders)
+
+    FUNDS = re.compile(r"insufficient|not enough|balance|buying power|funds", re.I)
+
+    def cash_reject(self, text):
+        if self.on_cash_reject and self.FUNDS.search(text or ""):
+            try:
+                self.on_cash_reject(text)
+            except Exception:
+                pass
 
     def recover_acked(self, within_s=3600):
         """After a restart: orders SIG acked after the ledger's last save are in the journal (ACKED, with their ids) but

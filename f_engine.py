@@ -45,7 +45,7 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       OPPORTUNITY_RESERVE, ROC_MIN, ROC_MIN_TIGHT, RELEASE_EVERY_S, RELEASE_MARKETS, RELEASE_PILOT_TARGET,
                       FAT_LEVELS, FAT_SIZES, FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP, FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S,
                       FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S, FAT_MOVE, FAT_CAPACITY_SHARE, FAT_BOOK_READS, QTY_TOL,
-                      FAT_REFRESH_MAX_H, FILL_POLL_S,
+                      FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN,
                       INTEL_READS, INTEL_REVISIT_S, INTEL_DAILY_HOUR, HEADLINE_RACES)
 from d_ledger import Ledger, stamp, write_atomic
 
@@ -306,6 +306,8 @@ class Engine:
         self.journal = jx.Journal(os.path.join(DATA, "journal" if not api.DRY_RUN else "journal_dry"))
         self.ex = jx.Executor(api, self.ledger, self.journal, batch_size=BATCH_SIZE, min_qty=MIN_QTY,
                               log=lambda s: self.event(*s.strip().split(" ", 1)) if s.strip() else None)
+        self.cash_msgs, self.neg_cash_n, self.through, self.cash_short = [], 0, {}, None   # afternoon D-B
+        self.ex.on_cash_reject = self.cash_msgs.append
         self.manual_ex = {b.ex for b in self.bots if b.kind == "position"} | manual
         self.last_state = None
         self.fair, self.fair_t, self.events, self.acct, self.book, self.px = {}, 0.0, [], {}, {}, {}
@@ -460,6 +462,7 @@ class Engine:
             pos[ex], rows[ex] = pos.get(ex, 0) + api.net(p), p
         self.open, self.px = got["open"], got["px"]
         prev = {ex: (b["pos"], b["row"]) for ex, b in self.book.items()}
+        catch_open = {oid for oid, o in self.ledger.orders.items() if o["status"] == "open" and o.get("layer") in self.CATCHERS}
         fill_exs, new_orders = set(), set()
         for f in self.ledger.sync(self.open, got.get("fills", []), self.bot_of, self.side_fair, self.side_mid, as_of=now,
                                   held=lambda ex: prev.get(ex)):
@@ -498,6 +501,10 @@ class Engine:
 
         # F2 context: free cash, kappa, SIG reference mids, tranches, the layer controller, bucket usage
         raw = (self.acct.get("totalAccountValue") or 0) - (self.acct.get("totalHoldingsValue") or 0)
+        try:
+            self.cash_short_check(raw, catch_open, now)
+        except Exception as err:
+            self.event("ERR", f"cash-short check: {err!r}")
         self.cash_hist = (getattr(self, "cash_hist", []) + [raw])[-3:]
         cash = min(self.cash_hist)                          # one glitchy read can't open the gates (06:12: +10.7k for a loop)
         self.update_mids(now)
@@ -900,7 +907,7 @@ class Engine:
         free = cash - CASH_RESERVE                          # §3.4: below the free-cash target, entries need ROC >= 6%
         rel = self.release_now.get(b.ex)
         return dict(fair=f, u=self.ft.u.get(b.ex), bid=bid, ask=ask, ref=self.ref(b.ex), kappa=kappa,
-                    roc_min=ROC_MIN_TIGHT if free < self.release_target()[0] else ROC_MIN, held=q, release=rel,
+                    roc_min=ROC_MIN_TIGHT if free < self.release_target()[0] else ROC_MIN, roc_hold=ROC_HOLD_MIN, held=q, release=rel,
                     fatfinger=self.fat_now.get(b.ex) or [],
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
@@ -1377,6 +1384,75 @@ class Engine:
                 self.event("BREAKER", msg)
                 self.night.line(msg)
 
+    CATCHERS = ("fatfinger", "dump")                       # resting catch levels whose fills are paid from the reserve
+
+    def cash_short_check(self, raw, catch_open, now):
+        """Afternoon D-B: we don't know what SIG does when a fill exceeds cash (reject, partial fill, negative balance).
+        Detected three ways: the balance below 0 on two reads in a row; a write refused for funds (executor hook); a
+        catcher order partly filled whose remainder vanished before its TTL (we didn't cancel it), or that still rests
+        partly filled while the side's best bid sits below it (two loops in a row: the price traded through it)."""
+        why = []
+        self.neg_cash_n = self.neg_cash_n + 1 if raw < 0 else 0
+        if self.neg_cash_n >= 2:
+            why.append(f"balance {raw:,.0f} below 0 on {self.neg_cash_n} reads")
+        msgs, self.cash_msgs[:] = list(self.cash_msgs), []
+        why += [f"write refused: {m[:140]}" for m in msgs]
+        for oid in catch_open:
+            o = self.ledger.orders.get(oid) or {}
+            age = now - (o.get("ts") or now)
+            if o.get("status") == "done" and 0 < (o.get("filled") or 0) < o["qty"] - MIN_QTY and age < FAT_TTL_S - 300:
+                why.append(f"{self.name(o['ex'])} {o['side'].upper()} {o['layer']} bid at {o['price']:.3f}: filled "
+                           f"{o['filled']:,.0f} of {o['qty']:,.0f}, the rest vanished after {age / 60:.0f} min (not cancelled by us)")
+        seen = {}
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"])
+            if not rec or rec.get("layer") not in self.CATCHERS or o["action"] != "buy" or (rec.get("filled") or 0) <= 0:
+                continue
+            bid = bots.side_book(*self.px.get(o["ex"], (None, None, None))[:2], o["side"])[0]
+            if bid is not None and bid < o["price"] - TICK - 1e-9:
+                k = (o["id"], round(o["qty"]))
+                seen[k] = self.through.get(k, 0) + 1
+                if seen[k] >= 2:
+                    why.append(f"{self.name(o['ex'])} {o['side'].upper()} bid at {o['price']:.3f} partly filled, {o['qty']:,.0f} "
+                               f"still resting, best bid {bid:.3f}: the price traded through it")
+        self.through = seen
+        if why:
+            self.cash_short_trip(why, raw, now)
+
+    def cash_short_trip(self, why, raw, now):
+        """At once: cancel every engine entry order (cancel lane), drop queued entries, pause new risk (exits and the
+        release layer keep running: release refills cash), log CASH SHORT; the first time, record it in RECAP."""
+        first = self.cash_short is None
+        self.cash_short = dict(t=now, why=why, cash=raw)
+        dropped = self.ex.drop_queued(lambda b, s, l, o: o[2] == "buy" and not jx.reduces(o[1], "buy", self.book.get(o[0], {}).get("pos", 0)))
+        n = 0
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"])
+            if rec and o["action"] == "buy" and rec["bot"] not in self.position_names and o["id"] not in self.ex.cancelling \
+                    and not jx.reduces(o["side"], "buy", self.book.get(o["ex"], {}).get("pos", 0)):
+                n += bool(self.ex.cancel(o, reason="CASH SHORT", front=True))
+        if not self.controls.paused:
+            self.controls.set_paused(True, f"CASH SHORT: {why[0][:120]}")
+            self.controls.decide(f"CASH SHORT at {time.strftime('%H:%M')} ({why[0][:80]}): resume new risk once cash is back?")
+        msg = f"CASH SHORT: {'; '.join(why)[:300]} -> {n} entry orders cancelled, {dropped} queued dropped, new risk paused"
+        self.event("CASHSHORT", msg)
+        self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+        self.night.line(msg)
+        rec = dict(t=stamp(), why=why, cash=raw, acct={k: (self.acct or {}).get(k) for k in ("totalAccountValue", "totalHoldingsValue")},
+                   cancelled=n, dropped=dropped)
+        with open(os.path.join(DATA, "cash_short.jsonl"), "a") as fh:
+            fh.write(json.dumps(rec, default=str) + "\n")
+        night = self.controls.d.setdefault("night", {})
+        if first and not night.get("cash_short_recap"):
+            night["cash_short_recap"] = stamp()
+            self.controls.save()
+            try:
+                with open(os.path.join(os.path.dirname(DATA), "docs", "RECAP.md"), "a") as fh:
+                    fh.write(f"\n- **{stamp()[:16]} PT, first CASH SHORT (afternoon D-B), engine-recorded:** {'; '.join(why)[:400]}. "
+                             f"Cash read {raw:,.0f}. Evidence: `data/cash_short.jsonl`. (Claude Code to confirm SIG's behaviour.)\n")
+            except OSError:
+                pass
+
     RELEASE_SUBS = ("inventory", "mm", "sniper")            # never: pair sets, manual (AK/RI), ladder tranches, fresh fat-finger
 
     def bid_depth(self, ex, side, now):
@@ -1420,9 +1496,9 @@ class Engine:
             subs = self.ledger.subbooks.get(ex, {})
             avail = sum(abs(v) for k, v in subs.items() if k in self.RELEASE_SUBS and v * q > 0)
             if avail >= MIN_QTY:
-                cands.append((ctf, ex, side, avail))
+                cands.append((self.return_per_day(ctf), ctf, ex, side, avail))
         plan = {}
-        for ctf, ex, side, avail in sorted(cands):
+        for _, ctf, ex, side, avail in sorted(cands):       # lowest expected return to settlement per SIG per day first
             if need <= 0 or len(plan) >= RELEASE_MARKETS:
                 break
             bid = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
@@ -1445,6 +1521,11 @@ class Engine:
             self.event("RELEASE", "; ".join(f"{self.name(ex)} {r['side'].upper()} {sum(r['subs'].values()):,} @ {r['px']:.3f} "
                                              f"(cost {r['cost'] * 100:.1f}%)" for ex, r in plan.items()))
         return plan
+
+    def return_per_day(self, ctf):
+        """Afternoon §2.2: expected return to settlement per SIG held, per day: (fair - bid)/bid over the days left."""
+        days = max(1.0, (time.mktime(time.strptime(SETTLE_DATE, "%Y-%m-%d")) - time.time()) / 86400)
+        return ctf / days
 
     def released_today_view(self):
         """Cash the release layer freed today and its average cost vs fair."""
@@ -2540,9 +2621,9 @@ class Engine:
                     target=tgt, target_date=tdate, released_today=rel, buckets=out)
 
     def release_target(self):
-        """Free-cash target (excluding the floor) by date (day 2 §3.3): 20k by Oct 5, 30k by Oct 20, 40k by Nov 3."""
+        """Free-cash target (excluding the floor) by date (afternoon §2.2): 25k by Oct 3, 40k by Oct 10 (and after)."""
         d = time.strftime("%m-%d")
-        for until, tgt, label in (("10-05", 20_000, "2026-10-05"), ("10-20", 30_000, "2026-10-20"), ("11-03", 40_000, "2026-11-03")):
+        for until, tgt, label in (("10-03", 25_000, "2026-10-03"), ("10-10", 40_000, "2026-10-10"), ("11-03", 40_000, "2026-11-03")):
             if d <= until:
                 return tgt, label
         return 40_000, "2026-11-03"
@@ -2585,7 +2666,7 @@ class Engine:
 
     def release_max_cost(self):
         d = time.strftime("%m-%d")
-        return 0.06 if d >= "10-30" else 0.04 if d >= "10-20" else 0.03
+        return 0.06 if d >= "10-30" else 0.05                # afternoon §2.2: 5% now (was 3%), 6% from Oct 30
 
     def fill_sentence(self, f):
         l = self.strategy_of(f["bot"], f["layer"])
