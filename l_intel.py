@@ -23,6 +23,7 @@ import statistics
 
 BIG_VALUE, FAR_PX, FAR_QTY, SWEEP_COST, BURST_GAP_S = 1_000.0, 0.40, 5_000, 50_000.0, 5.0
 JUMP, JUMP_WINDOW_S, LINK_WINDOW_S = 10_000.0, 600, 600
+NO_FAIR_WALK = 0.20               # without a fair, a Max sweep must have walked the price this far
 THIN_TAPE = 20_000                 # prints: fewer in the window and tier A only grows
 STYLES = [
     ("Opening harvester", "P&L/volume > 0.5 and < 500 trades"),
@@ -77,8 +78,8 @@ def detect(trades, fair_at, names=None):
                 kinds.append("value >= 1k")
             if any(abs(r["p"] - f) >= FAR_PX and r["q"] >= FAR_QTY for r in b):
                 kinds.append(">= 40c from fair, >= 5k shares")
-        if cost >= SWEEP_COST and (f is None or value >= BIG_VALUE):
-            kinds.append("Max sweep")
+        if cost >= SWEEP_COST and (value >= BIG_VALUE if f is not None else max(r["p"] for r in b) - min(r["p"] for r in b) >= NO_FAIR_WALK):
+            kinds.append("Max sweep")                     # no fair: only a burst that walked the book counts (big != wrong)
         if not kinds:
             continue
         ex = b[0]["ex"]

@@ -77,6 +77,13 @@ class DetectorTests(unittest.TestCase):
         self.assertAlmostEqual(d["cost"], 0.80 * 40_000 + 0.95 * 40_000)
         self.assertEqual((d["wrong"], d["gainer_side"]), ("YES seller", "yes"))
 
+    def test_no_fair_needs_a_walk(self):
+        none = lambda ex, t: None                        # 14:15 live: OK Senate D 140,835 at 0.075-0.090 is big, not wrong
+        flat = [dict(id=str(i), ex="A", ts=float(i), p=0.075 + 0.005 * (i % 4), q=35_000) for i in range(4)]
+        self.assertEqual(li.detect(flat, none), [])
+        walk = [dict(id="1", ex="B", ts=0.0, p=0.30, q=40_000), dict(id="2", ex="B", ts=1.0, p=0.05, q=60_000)]
+        self.assertEqual(li.detect(walk, none)[0]["kinds"], ["Max sweep"])
+
     def test_same_second_prints_ordered_by_id(self):
         tr = [dict(id="12", ex="A", ts=5.0, p=0.5, q=1), dict(id="11", ex="A", ts=5.0, p=0.4, q=1)]
         self.assertEqual([r["id"] for r in li.order(tr)], ["11", "12"])

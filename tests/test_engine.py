@@ -862,8 +862,10 @@ class ReserveTests(EngineCase):
         exit_side = "no" if pos > 0 else "yes"           # buying the other side reduces the holding
         eng.ex.place([("t", "mm", "mm", (ex, exit_side, "buy", 0.5, 100))])
         self.assertEqual(eng.committed(), 0.0, "a queued exit is not an entry")
+        self.assertEqual(eng.bucket_usage()["committed"], 0.0, "nor in the risk gate's bucket usage")
         eng.ex.place([("t", "mm", "mm", (ex, "yes" if exit_side == "no" else "no", "buy", 0.5, 100))])
         self.assertAlmostEqual(eng.committed(), 50.0, msg="a queued entry is")
+        self.assertAlmostEqual(eng.bucket_usage()["committed"], 50.0)
 
     def test_opportunity_reserve_tiers(self):
         fresh_data(layers=dict(position=dict(state="full"), mm=dict(state="full"), sniper=dict(state="full")))

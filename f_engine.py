@@ -935,8 +935,8 @@ class Engine:
             if p["action"] != "buy" or p["bot"] in self.position_names:
                 continue
             n, l = p["qty"] * p["price"], p["layer"]
-            if l in self.FLOOR_LAYERS:
-                u["committed"] += n
+            if l in self.FLOOR_LAYERS and not jx.reduces(p["side"], "buy", self.book.get(p["ex"], {}).get("pos", 0)):
+                u["committed"] += n                         # an exit in flight is not an entry (restart: 12.7k for a loop)
             if l == "ladder":
                 u["ladder_resting"] += n
                 u["ladder_side"][self.pol(p["ex"], p["side"])] += n
