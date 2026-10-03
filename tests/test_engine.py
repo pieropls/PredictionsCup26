@@ -1806,13 +1806,13 @@ class ArenaTests(EngineCase):
     def dump_orders(self, eng, fake):
         return [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "dump"]
 
-    def test_arena_only_and_8k_per_side(self):
+    def test_arena_only_and_per_side_cost(self):
         fake, eng, favs = self.rig()
         self.settle(eng, fake, favs)
         exs = {o["ex"] for o in self.dump_orders(eng, fake)}
         self.assertEqual(exs, {favs[0], favs[1]})
         for ex in exs:
-            self.assertLessEqual(sum(o["qty"] * o["price"] for o in self.dump_orders(eng, fake) if o["ex"] == ex), 8_000 + 1e-6)
+            self.assertLessEqual(sum(o["qty"] * o["price"] for o in self.dump_orders(eng, fake) if o["ex"] == ex), a_config.DUMP_ARENA_COST + 1e-6)
 
     def test_concentration_cap(self):
         fake, eng, favs = self.rig()
@@ -1836,7 +1836,7 @@ class ArenaTests(EngineCase):
             seen.append(sorted((o["price"], o["qty"]) for o in self.dump_orders(eng, fake) if o["ex"] == ex))
         self.assertTrue(seen[0])
         self.assertTrue(all(s == seen[0] for s in seen), seen)
-        self.assertLessEqual(sum(p * q for p, q in seen[0]), 8_000 + 1e-6)
+        self.assertLessEqual(sum(p * q for p, q in seen[0]), a_config.DUMP_ARENA_COST + 1e-6)
         fake.pos[ex] = 6_000                              # 6k YES held at 0.95 = 5.7k: our levels may add up to 6.3k
         fake.avg_cost[ex] = 0.95
         self.settle(eng, fake, favs, 3)

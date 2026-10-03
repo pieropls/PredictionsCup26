@@ -46,7 +46,7 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       OPPORTUNITY_RESERVE, ROC_MIN, ROC_MIN_TIGHT, RELEASE_EVERY_S, RELEASE_MARKETS, RELEASE_PILOT_TARGET,
                       FAT_LEVELS, FAT_SIZES, FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP, FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S,
                       FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S, FAT_MOVE, FAT_CAPACITY_SHARE, FAT_BOOK_READS, QTY_TOL,
-                      FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, TMM_TTL_S, LADDER_TTL_S, RECYCLE_TAKE_TTL_S, TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_TTL_S, DUMP_TTL_S, DUMP_MIN_FAIR, DUMP_MIN_REF, DUMP_OFFSETS,
+                      FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, RELEASE_TARGET, TMM_TTL_S, LADDER_TTL_S, RECYCLE_TAKE_TTL_S, TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_TTL_S, DUMP_TTL_S, DUMP_MIN_FAIR, DUMP_MIN_REF, DUMP_OFFSETS,
                       DUMP_REF_GAP, DUMP_COST, DUMP_MIN_SIDE_COST, DUMP_QUEUE_S, DUMP_BOOK_READS, DUMP_REBOUND_MIN, DUMP_HOLD_S,
                       DUMP_NEWS_DROP, DUMP_BREAKER_MARKETS, DUMP_BREAKER_FAIR, DUMP_PILOT_SIDES, DUMP_PILOT_S, DUMP_REARM_S, DUMP_ARENA, DUMP_ARENA_MIN_FAIR,
                       DUMP_ARENA_COST, DUMP_CONC_CAP, DUMP_REF_LONG_S, LONG_MAX_FAIR, LONG_LEVELS,
@@ -3560,12 +3560,8 @@ class Engine:
         return dict(idle_3d=dict(n=idle3[0], sig=round(idle3[1], 2)), no_exit=dict(n=no_exit[0], sig=round(no_exit[1], 2)))
 
     def release_target(self):
-        """Free-cash target (excluding the floor) by date (afternoon §2.2): 25k by Oct 3, 40k by Oct 10 (and after)."""
-        d = time.strftime("%m-%d")
-        for until, tgt, label in (("10-03", 25_000, "2026-10-03"), ("10-10", 40_000, "2026-10-10"), ("11-03", 40_000, "2026-11-03")):
-            if d <= until:
-                return tgt, label
-        return 40_000, "2026-11-03"
+        """Free-cash target (excluding the floor), day 3 §3: RELEASE_TARGET (40k) now, through Nov 3."""
+        return RELEASE_TARGET, "2026-11-03"
 
     def cost_to_free(self, ex, side):
         bid = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]

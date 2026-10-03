@@ -161,7 +161,7 @@ DUMP_REARM_S = 600
 DUMP_ARENA = [("Rhode Island Senate D", "yes"), ("Rhode Island Senate R", "no"), ("Oklahoma Senate D", "no"),
               ("Massachusetts Governor R", "no"), ("New Hampshire Senate D", "yes"), ("New Hampshire Senate R", "no"),
               ("Minnesota Senate D", "yes"), ("U.S. House D", "yes"), ("MN-05 House race D", "yes")]
-DUMP_ARENA_MIN_FAIR, DUMP_ARENA_COST = 0.85, 8_000   # arena sides eligible down to fair_side 0.85; cost per side
+DUMP_ARENA_MIN_FAIR, DUMP_ARENA_COST = 0.85, 12_000  # arena sides eligible down to fair_side 0.85; cost per side (day 3 §3: 8k -> 12k)
 DUMP_CONC_CAP = 12_000                    # no new levels where position on the side (at cost) + resting dump bids >= this
 DUMP_REF_LONG_S = 6 * 3600                # reference = max(SIG 30-min median, SIG 6-h median)
 # longshot catcher (day 3 §2): resting bids at 0.5-1c on sides Polymarket prices <= 5%, to catch sweeps through them
@@ -177,10 +177,11 @@ LONG_BREAKER_SIDES, LONG_BREAKER_PAUSE_S = 5, 1800  # >= 5 sides filled in 10 mi
 LONG_PILOT_S = 24 * 3600
 KAPPA_FROM_OCT30 = 0.03         # D3: capital discount from Oct 30 (election-night cash)
 LOSS_STOP = 2_000               # D5: bot-owned P&L at fair, rolling 24 h
-OPPORTUNITY_RESERVE = 25_000    # afternoon §2 (was 10k): on top of the floor; dump + fat-finger fills, snipes, >= 8c takes
+OPPORTUNITY_RESERVE = 35_000    # day 3 §3 (25k afternoon, 10k day 2): on top of the floor; dump/fat-finger/longshot fills, snipes, >= 8c takes
 AK_RELEASE = 0.50               # D1 + D1b (day 2 §1): share of the original AK NO position released to the recycler
 RELEASE_EVERY_S, RELEASE_MARKETS = 30, 3   # release layer (day 2 §3.3): plan every 30 s, <= 3 markets (= order-book reads)
-RELEASE_PILOT_TARGET = 10_000   # pilot: free cash above the floor; full follows the schedule (20k Oct 5, 30k Oct 20, 40k Nov 3)
+RELEASE_PILOT_TARGET = 10_000   # pilot: free cash above the floor
+RELEASE_TARGET = 40_000         # day 3 §3: free cash above the floor, from Oct 3 to Nov 3 (was 25k by Oct 3, 40k by Oct 10)
 
 # A7. files ---------------------------------------------------------------------------------------------------------
 DATA = os.environ.get("SIG_DATA") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")   # releases share it
