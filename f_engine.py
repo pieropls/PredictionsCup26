@@ -18,13 +18,14 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import b_sig as api
 import c_polymarket as pm
@@ -45,7 +46,7 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       OPPORTUNITY_RESERVE, ROC_MIN, ROC_MIN_TIGHT, RELEASE_EVERY_S, RELEASE_MARKETS, RELEASE_PILOT_TARGET,
                       FAT_LEVELS, FAT_SIZES, FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP, FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S,
                       FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S, FAT_MOVE, FAT_CAPACITY_SHARE, FAT_BOOK_READS, QTY_TOL,
-                      FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, DUMP_MIN_FAIR, DUMP_MIN_REF, DUMP_OFFSETS,
+                      FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, TMM_TTL_S, LADDER_TTL_S, RECYCLE_TAKE_TTL_S, TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_TTL_S, DUMP_TTL_S, DUMP_MIN_FAIR, DUMP_MIN_REF, DUMP_OFFSETS,
                       DUMP_REF_GAP, DUMP_COST, DUMP_MIN_SIDE_COST, DUMP_QUEUE_S, DUMP_BOOK_READS, DUMP_REBOUND_MIN, DUMP_HOLD_S,
                       DUMP_NEWS_DROP, DUMP_BREAKER_MARKETS, DUMP_BREAKER_FAIR, DUMP_PILOT_SIDES, DUMP_PILOT_S, DUMP_REARM_S,
                       TMM_MID_HALF_LIFE_S, TMM_KAPPA_MAX, TMM_SIZE, TMM_CAP_SIDE, TMM_SKEW_TICKS, TMM_OFFER_MID_S, TMM_RELEASE_S,
@@ -330,6 +331,9 @@ class Engine:
         self.dump_track, self.dump_params = read_json(os.path.join(DATA, "intel", "dump_track.json"), {}) or {}, None
         self.tmm_mid, self.mid24, self.mm_since, self.tmm_inv = {}, {}, {}, collections.deque(maxlen=5000)   # afternoon D-C
         self.cov_seq, self.cov_seq_t, self.truth_t = None, None, None   # evening §1: fills projection / order-truth health
+        self.truth_prev, self.truth_carry, self.truth_live_t, self.blind_t = None, {}, None, collections.deque(maxlen=50)
+        self.fills_blind, self.pending_backfill, self.last_booked_t = None, None, time.time()
+        self.truth_read_t, self.truth_prev_cur, self.pos_fail, self.faults_pulled = None, {}, 0, None
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
@@ -472,13 +476,27 @@ class Engine:
         self.open, self.px = got["open"], got["px"]
         prev = {ex: (b["pos"], b["row"]) for ex, b in self.book.items()}
         catch_open = {oid for oid, o in self.ledger.orders.items() if o["status"] == "open" and o.get("layer") in self.CATCHERS}
-        fill_exs, new_orders = set(), set()
+        fill_exs, new_orders, proj = set(), set(), collections.Counter()
         for f in self.ledger.sync(self.open, got.get("fills", []), self.bot_of, self.side_fair, self.side_mid, as_of=now,
                                   held=lambda ex: prev.get(ex)):
             fill_exs.add(f["ex"])
             new_orders.add(f["order"])
+            if f.get("action") in ("buy", "sell"):
+                proj[f["ex"]] += f["qty"] * (1 if f["side"] == "yes" else -1) * (1 if f["action"] == "buy" else -1)
             e = "" if f["edge"] is None else f" | vs PM {f['edge'] * 100:+.1f}c, vs SIG mid {(f['sig_edge'] or 0) * 100:+.1f}c"
             self.event("FILL", f"{f['bot']} [{f['layer'] or '-'}]: {f['action'] or 'trade'} {f['side'].upper()} {f['qty']:,.0f} @ {f['price']:.3f}{e}")
+        try:                                                # evening §1.2-1.4: fills from our order records while blind
+            for r in self.order_truth(pos, prev, proj, now, bool(fill_exs)):
+                fill_exs.add(r["ex"])
+                new_orders.add(r["order"])
+        except Exception as err:
+            self.event("ERR", f"order truth: {err!r}")
+        if self.pending_backfill:
+            job, self.pending_backfill = self.pending_backfill, None
+            try:
+                self.backfill_fills(job["since"], pos, prev, dry_run=job.get("dry_run", True), only=job.get("orders"))
+            except Exception as err:
+                self.event("ERR", f"backfill: {err!r}")
         self.new_fill_orders = new_orders
         # §6: SIG's fill notification can beat its REST fills page; a notification that found nothing re-polls in 2 s (x2)
         if not fill_exs:
@@ -1072,6 +1090,10 @@ class Engine:
                 used["fat_resting"] += n
                 out.append(w)
                 continue
+            if l == "dump" and self.fills_blind:           # evening §1.4: no new dump levels while fills are blind
+                continue
+            if l == "mm" and self.fills_blind:             # ... and no new MM entries (exits passed above)
+                continue
             if l == "dump":                                 # afternoon D-A: a full fill of the side's levels + its fat-finger
                 funded = max(0.0, min(float(OPPORTUNITY_RESERVE), cash - CASH_RESERVE - used["committed"]))   # levels fits
                 worst = sum(x["qty"] * x["px"] for x in (self.dump_now.get(b.ex) or []) + (self.fat_now.get(b.ex) or [])
@@ -1211,6 +1233,11 @@ class Engine:
                     ok, why = True, f"{len(done)} sets with no one-leg residue"
             if ok:
                 c.set_layer(l, "full", f"pilot gate passed: {why}")
+        # Piero's unattended rule: writes/cancels failing with 5xx / UNKNOWN repeatedly -> stop and pull at-risk orders
+        hw = api.health(600).get("write") or {}
+        unk = sum(1 for t in getattr(self.ex, "unknown_t", []) if t >= now - 600)
+        if (hw.get("n", 0) >= 5 and hw.get("bad_rate", 0) >= 0.3) or unk >= 3:
+            self.stop_and_pull(f"SIG writes failing: {hw.get('bad_rate', 0):.0%} 5xx/timeouts of {hw.get('n', 0)} in 10 min, {unk} UNKNOWN")
         # D5 loss stop and the SIG 5xx pause
         bot_24h = sum(self.fill_pnl_fair(f) for f in self.fills_since(now - 86400)
                       if self.strategy_of(f["bot"], f["layer"]) not in ("position", "old engine"))
@@ -1491,10 +1518,199 @@ class Engine:
             self.cov_seq, self.cov_seq_t = seq, now
         fresh = self.cov_seq_t is not None and now - self.cov_seq_t <= 300
         truth = self.truth_t is not None and now - self.truth_t <= 300
+        if self.fills_blind:
+            return False, f"FILLS BLIND since {time.strftime('%H:%M', time.localtime(self.fills_blind))}"
         if fresh or truth:
             return True, ""
         age = "never seen" if self.cov_seq_t is None else f"unchanged for {(now - self.cov_seq_t) / 60:.0f} min"
         return False, f"fills projection sequence {self.cov_seq} {age} (newest fill {cov.get('newest')}), order-truth booking not live"
+
+    LAYER_TTL = {"mm": TMM_TTL_S, "fatfinger": FAT_TTL_S, "dump": DUMP_TTL_S, "dumpexit": DUMP_TTL_S, "ladder": LADDER_TTL_S,
+                 "rebound": LADDER_TTL_S, "release": RECYCLE_TAKE_TTL_S, "take": TAKE_TTL_S, "recycle": RECYCLE_REST_TTL_S,
+                 "set": PAIR_TTL_S, "unwind": PAIR_TTL_S, "repair": PAIR_TTL_S, "touch": MM_TTL_S}
+
+    def vanished_fill(self, oid, rec, q0, now):
+        """Shares an order filled since the previous snapshot: it shrank, or it left the book while we didn't cancel it
+        and before its TTL (evening §1.2: the fat-finger vanished-order rule; §1.4 fallback)."""
+        q1 = self.truth_prev_cur.get(oid)
+        if q1 is not None:
+            return q0 - q1
+        if rec.get("status") == "cancelled" or oid in self.ex.cancelling:
+            return 0.0
+        ttl = rec.get("ttl") or self.LAYER_TTL.get(rec.get("layer"), RECYCLE_REST_TTL_S)
+        if ttl and now - rec.get("ts", now) >= ttl - 90:
+            return 0.0                                     # expired at its TTL
+        return q0
+
+    def order_truth(self, pos, prev, proj, now, projection_booked):
+        """Evening §1.2-1.4 while SIG's fills projection is stalled (no live fill source; /orders/{id}/fills 503): an engine
+        order that shrank since the last open-orders snapshot, or left it without our cancel before its TTL, filled at its
+        limit (source 'synthetic'). Booked only when the market's position moved by the same amount (a change seen one loop
+        early, between the orders read and the positions read, is carried one loop and its audit undone). Runs before the
+        audit, so booked fills never land in inventory. Unexplained moves left after the carry raise FILLS BLIND."""
+        cur = {o["id"]: o["qty"] for o in self.open if o["id"] in self.ledger.orders}
+        before, self.truth_prev = self.truth_prev, cur
+        self.truth_prev_cur = cur
+        prev_t, self.truth_read_t = self.truth_read_t, now
+        if before is None or not prev:
+            return []
+        if self.truth_live_t is None:
+            self.truth_live_t = now
+        book = self.controls.d.get("truth_mode", "shadow") == "book"   # shadow: compute and log, book nothing (validation)
+        before = dict(before)
+        for oid, rec in self.ledger.orders.items():        # acked after the last snapshot and gone before this one
+            if oid not in before and oid not in cur and rec.get("ts", 0) >= (prev_t or now) - 2 and rec.get("status") in ("open", "done"):
+                before[oid] = rec["qty"] - (rec.get("filled") or 0)
+        cand = collections.defaultdict(list)
+        for oid, q0 in before.items():
+            rec = self.ledger.orders.get(oid)
+            if not rec or rec.get("action") not in ("buy", "sell"):
+                continue
+            d = self.vanished_fill(oid, rec, q0, now)
+            if d > 0.5:
+                sgn = (1 if rec["side"] == "yes" else -1) * (1 if rec["action"] == "buy" else -1)
+                cand[rec["ex"]].append((oid, d, sgn))
+        carry, self.truth_carry = self.truth_carry, {}
+        booked, unexplained, shadow_rows = [], {}, []
+        exs = set(cand) | set(carry) | {ex for ex in set(pos) | set(prev) if abs(pos.get(ex, 0) - (prev.get(ex) or (0,))[0]) >= 1}
+        for ex in exs:
+            dpos = pos.get(ex, 0) - (prev.get(ex) or (0,))[0] - proj.get(ex, 0)
+            c = carry.get(ex, 0.0)
+            exp = sum(s * d for _, d, s in cand.get(ex, []))
+            gross = sum(d for _, d, _ in cand.get(ex, []))
+            tol = max(1.0, 0.02 * gross)
+            if cand.get(ex) and (abs(dpos - exp) <= tol or abs(dpos + c - exp) <= tol):
+                use_carry = abs(dpos - exp) > tol
+                shadow_rows.append(dict(ex=ex, dpos=round(dpos, 2), carry=round(c, 2), orders=round(exp, 2), n=len(cand[ex]), match=True))
+                if book:
+                    for oid, d, s in cand[ex]:
+                        r = self.ledger.book_fill(oid, d, self.ledger.orders[oid]["price"], "order_shrink", self.side_fair, self.side_mid,
+                                                  held=prev.get(ex))
+                        if r:
+                            booked.append(r)
+                            self.event("FILL", f"{r['bot']} [{r['layer'] or '-'}] (order_shrink: order left the book): {r['action']} "
+                                               f"{r['side'].upper()} {d:,.0f} @ {r['price']:.3f}")
+                    if use_carry:                          # last loop's audit put that move into inventory: take it back
+                        books = self.ledger.subbooks.setdefault(ex, {})
+                        books["inventory"] = books.get("inventory", 0) - c
+            elif abs(dpos) >= 1:
+                if c:                                      # carried and still not explained: unexplained for good
+                    unexplained[ex] = c
+                self.truth_carry[ex] = dpos
+                shadow_rows.append(dict(ex=ex, dpos=round(dpos, 2), carry=round(c, 2), orders=round(exp, 2), n=len(cand.get(ex, [])),
+                                        match=False, carried=True))
+            elif c:
+                unexplained[ex] = c
+            elif cand.get(ex):                             # orders left the book but the position didn't move: not fills
+                shadow_rows.append(dict(ex=ex, dpos=round(dpos, 2), carry=0, orders=round(exp, 2), n=len(cand[ex]), match=False,
+                                        no_move=True))
+        if shadow_rows or unexplained:
+            self.intel_write("truth_shadow.jsonl", dict(t=round(now, 1), mode="book" if book else "shadow", rows=shadow_rows,
+                                                        unexplained={ex: round(q, 2) for ex, q in unexplained.items()}))
+        if booked or projection_booked:
+            self.last_booked_t = now
+        if unexplained:
+            self.blind_t.append(now)
+            self.event("AUDIT", "unexplained position moves (no fill, no order that left the book): "
+                                + ", ".join(f"{self.name(ex)} {q:+,.0f}" for ex, q in unexplained.items()))
+        recent = [t for t in self.blind_t if t >= now - 300]
+        if book and len(recent) >= 2 and now - self.last_booked_t >= 300 and not self.fills_blind:
+            self.fills_blind = now
+            msg = "FILLS BLIND: position moves in >= 2 loops within 5 min and no fill booked: gates held, no new dump levels, release paused, no new MM entries"
+            self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+            self.event("BLIND", msg)
+            self.night.line(msg)
+        elif self.fills_blind and not recent and now - self.last_booked_t < 300:
+            self.event("BLIND", "fills flow again: FILLS BLIND lifted")
+            self.night.line("FILLS BLIND lifted: fills booked again and position moves explained")
+            self.fills_blind = None
+        if not unexplained and book:
+            self.truth_t = now
+        return booked
+
+    def backfill_fills(self, t0, pos, prev, dry_run=True, only=None):
+        """Evening §1.3, once: fills since t0 that only the audit saw (position moves pushed into inventory). Per market, the
+        audit's moves logged in engine.log between t0 and the start of live order-truth booking must equal the orders that
+        left the book without our cancel before their TTL; then those orders are booked (source 'backfill', at their limit)
+        and the audit's inventory moves are taken back, so the shares return to their owners (dump -> tranches, mm -> mm,
+        release -> realized). Mismatched markets are reported, not booked. Sub-books before/after go to RUN_LOG."""
+        end = self.truth_live_t or time.time()
+        t0s, ends = t0, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end))
+        aud, day, prev_s, cur_t = collections.defaultdict(float), None, None, None
+        lp = re.compile(r"^(\d\d):(\d\d):(\d\d) loop ")
+        au = re.compile(r"AUDIT  ex (\S+): sub-books were off by ([+-][\d,\.]+) shares -> inventory")
+        today = datetime.now().date()
+        lines = open(os.path.join(DATA, "engine.log"), errors="replace").read().splitlines()
+        days_back = 0                                       # walk backwards so "today" anchors the clock times
+        stamps = [None] * len(lines)
+        for i in range(len(lines) - 1, -1, -1):
+            m = lp.match(lines[i])
+            if m:
+                sec = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+                if prev_s is not None and sec > prev_s + 3600:
+                    days_back += 1
+                prev_s = sec
+                d = today - timedelta(days=days_back)
+                cur_t = f"{d} {m.group(1)}:{m.group(2)}:{m.group(3)}"
+            stamps[i] = cur_t
+        last = None
+        for i, line in enumerate(lines):
+            if lp.match(line):
+                last = stamps[i]
+                continue
+            a = au.search(line)
+            if a and last and t0s < last < ends:
+                aud[a.group(1)] += float(a.group(2).replace(",", ""))
+        cand = collections.defaultdict(list)
+        for oid, o in self.ledger.orders.items():
+            if o.get("status") != "done" or not o.get("closed") or not (t0s < o["closed"] < ends) or o.get("truth_q"):
+                continue
+            if only and oid not in only:
+                continue
+            ttl = o.get("ttl") or self.LAYER_TTL.get(o.get("layer"), RECYCLE_REST_TTL_S)
+            age = time.mktime(time.strptime(o["closed"], "%Y-%m-%d %H:%M:%S")) - o.get("ts", 0)
+            if ttl and age >= ttl - 90:
+                continue
+            q = o["qty"] - (o.get("filled") or 0)
+            if q > 0.5 and o.get("action") in ("buy", "sell"):
+                sgn = (1 if o["side"] == "yes" else -1) * (1 if o["action"] == "buy" else -1)
+                cand[o["ex"]].append((oid, q, sgn, o["closed"]))
+        lines_out, mism, moved = [], [], collections.Counter()
+        for ex in sorted(set(cand) if only else set(aud) | set(cand)):
+            exp = sum(s * q for _, q, s, _ in cand.get(ex, []))
+            a = aud.get(ex, 0.0)
+            if not cand.get(ex) or abs(exp - a) > max(10.0, 0.02 * abs(a)):
+                mism.append(f"{self.name(ex)} (ex {ex}): audit {a:+,.0f} vs orders {exp:+,.0f} ({len(cand.get(ex, []))})")
+                continue
+            before = dict(self.ledger.subbooks.get(ex, {}))
+            if dry_run:
+                lines_out.append(f"{self.name(ex)} (ex {ex}): {len(cand[ex])} orders, {exp:+,.0f} shares would move from inventory to "
+                                 + ", ".join(sorted({self.ledger.orders[o]['layer'] or '-' for o, _, _, _ in cand[ex]})))
+                for oid, q, s, closed in cand[ex]:
+                    moved[self.ledger.orders[oid].get("layer") or "-"] += q
+                continue
+            for oid, q, s, closed in cand[ex]:
+                r = self.ledger.book_fill(oid, q, self.ledger.orders[oid]["price"], "backfill", self.side_fair, self.side_mid,
+                                          held=None, t=closed)
+                if r:
+                    moved[r["layer"] or "-"] += q
+            books = self.ledger.subbooks.setdefault(ex, {})
+            books["inventory"] = books.get("inventory", 0) - exp
+            after = {k: v for k, v in books.items() if abs(v) >= 1}
+            lines_out.append(f"{self.name(ex)} (ex {ex}): {len(cand[ex])} orders, {exp:+,.0f} shares; sub-books "
+                             f"{ {k: round(v) for k, v in before.items() if abs(v) >= 1} } -> { {k: round(v) for k, v in after.items()} }")
+        self.ledger.save()
+        msg = (f"BACKFILL{' (DRY RUN, nothing booked)' if dry_run else ''}{' of ' + ','.join(only) if only else ''} {t0s} -> {ends}: "
+               f"{len(lines_out)} markets {'would be ' if dry_run else ''}booked from order records ({', '.join(f'{l} {q:,.0f}' for l, q in moved.items())} "
+               f"shares by layer), {len(mism)} not matched")
+        self.event("BACKFILL", msg)
+        self.night.line(msg)
+        for l in lines_out:
+            self.night.line(("  would book: " if dry_run else "  booked: ") + l)
+        for l in mism:
+            self.night.line("  NOT booked (audit vs orders differ, left in inventory): " + l)
+        self.backfill_report = dict(t=stamp(), dry_run=dry_run, only=only, booked=lines_out, mismatched=mism, moved=dict(moved))
+        self.intel_write("backfill.jsonl", self.backfill_report)
 
     # ------------------------------------------------------------------------------------------------ turnover MM (D-C)
     def update_tmm(self, now):
@@ -1797,6 +2013,23 @@ class Engine:
                                  f"it would trade with our own {o['action']} {o['side'].upper()} @ {o['price']:.3f}")
         return out
 
+    def stop_and_pull(self, reason):
+        """Pause new risk and pull every at-risk engine order (never exits, never manual orders), once per incident."""
+        if self.faults_pulled and time.time() - self.faults_pulled < 1800:
+            return
+        self.faults_pulled = time.time()
+        self.controls.set_paused(True, f"STOP AND PULL: {reason}")
+        try:
+            n, dropped = self.pull_quotes()
+        except Exception as err:
+            n, dropped = 0, 0
+            self.event("ERR", f"pull: {err!r}")
+        msg = f"STOP AND PULL: {reason} -> new risk paused, {n} at-risk engine orders being cancelled, {dropped} queued dropped"
+        self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+        self.event("STOP", msg)
+        self.night.line(msg)
+        self.controls.decide(f"STOP AND PULL at {time.strftime('%H:%M')} ({reason[:80]}): resume when SIG is healthy?")
+
     CATCHERS = ("fatfinger", "dump")                       # resting catch levels whose fills are paid from the reserve
 
     def cash_short_check(self, raw, catch_open, now):
@@ -1886,7 +2119,7 @@ class Engine:
         free (fair - bid) / bid, cheapest first, while that cost <= RELEASE_MAX_COST; a limit at the bid, sized <= the top of
         book. Planned every 30 s for at most 3 markets (3 order-book reads); the bots place it (layer 'release')."""
         st = self.controls.state("release")
-        if st == "off" or self.controls.paused and False:
+        if st == "off" or self.fills_blind:              # evening §1.4: no release while fills are blind
             return {}
         if now - self.release_t < RELEASE_EVERY_S and self.release_now:
             return {ex: r for ex, r in self.release_now.items() if ex in self.book}
@@ -3321,6 +3554,23 @@ class EngineControls:
                 raise ValueError(f"layer must be one of {self.STRATEGY} and state one of {LAYER_STATES}")
             c.set_layer(layer, state, "dashboard", by="dashboard")
             return f"{layer}: {state}"
+        if action == "backfill":                           # evening §1.3: once, inside the engine loop (it owns the ledger)
+            since = str(args.get("since") or "")
+            if not re.match(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$", since):
+                raise ValueError("since: 'YYYY-MM-DD HH:MM:SS' (PT)")
+            orders = [str(o) for o in (args.get("orders") or [])] or None
+            self.eng.pending_backfill = dict(since=since, dry_run=bool(args.get("dry_run", True)), orders=orders)
+            return f"backfill from {since} queued for the next loop ({'dry run' if args.get('dry_run', True) else 'BOOKING'}" \
+                   f"{', orders ' + ','.join(orders) if orders else ''})"
+        if action == "truth_mode":                         # evening §1.2: shadow (compute + log) or book
+            mode = args.get("mode")
+            if mode not in ("shadow", "book"):
+                raise ValueError("mode: shadow | book")
+            with c.lock:
+                c.d["truth_mode"] = mode
+                c.save()
+            self.eng.event("CONTROL", f"order-truth fills: {mode} (dashboard)")
+            return f"order-truth fills: {mode}"
         if action == "hold_gates":                         # evening §1.5: no pilot promotes while set
             on = bool(args.get("on", True))
             with c.lock:
@@ -3422,6 +3672,11 @@ def main():
                 eng.step()
             except Exception as e:
                 eng.event("ERR", repr(e))
+                eng.pos_fail = eng.pos_fail + 1 if "position" in repr(e).lower() else eng.pos_fail
+                if eng.pos_fail >= 2:                       # Piero's unattended rule: the positions read failing -> stop and pull
+                    eng.stop_and_pull(f"positions read failed {eng.pos_fail} loops in a row ({repr(e)[:80]})")
+            else:
+                eng.pos_fail = 0
             if loops is None or i < loops:                  # a realtime event replans early, within the read budget:
                 eng.wake.wait(timeout=max(1.0, min(LOOP_S, FILL_POLL_S) - (time.time() - t)))   # fills read <= 10 s apart (§6)
                 eng.wake.clear()

@@ -1409,6 +1409,7 @@ class FatFingerTests(EngineCase):
         for _ in range(2):
             loop(eng, fake)
         eng.cov_seq_t = time.time() - 400                 # ... for more than 5 minutes
+        eng.truth_t = None                                # ... and order-truth booking not live
         eng.controller(time.time())
         self.assertEqual(c.state("fatfinger"), "pilot", "fills blind: gates held")
         self.assertIn("fills projection sequence", eng.fills_health(time.time())[1])
@@ -1581,6 +1582,130 @@ class DumpTests(EngineCase):
         self.assertEqual(eng.no_self_cross(b, [cross], []), [])
         ok = dict(cross, px=round(1 - top["price"] - 0.02, 3))                   # a YES ask 2c above our bid
         self.assertEqual(eng.no_self_cross(b, [ok], []), [ok])
+
+
+class OrderTruthTests(EngineCase):
+    """Evening §1.2-1.4 + Piero's unattended rules: SIG's fills projection stalls; fills come from our own order records
+    (an order that shrank or left the book without our cancel, before its TTL) when the position moved the same way."""
+
+    def rig(self, mode="book"):
+        fresh_data(layers=dict(position=dict(state="full"), dump=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 40_000)
+        eng = engine(fake)
+        eng.controls.d["truth_mode"] = mode
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None
+                and eng.fair[b.ex] >= 0.93]
+        for _ in range(3):
+            for ex in favs:
+                seed_ref(eng, ex, mid=eng.fair[ex] - 0.01)
+            eng.ex.capacity = 6000.0
+            loop(eng, fake)
+        self.assertTrue(self.dump_orders(eng, fake))
+        fake.stall_fills()                                # SIG's fills list stops here (Oct 2, 15:25:55)
+        loop(eng, fake)
+        return fake, eng, favs
+
+    def dump_orders(self, eng, fake):
+        return [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "dump"]
+
+    def test_shadow_logs_and_books_nothing(self):
+        fake, eng, favs = self.rig(mode="shadow")
+        o = max(self.dump_orders(eng, fake), key=lambda o: o["price"])
+        n0 = len(eng.ledger.fills)
+        fake.fill(o["id"], o["qty"])
+        loop(eng, fake)
+        loop(eng, fake)
+        self.assertEqual(len(eng.ledger.fills), n0, "shadow books nothing")
+        rows = [json.loads(l) for l in open(os.path.join(TMP, "intel", "truth_shadow.jsonl"))]
+        hit = [r for x in rows for r in x["rows"] if r["ex"] == o["ex"]]
+        self.assertTrue(hit and hit[0]["match"], rows[-3:])
+
+    def test_book_mode_books_to_the_owner_and_nothing_lands_in_inventory(self):
+        fake, eng, favs = self.rig()
+        o = max(self.dump_orders(eng, fake), key=lambda o: o["price"])
+        sub = eng.ledger.orders[o["id"]]["sub"]
+        inv0 = eng.ledger.sub(o["ex"], "inventory")
+        fake.fill(o["id"], 300)                           # a partial fill: the order shrinks
+        loop(eng, fake)
+        fs = [f for f in eng.ledger.fills if f["order"] == o["id"]]
+        self.assertEqual([(f["source"], f["qty"], f["price"]) for f in fs], [("order_shrink", 300, o["price"])])
+        self.assertAlmostEqual(abs(eng.ledger.sub(o["ex"], sub)), 300, msg="owner's sub-book")
+        self.assertAlmostEqual(eng.ledger.sub(o["ex"], "inventory"), inv0, msg="nothing pushed into inventory")
+        self.assertIsNotNone(eng.truth_t)
+        o2 = next(x for x in self.dump_orders(eng, fake) if x["ex"] == o["ex"] and eng.ledger.orders[x["id"]]["sub"] == sub)
+        fake.fill(o2["id"], o2["qty"])                    # the (re-quoted) level fills completely: it leaves the book
+        loop(eng, fake)
+        self.assertAlmostEqual(abs(eng.ledger.sub(o["ex"], sub)), 300 + o2["qty"])
+        # SIG's projection catches up later with the real fills: not booked twice
+        fake.fill_stalled = False
+        loop(eng, fake)
+        self.assertAlmostEqual(sum(f["qty"] for f in eng.ledger.fills if f["order"] in (o["id"], o2["id"])), 300 + o2["qty"])
+        self.assertAlmostEqual(eng.ledger.sub(o["ex"], "inventory"), inv0)
+
+    def test_order_gone_without_position_move_is_not_a_fill(self):
+        fake, eng, favs = self.rig()
+        o = max(self.dump_orders(eng, fake), key=lambda o: o["price"])
+        with fake.lock:
+            fake.book.pop(next(k for k in fake.book if str(k) == o["id"]))   # gone, but nothing traded
+        loop(eng, fake)
+        loop(eng, fake)
+        self.assertFalse([f for f in eng.ledger.fills if f["order"] == o["id"]])
+
+    def test_unexplained_moves_raise_fills_blind_in_book_mode(self):
+        fake, eng, favs = self.rig()
+        ex = favs[0]
+        for _ in range(3):
+            fake.pos[ex] = fake.pos.get(ex, 0) + 500      # positions move with no order of ours leaving the book
+            loop(eng, fake)
+        eng.last_booked_t = time.time() - 400
+        fake.pos[ex] = fake.pos.get(ex, 0) + 500
+        loop(eng, fake)
+        fake.pos[ex] = fake.pos.get(ex, 0) + 500
+        loop(eng, fake)
+        self.assertIsNotNone(eng.fills_blind)
+        self.assertFalse(eng.fills_health(time.time())[0])
+
+    def test_targeted_backfill_moves_the_known_dump_orders_out_of_inventory(self):
+        fake, eng, favs = self.rig(mode="shadow")
+        o = max(self.dump_orders(eng, fake), key=lambda o: o["price"])
+        ex, sub = o["ex"], eng.ledger.orders[o["id"]]["sub"]
+        t0 = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 5))
+        fake.fill(o["id"], o["qty"])                      # the catch (unbooked: projection stalled, shadow mode)
+        rec = eng.ledger.orders[o["id"]]
+        rec["ts"] -= 600                                  # it rested 10 min (well inside its TTL)
+        for _ in range(3):
+            loop(eng, fake)
+        inv = eng.ledger.sub(ex, "inventory")
+        signed = -o["qty"] if o["side"] == "no" else o["qty"]
+        now = time.strftime("%H:%M:%S")
+        with open(os.path.join(TMP, "engine.log"), "w") as fh:     # what the audit logged
+            fh.write(f"{now} loop 1 | x\n  AUDIT  ex {ex}: sub-books were off by {signed:+,.0f} shares -> inventory\n")
+        eng.truth_live_t = time.time() + 5
+        eng.pending_backfill = dict(since=t0, dry_run=False, orders=[o["id"]])
+        loop(eng, fake)
+        self.assertEqual(eng.backfill_report["mismatched"], [])
+        self.assertAlmostEqual(eng.ledger.sub(ex, sub), signed)
+        self.assertAlmostEqual(eng.ledger.sub(ex, "inventory"), inv - signed)
+        t_ = eng.ledger.tranches.get(sub)
+        self.assertTrue(t_ and t_["kind"] == "dump", "the catch is a dump tranche: its rebound goes out")
+        rb = [x for x in fake.open_orders() if x["id"] in eng.ledger.orders and eng.ledger.orders[x["id"]]["layer"] == "dumpexit"]
+        self.assertTrue(rb)
+
+    def test_stop_and_pull_on_repeated_sig_write_faults(self):
+        fake, eng, favs = self.rig()
+        eng.ex.note_fault(RuntimeError("POST /orders/batch -> 503 {}"))
+        eng.ex.note_fault(RuntimeError("DELETE /orders/1 -> 409 {conflict}"))   # not a SIG fault
+        eng.controller(time.time())
+        self.assertFalse(eng.controls.paused)
+        eng.ex.note_fault(RuntimeError("timed out"))
+        eng.ex.note_fault(RuntimeError("GET -> 502"))
+        eng.controller(time.time())
+        self.assertTrue(eng.controls.paused)
+        self.assertTrue(any(e["kind"] == "STOP" for e in eng.events))
 
 
 class IntelTests(EngineCase):

@@ -46,8 +46,9 @@ class Ledger:
         self.seen, self.n, self.synced = {f["key"] for f in self.fills}, 0, bool(d)
 
     # ---- orders
-    def placed(self, bot, o, ok, data, layer="", note="", sub=""):
-        """Ownership record: every order the engine places, by id -> bot, sub-book, layer."""
+    def placed(self, bot, o, ok, data, layer="", note="", sub="", ttl=None):
+        """Ownership record: every order the engine places, by id -> bot, sub-book, layer (and its TTL: a vanished
+        order younger than its TTL that we didn't cancel was filled, evening §1.4)."""
         ex, side, action, price, qty = o
         oid = data.get("orderId") if ok else None
         with self.lock:
@@ -55,7 +56,7 @@ class Ledger:
             key = str(oid) if oid is not None else f"{'dry' if ok else 'rejected'}-{int(time.time())}-{self.n}"
             self.orders[key] = dict(id=key, bot=bot, layer=layer, sub=sub, ex=ex, side=side, action=action, price=price,
                                     qty=int(qty), filled=0.0, cost=0.0, left=int(qty), placed=stamp(), ts=time.time(), closed=None,
-                                    note=note if ok else str(data)[:160],
+                                    note=note if ok else str(data)[:160], ttl=ttl,
                                     status="open" if oid is not None else ("dry run" if ok else "rejected"))
             return key
 
@@ -195,6 +196,12 @@ class Ledger:
             oid, ex, side = str(f.get("orderId")), str(f["exchangeId"]), f["side"].lower()
             order = self.orders.get(oid)
             action, price, qty = (order or {}).get("action"), float(f["price"] or 0), abs(float(f["quantity"]))
+            if order and order.get("truth_q", 0) > 1e-9:          # evening §1.2: already booked from order truth
+                take = min(qty, order["truth_q"])
+                order["truth_q"] -= take
+                qty -= take
+                if qty < 1e-9:
+                    continue
             sgn = 1 if action == "buy" else -1 if action == "sell" else None
             fair, mid = side_fair(ex, side), side_mid(ex, side)
             rec = dict(key=key, order=oid, ex=ex, side=side, qty=qty, price=price, action=action,
@@ -220,6 +227,35 @@ class Ledger:
             if o["id"] not in keep:
                 del self.orders[o["id"]]
         return new
+
+    def book_fill(self, oid, qty, price, source, side_fair, side_mid, held=None, t=None):
+        """Evening §1.2-1.4: book a fill of one of our orders from order truth (source 'order': exact totals) or the
+        order-shrink fallback (source 'synthetic': price = the order's limit) while SIG's fills projection is stalled. Same
+        sub-book (I3), realized and edge rules as a SIG fill; when the projection's own fills for that order arrive later
+        they are consumed (truth_q), not booked twice."""
+        with self.lock:
+            order = self.orders.get(str(oid))
+            if not order or qty < 1e-9:
+                return None
+            ex, side, action = order["ex"], order["side"], order["action"]
+            sgn = 1 if action == "buy" else -1
+            fair, mid = side_fair(ex, side), side_mid(ex, side)
+            self.n += 1
+            rec = dict(key=f"{source}:{oid}:{self.n}", order=str(oid), ex=ex, side=side, qty=float(qty), price=float(price),
+                       action=action, realized=round(self.realized(held, side, action, price, qty), 2),
+                       t=t or stamp(), bot=order["bot"], layer=order.get("layer", ""), before_engine=False, source=source,
+                       fair=None if fair is None else round(fair, 4), sig_mid=None if mid is None else round(mid, 4),
+                       edge=None if fair is None else round(sgn * (fair - price), 4),
+                       sig_edge=None if mid is None else round(sgn * (mid - price), 4))
+            order["filled"] += qty
+            order["cost"] += qty * price
+            order["truth_q"] = order.get("truth_q", 0) + qty
+            if order.get("sub"):
+                books = self.subbooks.setdefault(ex, {})
+                books[order["sub"]] = books.get(order["sub"], 0) + sgn * (qty if side == "yes" else -qty)
+            self.seen.add(rec["key"])
+            self.fills.append(rec)
+            return rec
 
     def markouts(self, side_mid, horizons=((5, "mo5"), (30, "mo30"))):
         """Mark-out of each engine fill 5 and 30 minutes later: (SIG mid of its side then - fill price), + for buys that

@@ -101,6 +101,7 @@ class Executor:
         self.recent = {}                                    # order id -> (order dict, acked at): acked, not yet in a snapshot
         self.pos, self.book, self.book_t = {}, [], 0.0      # latest REST snapshot from the engine
         self.on_cash_reject = None                          # afternoon D-B: a write refused for funds -> the engine's CASH SHORT
+        self.unknown_t = []                                 # times of writes/cancels with an UNKNOWN outcome (stop-and-pull rule)
         self.cancelling = set()                             # ids with a DELETE sent or queued
         self.gone = set()                                   # ids SIG confirmed cancelled since the last snapshot
         self.frozen = {ex: e["key"] for e in journal.unknown() for it in e.get("items", []) for ex in [it["order"][0]]}
@@ -293,6 +294,7 @@ class Executor:
                 return n
             except Exception as e:                          # a timed-out DELETE may or may not have happened: the next
                 self.journal.close(key, "UNKNOWN", note=str(e)[:160])    # snapshot tells; the plan asks again if needed
+                self.note_fault(e)
                 with self.wake:
                     self.cancelling.discard(c["oid"])
             finally:
@@ -371,6 +373,7 @@ class Executor:
             return 0
         except self.api.Unknown as e:                       # may or may not have landed: freeze those markets (I8)
             self.journal.close(key, "UNKNOWN", note=str(e)[:160])
+            self.note_fault(e)
             with self.wake:
                 for o in orders:
                     self.frozen[o[0]] = key
@@ -390,7 +393,7 @@ class Executor:
         with self.wake:
             self.capacity = 0.7 * self.capacity + 0.3 * min(600.0, len(orders) / dt * 60)
             for (b, sub, layer, o), (_, ok, data) in zip(items, res):
-                self.ledger.placed(b, o, ok, data, layer, sub=sub)
+                self.ledger.placed(b, o, ok, data, layer, sub=sub, ttl=ttl_s)
                 oid = str(data["orderId"]) if ok and data.get("orderId") is not None else None
                 placed.append(oid)
                 if oid:
@@ -414,6 +417,13 @@ class Executor:
         return len(orders)
 
     FUNDS = re.compile(r"insufficient|not enough|balance|buying power|funds", re.I)
+    SIG_FAULT = re.compile(r"-> 5\d\d|timed? ?out|Timeout|ConnectionPool|Connection (reset|aborted|refused)", re.I)
+
+    def note_fault(self, e):
+        """Stop-and-pull rule: count only SIG faults (5xx, timeouts, dropped connections), not 409/404 (order already
+        gone) or our own client-side write budget."""
+        if self.SIG_FAULT.search(str(e)):
+            self.unknown_t = [t for t in self.unknown_t if t >= self.clock() - 3600] + [self.clock()]
 
     def cash_reject(self, text):
         if self.on_cash_reject and self.FUNDS.search(text or ""):
