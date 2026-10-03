@@ -1396,6 +1396,27 @@ class FatFingerTests(EngineCase):
         self.assertIsNotNone(eng.cash_short, [e["text"] for e in eng.events if e["kind"] == "ERR"][-3:])
         self.assertIn("vanished", eng.cash_short["why"][0])
 
+    def test_gates_hold_on_flag_or_blind_fills(self):
+        fake, eng = self.rig()
+        self.settle(eng, fake, 2)
+        c = eng.controls
+        c.layer("fatfinger").update(state="pilot", since=time.time() - 2 * 3600 - 60)
+        c.d["hold_gates"] = True                          # the hold flag: no promotion
+        eng.controller(time.time())
+        self.assertEqual(c.state("fatfinger"), "pilot")
+        c.d["hold_gates"] = False
+        fake.stall_fills()                                # the projection's sequence stops advancing
+        for _ in range(2):
+            loop(eng, fake)
+        eng.cov_seq_t = time.time() - 400                 # ... for more than 5 minutes
+        eng.controller(time.time())
+        self.assertEqual(c.state("fatfinger"), "pilot", "fills blind: gates held")
+        self.assertIn("fills projection sequence", eng.fills_health(time.time())[1])
+        eng.truth_t = time.time()                         # order-truth booking live again: gates may promote
+        eng.fat_sent.clear()                              # (the gate also wants a quiet last hour of placements)
+        eng.controller(time.time())
+        self.assertEqual(c.state("fatfinger"), "full")
+
     def test_write_budget_is_about_zero_after_placement(self):
         fake, eng = self.rig()
         self.settle(eng, fake, 15)

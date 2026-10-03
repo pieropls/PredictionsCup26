@@ -329,6 +329,7 @@ class Engine:
         self.dump_quota, self.dump_pilot, self.cross_log = 0, None, {}
         self.dump_track, self.dump_params = read_json(os.path.join(DATA, "intel", "dump_track.json"), {}) or {}, None
         self.tmm_mid, self.mid24, self.mm_since, self.tmm_inv = {}, {}, {}, collections.deque(maxlen=5000)   # afternoon D-C
+        self.cov_seq, self.cov_seq_t, self.truth_t = None, None, None   # evening §1: fills projection / order-truth health
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
@@ -1138,9 +1139,15 @@ class Engine:
             if hit:
                 c.kill(l, f"{hit[0]['rule']}: {hit[0]['value']}")
                 self.alerts.append(f"{time.strftime('%H:%M')} layer {l} killed: {hit[0]['rule']} ({hit[0]['value']})")
-        # promotions (pilot -> full) and pilot extensions
+        # promotions (pilot -> full) and pilot extensions; evening §1.5: none while the hold flag is set or fills are blind
+        healthy, why_bad = self.fills_health(now)
+        hold = bool(c.d.get("hold_gates")) or not healthy
+        if hold and now - night.get("hold_logged", 0) >= 1800:
+            night["hold_logged"] = now
+            self.night.line(f"pilot gates held: {'hold flag set' if c.d.get('hold_gates') else ''}"
+                            f"{'; ' if c.d.get('hold_gates') and not healthy else ''}{'' if healthy else why_bad}")
         for l in ("mm", "ladder", "pairs", "release", "fatfinger", "dump"):
-            if c.state(l) != "pilot":
+            if c.state(l) != "pilot" or hold:
                 continue
             st, age = stats.get(l, {}), now - since[l]
             ok, why = False, ""
@@ -1474,6 +1481,20 @@ class Engine:
                 self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
                 self.event("BREAKER", msg)
                 self.night.line(msg)
+
+    def fills_health(self, now):
+        """Evening §1.5: fills are healthy when the projection's sequence advanced within 5 min, or order-truth booking
+        succeeded within 5 min. -> (healthy, why not)."""
+        cov = getattr(api, "FILL_COVERAGE", {}) or {}
+        seq = cov.get("seq")
+        if seq is not None and seq != self.cov_seq:
+            self.cov_seq, self.cov_seq_t = seq, now
+        fresh = self.cov_seq_t is not None and now - self.cov_seq_t <= 300
+        truth = self.truth_t is not None and now - self.truth_t <= 300
+        if fresh or truth:
+            return True, ""
+        age = "never seen" if self.cov_seq_t is None else f"unchanged for {(now - self.cov_seq_t) / 60:.0f} min"
+        return False, f"fills projection sequence {self.cov_seq} {age} (newest fill {cov.get('newest')}), order-truth booking not live"
 
     # ------------------------------------------------------------------------------------------------ turnover MM (D-C)
     def update_tmm(self, now):
@@ -3300,6 +3321,13 @@ class EngineControls:
                 raise ValueError(f"layer must be one of {self.STRATEGY} and state one of {LAYER_STATES}")
             c.set_layer(layer, state, "dashboard", by="dashboard")
             return f"{layer}: {state}"
+        if action == "hold_gates":                         # evening §1.5: no pilot promotes while set
+            on = bool(args.get("on", True))
+            with c.lock:
+                c.d["hold_gates"] = on
+                c.save()
+            self.eng.event("CONTROL", f"pilot gates {'held' if on else 'released'} (dashboard)")
+            return f"pilot gates {'held' if on else 'released'}"
         if action == "layer_caps":
             layer, caps = args.get("layer"), args.get("caps") or {}
             if layer not in LAYER_CAPS or not isinstance(caps, dict) or not set(caps) <= set(LAYER_CAPS[layer]):

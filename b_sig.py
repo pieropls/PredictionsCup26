@@ -166,12 +166,18 @@ def orderbook(ex, depth=10):
     return lv("bids"), lv("asks")
 
 
+FILL_COVERAGE = {}      # evening §1.2: the fills projection's coverage on the latest read {t, seq} (the stall detector)
+
+
 def fills(known=(), max_pages=5):
     """Fills newest first, paging back until one whose key (tradeId:orderId) is already known (or max_pages):
     [{id, orderId, exchangeId, price (order side terms), quantity (negative = NO), side, filledAt (UTC)}]."""
     out, cursor = [], None
     for _ in range(max_pages):
         d = _req("GET", f"/tournaments/{T['slug']}/portfolio/fills", params={"limit": 100, **({"cursor": cursor} if cursor else {})})
+        if not cursor:
+            FILL_COVERAGE.update(t=time.time(), seq=(d.get("coverage") or {}).get("projectedThroughSequence"),
+                                 newest=(d["data"][0].get("filledAt") if d.get("data") else None))
         out += d["data"]
         if any(f"{f['id']}:{f.get('orderId')}" in known for f in d["data"]) or not d["pagination"]["hasMore"]:
             return out

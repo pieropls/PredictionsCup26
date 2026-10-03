@@ -110,6 +110,12 @@ class FakeSIG:
         return {str(e): self.px.get(str(e), (None, None, None)) for e in exs}
 
     spare = True                                          # the read governor (b_sig.spare_reads): tests can tighten it
+
+    def stall_fills(self):
+        """From now on the fills projection returns what it had (SIG stopped publishing fills at 15:25:55 on Oct 2)."""
+        with self.lock:
+            self._fills_seen_at_stall = list(reversed(self.fill_log))[:500]
+        self.fill_stalled = True
     tape = {}                                             # {ex: [trade, ...]} for /exchanges/{ex}/trades (intel)
 
     def _req(self, method, path, params=None, **kw):
@@ -127,7 +133,13 @@ class FakeSIG:
         b, a, _ = self.px.get(str(ex), (None, None, None))
         return ([(b, 1000.0)] if b is not None else [], [(a, 1000.0)] if a is not None else [])
 
+    FILL_COVERAGE = {}                                    # evening §1.2: the projection's sequence advances on every read
+    fill_stalled = False                                  # tests: SIG's fills projection stops (no new fills, frozen sequence)
+
     def fills(self, known=(), max_pages=5):
+        if self.fill_stalled:
+            return [f for f in self._fills_seen_at_stall]
+        self.FILL_COVERAGE.update(t=time.time(), seq=self.FILL_COVERAGE.get("seq", 0) + 1, newest=None)
         with self.lock:
             return list(reversed(self.fill_log))[:100 * max_pages]
 
