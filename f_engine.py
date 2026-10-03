@@ -48,7 +48,8 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S, FAT_MOVE, FAT_CAPACITY_SHARE, FAT_BOOK_READS, QTY_TOL,
                       FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, TMM_TTL_S, LADDER_TTL_S, RECYCLE_TAKE_TTL_S, TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_TTL_S, DUMP_TTL_S, DUMP_MIN_FAIR, DUMP_MIN_REF, DUMP_OFFSETS,
                       DUMP_REF_GAP, DUMP_COST, DUMP_MIN_SIDE_COST, DUMP_QUEUE_S, DUMP_BOOK_READS, DUMP_REBOUND_MIN, DUMP_HOLD_S,
-                      DUMP_NEWS_DROP, DUMP_BREAKER_MARKETS, DUMP_BREAKER_FAIR, DUMP_PILOT_SIDES, DUMP_PILOT_S, DUMP_REARM_S,
+                      DUMP_NEWS_DROP, DUMP_BREAKER_MARKETS, DUMP_BREAKER_FAIR, DUMP_PILOT_SIDES, DUMP_PILOT_S, DUMP_REARM_S, DUMP_ARENA, DUMP_ARENA_MIN_FAIR,
+                      DUMP_ARENA_COST, DUMP_CONC_CAP, DUMP_REF_LONG_S,
                       TMM_MID_HALF_LIFE_S, TMM_KAPPA_MAX, TMM_SIZE, TMM_CAP_SIDE, TMM_SKEW_TICKS, TMM_OFFER_MID_S, TMM_RELEASE_S,
                       INTEL_READS, INTEL_REVISIT_S, INTEL_DAILY_HOUR, HEADLINE_RACES)
 from d_ledger import Ledger, stamp, write_atomic
@@ -335,6 +336,7 @@ class Engine:
         self.fills_blind, self.pending_backfill, self.last_booked_t = None, None, time.time()
         self.truth_read_t, self.truth_prev_cur, self.pos_fail, self.faults_pulled = None, {}, 0, None
         self.order_moved_t, self.audit_first = {}, {}       # night §1.2
+        self.pending_fixes = []                             # day 3 §1: subbook_fix
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
@@ -492,6 +494,12 @@ class Engine:
                 new_orders.add(r["order"])
         except Exception as err:
             self.event("ERR", f"order truth: {err!r}")
+        while self.pending_fixes:                           # day 3 §1: subbook_fix, inside the loop (the engine owns the ledger)
+            fix = self.pending_fixes.pop(0)
+            try:
+                self.apply_subbook_fix(fix)
+            except Exception as err:
+                self.event("ERR", f"subbook_fix: {err!r}")
         if self.pending_backfill:
             job, self.pending_backfill = self.pending_backfill, None
             try:
@@ -1651,6 +1659,32 @@ class Engine:
             self.truth_t = now
         return booked
 
+    def apply_subbook_fix(self, fix):
+        """Move shares between one market's sub-books (sum unchanged), close a dump tranche whose sub-book reaches 0, cancel
+        the listed engine orders; logged before/after (event FIX, RUN_LOG)."""
+        ex = fix["ex"]
+        with self.ledger.lock:
+            books = self.ledger.subbooks.setdefault(ex, {})
+            before = {k: round(v, 2) for k, v in books.items()}
+            total = sum(books.values())
+            for sub, d in fix["moves"].items():
+                books[sub] = books.get(sub, 0) + d
+            for sub in [k for k, v in books.items() if abs(v) < 1e-6 and k != "inventory"]:
+                del books[sub]
+                t = self.ledger.tranches.get(sub)
+                if t and t.get("state") == "open":
+                    t.update(state="closed", note=f"subbook_fix {stamp()}: {fix['reason']}")
+            assert abs(sum(books.values()) - total) < 1e-6
+            after = {k: round(v, 2) for k, v in books.items()}
+        n = 0
+        for o in self.open:
+            if o["id"] in fix["cancel"] and o["id"] not in self.ex.cancelling:
+                n += bool(self.ex.cancel(o, reason="subbook_fix", front=True))
+        self.ledger.save()
+        msg = f"SUBBOOK FIX {self.name(ex)} (ex {ex}): {before} -> {after}; {n} order(s) cancelled {fix['cancel']}; {fix['reason']}"
+        self.event("FIX", msg)
+        self.night.line(msg)
+
     def backfill_fills(self, t0, pos, prev, dry_run=True, only=None):
         """Evening §1.3, once: fills since t0 that only the audit saw (position moves pushed into inventory). Per market, the
         audit's moves logged in engine.log between t0 and the start of live order-truth booking must equal the orders that
@@ -1816,15 +1850,46 @@ class Engine:
             pass
         return self.dump_pilot[1]
 
+    def dump_ref_v2(self, ex):
+        """Day 3 §1 (v2 reference): max(SIG 30-min median, SIG 6-h median of the 5-min mid samples); the 30-min median alone
+        until 1 h of samples. -> (ref, dumping: 30-min median below the 6-h one)."""
+        r30 = self.ref(ex)
+        h = [v for t, v in (self.mid24.get(ex) or []) if t >= time.time() - DUMP_REF_LONG_S]
+        if r30 is None or len(h) < 12:
+            return r30, False
+        xs = sorted(h)
+        r6 = xs[len(xs) // 2]
+        return max(r30, r6), r30 < r6
+
+    def arena(self):
+        """{(ex, side)} of DUMP_ARENA by market name (empty = the dump catcher isn't limited to an arena)."""
+        names = {self.name(b.ex): b.ex for b in self.bots if b.kind == "market"}
+        return {(names[n], sd) for n, sd in DUMP_ARENA if n in names}
+
     def dump_eligible(self, ex):
-        """[(side, fair_side, ref_side)]: mapped sides with fair_side >= 0.90 and SIG 30-min ref_side >= 0.80, no manual."""
+        """[(side, fair_side, ref_side)]: mapped sides with fair_side >= 0.90 (arena sides: >= 0.85) and SIG ref_side >= 0.80
+        (ref = the v2 reference), no manual market, no side whose opposite we hold."""
         b = self.owner.get(ex)
-        f, r = self.fair.get(ex), self.ref(ex)
+        f, r = self.fair.get(ex), self.dump_ref_v2(ex)[0]
         if b is None or b.kind != "market" or ex in self.manual_ex or f is None or r is None:
             return []
         held = self.book.get(ex, {}).get("pos", 0)         # never a bid that would net against shares we hold on the other
+        ar = self.arena() if DUMP_ARENA else set()
         return [(side, fs, rs) for side, fs, rs in (("yes", f, r), ("no", 1 - f, 1 - r))   # side (pair-set legs, inventory)
-                if fs >= DUMP_MIN_FAIR and rs >= DUMP_MIN_REF and not (held <= -MIN_QTY if side == "yes" else held >= MIN_QTY)]
+                if fs >= (DUMP_ARENA_MIN_FAIR if (ex, side) in ar else DUMP_MIN_FAIR) and rs >= DUMP_MIN_REF
+                and not (held <= -MIN_QTY if side == "yes" else held >= MIN_QTY)]
+
+    def side_cost(self, ex, side):
+        """Day 3 §1: position held on `side` at cost (SIG avgCost) + our resting dump bids on it."""
+        b = self.book.get(ex) or {}
+        pos, row = b.get("pos", 0), b.get("row") or {}
+        held = pos if side == "yes" else -pos
+        cost = max(0.0, held) * float(row.get("avgCost") or 0) if held > 0 else 0.0
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"])
+            if rec and rec.get("layer") == "dump" and o["ex"] == ex and o["side"] == side:
+                cost += o["qty"] * o["price"]
+        return cost
 
     def dump_levels(self, ex, side, fs, rs, cost):
         """[(i, price, shares)]: fair_side - 0.07 / 0.12 / 0.20, each <= ref_side - 0.04, one tick above the best rival bid
@@ -1859,6 +1924,9 @@ class Engine:
         st = self.controls.state("dump")
         tier_a = self.fat_tiers()
         pilot = self.dump_pilot_sides(now) if st == "pilot" else None
+        ar = self.arena() if DUMP_ARENA else None
+        if ar is not None:                                  # day 3 §1: arena sides only (pilot or full)
+            pilot = ar
         cands = []
         for b in self.bots:
             if b.kind != "market":
@@ -1921,13 +1989,24 @@ class Engine:
             if self.dump_block.get(key, 0) > now or self.breaker.get(("dump", self.pol(ex, side)), 0) > now or self.ex.is_frozen(ex):
                 continue
             fat_worst = sum(x["qty"] * x["px"] for x in (self.fat_now.get(ex) or []) if x["side"] == side)
-            cost = min(DUMP_COST["A" if ex in tier_a else "B"], funded - fat_worst)
+            base = DUMP_ARENA_COST if ar is not None and key in ar else DUMP_COST["A" if ex in tier_a else "B"]
+            cost = min(base, funded - fat_worst, DUMP_CONC_CAP - self.side_cost(ex, side))   # day 3 §1: concentration cap
             if cost < DUMP_MIN_SIDE_COST:
                 continue
+            dumping = self.dump_ref_v2(ex)[1]
+            rest_px = {}
+            for o in self.open:
+                rec = self.ledger.orders.get(o["id"])
+                if rec and rec.get("layer") == "dump" and o["ex"] == ex and o["side"] == side:
+                    rest_px[rec.get("sub")] = o["price"]
             for i, px, q in self.dump_levels(ex, side, fs, rs, cost):
+                sub = f"dump:{ex}:{side}:{i}"
+                if dumping and sub in rest_px and px < rest_px[sub] - 1e-9:
+                    px = rest_px[sub]                       # never lower a resting level while a dump is in progress
+                    q = int(cost / len(DUMP_OFFSETS) / px)
                 if key in recent_fill and round(px, 3) not in resting.get(key, set()):
                     continue                                # re-arm a filled side only after 10 min
-                plan.setdefault(ex, []).append(dict(side=side, px=px, qty=q, sub=f"dump:{ex}:{side}:{i}", level=i))
+                plan.setdefault(ex, []).append(dict(side=side, px=px, qty=q, sub=sub, level=i))
         return plan
 
     def track_dumps(self, now):
@@ -3593,6 +3672,20 @@ class EngineControls:
             self.eng.pending_backfill = dict(since=since, dry_run=bool(args.get("dry_run", True)), orders=orders)
             return f"backfill from {since} queued for the next loop ({'dry run' if args.get('dry_run', True) else 'BOOKING'}" \
                    f"{', orders ' + ','.join(orders) if orders else ''})"
+        if action == "subbook_fix":                        # day 3 §1: an audited correction of one market's sub-books
+            ex = str(args.get("ex"))
+            moves = {str(k): float(v) for k, v in (args.get("moves") or {}).items()}
+            cancel = [str(o) for o in (args.get("cancel") or [])]
+            if ex not in self.eng.owner or not moves:
+                raise ValueError("subbook_fix needs a known market (ex) and moves {sub: delta}")
+            if abs(sum(moves.values())) > 1e-6:
+                raise ValueError(f"moves must add up to 0 (the position doesn't change): they add up to {sum(moves.values()):+,.2f}")
+            for oid in cancel:
+                rec = self.eng.ledger.orders.get(oid)
+                if not rec or rec.get("ex") != ex or rec.get("bot") in self.eng.position_names:
+                    raise ValueError(f"order {oid}: only engine market orders on ex {ex} can be cancelled here")
+            self.eng.pending_fixes.append(dict(ex=ex, moves=moves, cancel=cancel, reason=str(args.get("reason") or "")[:160]))
+            return f"subbook_fix for ex {ex} queued for the next loop: {moves}, cancel {cancel}"
         if action == "truth_mode":                         # evening §1.2: shadow (compute + log) or book
             mode = args.get("mode")
             if mode not in ("shadow", "book"):

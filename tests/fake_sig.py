@@ -92,8 +92,11 @@ class FakeSIG:
     def positions(self):
         return {ex: q for ex, q in self.pos.items() if q}
 
+    avg_cost = {}                                         # tests: a position's avgCost (default 0.5)
+
     def positions_raw(self):
-        return [dict(exchangeId=ex, settled=False, avgCost=0.5, unrealizedPnl=0.0, marketValue=abs(q) * 0.5, currentPrice=0.5,
+        return [dict(exchangeId=ex, settled=False, avgCost=self.avg_cost.get(ex, 0.5), unrealizedPnl=0.0, marketValue=abs(q) * 0.5,
+                     currentPrice=0.5,
                      lots=[dict(side="YES" if q > 0 else "NO", quantity=abs(q))]) for ex, q in self.pos.items() if q]
 
     @staticmethod

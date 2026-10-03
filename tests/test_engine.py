@@ -7,6 +7,7 @@ No network, nothing sent.   python3 -m unittest tests.test_engine
   plan-cycle        writes taking 2 s each in the executor's threads do not slow the plan cycle
   dashboard         read-only controls, bound to 127.0.0.1
 """
+import collections
 import contextlib
 import csv
 import datetime
@@ -1440,6 +1441,11 @@ class FatFingerTests(EngineCase):
 class DumpTests(EngineCase):
     """Afternoon D-A: bids 7-20c under fair on favourites, a rebound sell for the round trip (A2 exception), guards."""
 
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, f_engine, "DUMP_ARENA", f_engine.DUMP_ARENA)
+        f_engine.DUMP_ARENA = []                          # generic favourites (the arena has its own tests)
+
     def rig(self, state="full", cash_above_floor=40_000):
         fresh_data(layers=dict(position=dict(state="full"), dump=dict(state=state)))
         fake = new_fake(writes_per_min=10_000)
@@ -1587,6 +1593,11 @@ class DumpTests(EngineCase):
 class OrderTruthTests(EngineCase):
     """Evening §1.2-1.4 + Piero's unattended rules: SIG's fills projection stalls; fills come from our own order records
     (an order that shrank or left the book without our cancel, before its TTL) when the position moved the same way."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, f_engine, "DUMP_ARENA", f_engine.DUMP_ARENA)
+        f_engine.DUMP_ARENA = []                          # generic favourites (the arena has its own tests)
 
     def rig(self, mode="book"):
         fresh_data(layers=dict(position=dict(state="full"), dump=dict(state="full")))
@@ -1766,6 +1777,84 @@ class OrderTruthTests(EngineCase):
         eng.controller(time.time())
         self.assertTrue(eng.controls.paused)
         self.assertTrue(any(e["kind"] == "STOP" for e in eng.events))
+
+
+class ArenaTests(EngineCase):
+    """Day 3 §1: dump catcher on arena sides only, v2 reference, no lowering during a dump, concentration cap; subbook_fix."""
+
+    def rig(self):
+        fresh_data(layers=dict(position=dict(state="full"), dump=dict(state="pilot")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 40_000)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None
+                and eng.fair[b.ex] >= 0.93]
+        self.addCleanup(setattr, f_engine, "DUMP_ARENA", f_engine.DUMP_ARENA)
+        f_engine.DUMP_ARENA = [(eng.name(favs[0]), "yes"), (eng.name(favs[1]), "yes")]
+        return fake, eng, favs
+
+    def settle(self, eng, fake, favs, n=3):
+        for _ in range(n):
+            for ex in favs:
+                seed_ref(eng, ex, mid=eng.fair[ex] - 0.01)
+            eng.ex.capacity = 6000.0
+            loop(eng, fake)
+
+    def dump_orders(self, eng, fake):
+        return [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "dump"]
+
+    def test_arena_only_and_8k_per_side(self):
+        fake, eng, favs = self.rig()
+        self.settle(eng, fake, favs)
+        exs = {o["ex"] for o in self.dump_orders(eng, fake)}
+        self.assertEqual(exs, {favs[0], favs[1]})
+        for ex in exs:
+            self.assertLessEqual(sum(o["qty"] * o["price"] for o in self.dump_orders(eng, fake) if o["ex"] == ex), 8_000 + 1e-6)
+
+    def test_concentration_cap(self):
+        fake, eng, favs = self.rig()
+        ex = favs[0]
+        fake.pos[ex] = 13_000                             # 13k YES held at 0.95 cost >= 12k: no new levels there
+        fake.avg_cost[ex] = 0.95
+        self.settle(eng, fake, favs)
+        self.assertGreaterEqual(eng.side_cost(ex, "yes"), 12_000)
+        self.assertFalse([o for o in self.dump_orders(eng, fake) if o["ex"] == ex])
+        self.assertTrue([o for o in self.dump_orders(eng, fake) if o["ex"] == favs[1]])
+
+    def test_v2_reference_and_no_lowering_during_a_dump(self):
+        fake, eng, favs = self.rig()
+        self.settle(eng, fake, favs)
+        ex = favs[0]
+        now = time.time()
+        eng.mid24[ex] = collections.deque([(now - 300 * k, eng.fair[ex] - 0.01) for k in range(20)][::-1], maxlen=288)
+        before = {eng.ledger.orders[o["id"]]["sub"]: o["price"] for o in self.dump_orders(eng, fake) if o["ex"] == ex}
+        seed_ref(eng, ex, mid=eng.fair[ex] - 0.08)        # a dump in progress: the 30-min median falls below the 6-h one
+        ref, dumping = eng.dump_ref_v2(ex)
+        self.assertTrue(dumping)
+        self.assertAlmostEqual(ref, eng.fair[ex] - 0.01, places=3, msg="reference = max(30-min, 6-h)")
+        loop(eng, fake)
+        after = {eng.ledger.orders[o["id"]]["sub"]: o["price"] for o in self.dump_orders(eng, fake) if o["ex"] == ex}
+        for sub, p in before.items():
+            self.assertGreaterEqual(after.get(sub, p), p - 1e-9, "levels not lowered while dumping")
+
+    def test_subbook_fix_moves_shares_closes_tranche_and_cancels(self):
+        fake, eng, favs = self.rig()
+        ex = favs[0]
+        led = eng.ledger
+        fake.pos[ex] = 181                                # the ex-840 case: position +181
+        led.subbooks[ex] = {"inventory": 797.0, "mm": 612.0, f"dump:{ex}:yes:0": -1228.0}
+        led.tranches[f"dump:{ex}:yes:0"] = dict(ex=ex, side="no", kind="dump", pre_ref_side=0.15, t="x", ts=time.time(), state="open")
+        c = f_engine.EngineControls(eng)
+        with self.assertRaises(ValueError):
+            c._apply("subbook_fix", dict(ex=ex, moves={f"dump:{ex}:yes:0": 1228, "inventory": -797}))   # doesn't add up to 0
+        c._apply("subbook_fix", dict(ex=ex, moves={f"dump:{ex}:yes:0": 1228, "inventory": -797, "mm": -431}, reason="test"))
+        loop(eng, fake)
+        self.assertEqual({k: v for k, v in led.subbooks[ex].items() if abs(v) >= 1e-6}, {"mm": 181.0})
+        self.assertEqual(led.tranches[f"dump:{ex}:yes:0"]["state"], "closed")
+        self.assertTrue(any(e["kind"] == "FIX" for e in eng.events))
 
 
 class IntelTests(EngineCase):

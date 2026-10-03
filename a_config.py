@@ -156,6 +156,13 @@ DUMP_NEWS_DROP = 0.05                      # Polymarket fair_side drop > 5c in 1
 DUMP_BREAKER_MARKETS, DUMP_BREAKER_FAIR = 3, 0.01   # >= 3 markets filled in 10 min, same political side, PM >= 1c against
 DUMP_PILOT_SIDES, DUMP_PILOT_S = 15, 4 * 3600
 DUMP_REARM_S = 600
+# day 3 §1 (night §2): the dump catcher on the arena sides only (where the sweeps happen), v2 reference, concentration cap
+DUMP_ARENA = [("Rhode Island Senate D", "yes"), ("Rhode Island Senate R", "no"), ("Oklahoma Senate D", "no"),
+              ("Massachusetts Governor R", "no"), ("New Hampshire Senate D", "yes"), ("New Hampshire Senate R", "no"),
+              ("Minnesota Senate D", "yes"), ("U.S. House D", "yes"), ("MN-05 House race D", "yes")]
+DUMP_ARENA_MIN_FAIR, DUMP_ARENA_COST = 0.85, 8_000   # arena sides eligible down to fair_side 0.85; cost per side
+DUMP_CONC_CAP = 12_000                    # no new levels where position on the side (at cost) + resting dump bids >= this
+DUMP_REF_LONG_S = 6 * 3600                # reference = max(SIG 30-min median, SIG 6-h median)
 KAPPA_FROM_OCT30 = 0.03         # D3: capital discount from Oct 30 (election-night cash)
 LOSS_STOP = 2_000               # D5: bot-owned P&L at fair, rolling 24 h
 OPPORTUNITY_RESERVE = 25_000    # afternoon §2 (was 10k): on top of the floor; dump + fat-finger fills, snipes, >= 8c takes
