@@ -1857,6 +1857,95 @@ class ArenaTests(EngineCase):
         self.assertTrue(any(e["kind"] == "FIX" for e in eng.events))
 
 
+class LongshotTests(EngineCase):
+    """Day 3 §2: 0.5-1c bids on sides Polymarket prices <= 5%, exits at 3x entry / the SIG 6-h median; off by default."""
+
+    def rig(self, state="pilot", cash_above_floor=40_000):
+        layers = dict(position=dict(state="full"))
+        if state:
+            layers["longshot"] = dict(state=state)
+        fresh_data(layers=layers)
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + cash_above_floor)
+        eng = engine(fake)
+        for _ in range(4):
+            eng.ex.capacity = 6000.0
+            loop(eng, fake)
+        return fake, eng
+
+    def long_orders(self, eng, fake, layer="longshot"):
+        return [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == layer]
+
+    def test_off_by_default(self):
+        fake, eng = self.rig(state=None)
+        self.assertEqual(self.long_orders(eng, fake), [])
+
+    def test_levels_sides_and_caps(self):
+        fake, eng = self.rig()
+        mine = self.long_orders(eng, fake)
+        self.assertTrue(mine)
+        by_side = {}
+        for o in mine:
+            fs = eng.side_fair(o["ex"], o["side"])
+            self.assertLessEqual(fs, 0.05 + 1e-9, o)
+            self.assertNotIn(o["ex"], (AK, RI), "never manual")
+            by_side.setdefault((o["ex"], o["side"]), []).append((o["price"], o["qty"]))
+        for k, lv in by_side.items():
+            self.assertEqual(sorted(lv), [(0.005, 20000.0), (0.01, 10000.0)], k)
+            self.assertLessEqual(sum(p * q for p, q in lv), 200 + 1e-9)
+        self.assertLessEqual(sum(o["qty"] * o["price"] for o in mine), 20_000 + 1e-6)
+        self.assertEqual(eng.longshot_levels(0.003), [(0.005, 10_000)], "fair_side < 0.005: only the 0.005 level, 10k shares")
+
+    def test_not_where_we_hold_the_other_side(self):
+        fake, eng = self.rig()
+        ex, side = next((o["ex"], o["side"]) for o in self.long_orders(eng, fake))
+        eng.book[ex] = dict(eng.book.get(ex, {}), pos=500 if side == "no" else -500)
+        self.assertEqual([s for s, _ in eng.longshot_eligible(ex) if s == side], [])
+
+    def test_fill_exits_at_3x_and_the_6h_median(self):
+        fake, eng = self.rig()
+        o = next(o for o in self.long_orders(eng, fake) if o["price"] == 0.01)
+        ex, side = o["ex"], o["side"]
+        now = time.time()
+        med_yes = 0.06 if side == "yes" else 0.94           # the side's 6-h median: 6c
+        eng.mid24[ex] = collections.deque([(now - 300 * k, med_yes) for k in range(20)][::-1], maxlen=288)
+        fake.fill(o["id"], o["qty"])
+        for _ in range(2):
+            eng.mid24[ex] = collections.deque([(now - 300 * k, med_yes) for k in range(20)][::-1], maxlen=288)
+            loop(eng, fake)
+        ex_o = self.long_orders(eng, fake, "longexit")
+        sells = sorted((round(1 - x["price"], 3), x["qty"]) for x in ex_o if x["ex"] == ex)
+        self.assertEqual([p for p, _ in sells], [0.03, 0.06], "3x entry and the 6-h median")
+        self.assertEqual(sum(q for _, q in sells), o["qty"])
+        self.assertTrue(any(e["kind"] == "LONGSHOT" for e in eng.events))
+
+    def test_news_guard_and_breaker(self):
+        fake, eng = self.rig()
+        ex, side = next((o["ex"], o["side"]) for o in self.long_orders(eng, fake))
+        f = eng.fair[ex]
+        FAIR[ex] = f + 0.04 if side == "yes" else f - 0.04  # the longshot side rises 4c within 10 min
+        try:
+            for _ in range(3):
+                loop(eng, fake)
+            self.assertGreater(eng.long_block.get((ex, side), 0), time.time())
+            self.assertFalse([o for o in self.long_orders(eng, fake) if o["ex"] == ex and o["side"] == side])
+        finally:
+            FAIR.pop(ex, None)
+        fake2, eng2 = self.rig()
+        picks, seen = [], set()
+        for o in self.long_orders(eng2, fake2):
+            if (o["ex"], o["side"]) not in seen:
+                seen.add((o["ex"], o["side"]))
+                picks.append(o)
+        if len(picks) < 5:
+            self.skipTest("fixture has fewer than 5 longshot sides")
+        for o in picks[:5]:
+            fake2.fill(o["id"], 100)
+        loop(eng2, fake2)
+        self.assertGreater(eng2.breaker.get(("long", "all"), 0), time.time())
+
+
 class IntelTests(EngineCase):
     def test_tape_sweep_becomes_a_big_event_with_missed_value(self):
         fresh_data(layers=dict(position=dict(state="full"), leaders=dict(state="full")))
@@ -2014,7 +2103,7 @@ class DashV3PayloadTests(EngineCase):
         self.assertEqual([b["key"] for b in cap["buckets"]][-1], "cash")
         self.assertTrue(all(b["sig"] >= 0 for b in cap["buckets"]))
         self.assertEqual([r["key"] for r in s["strategies"]],
-                         ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "leaders"])
+                         ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"])
         self.assertTrue(all(h["side"] in ("yes", "no") and h["shares"] > 0 for h in s["holdings"]))
         mm_row = next(r for r in s["strategies"] if r["key"] == "mm")
         self.assertEqual(mm_row["fills_today"], 1)

@@ -231,7 +231,7 @@ class Ledger:
                 del self.orders[o["id"]]
         return new
 
-    EXIT_LAYERS = {"dumpexit", "rebound", "recycle", "release", "exit", "unwind", "repair"}
+    EXIT_LAYERS = {"dumpexit", "longexit", "rebound", "recycle", "release", "exit", "unwind", "repair"}
 
     def apply_sub(self, ex, order, delta):
         """Night §1.1 (I2/I3): an owned fill moves its own sub-book, but an exit never takes it past zero: a fill that would

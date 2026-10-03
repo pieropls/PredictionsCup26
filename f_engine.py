@@ -49,7 +49,9 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, TMM_TTL_S, LADDER_TTL_S, RECYCLE_TAKE_TTL_S, TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_TTL_S, DUMP_TTL_S, DUMP_MIN_FAIR, DUMP_MIN_REF, DUMP_OFFSETS,
                       DUMP_REF_GAP, DUMP_COST, DUMP_MIN_SIDE_COST, DUMP_QUEUE_S, DUMP_BOOK_READS, DUMP_REBOUND_MIN, DUMP_HOLD_S,
                       DUMP_NEWS_DROP, DUMP_BREAKER_MARKETS, DUMP_BREAKER_FAIR, DUMP_PILOT_SIDES, DUMP_PILOT_S, DUMP_REARM_S, DUMP_ARENA, DUMP_ARENA_MIN_FAIR,
-                      DUMP_ARENA_COST, DUMP_CONC_CAP, DUMP_REF_LONG_S,
+                      DUMP_ARENA_COST, DUMP_CONC_CAP, DUMP_REF_LONG_S, LONG_MAX_FAIR, LONG_LEVELS,
+                      LONG_TINY_FAIR, LONG_TINY_QTY, LONG_SIDE_MAX_COST, LONG_TTL_S, LONG_EXIT_TTL_S, LONG_EXIT_MULT, LONG_STALE_S,
+                      LONG_NEWS_RISE, LONG_NEWS_WINDOW_S, LONG_NEWS_HOLD_S, LONG_BREAKER_SIDES, LONG_BREAKER_PAUSE_S, LONG_PILOT_S,
                       TMM_MID_HALF_LIFE_S, TMM_KAPPA_MAX, TMM_SIZE, TMM_CAP_SIDE, TMM_SKEW_TICKS, TMM_OFFER_MID_S, TMM_RELEASE_S,
                       INTEL_READS, INTEL_REVISIT_S, INTEL_DAILY_HOUR, HEADLINE_RACES)
 from d_ledger import Ledger, stamp, write_atomic
@@ -82,7 +84,7 @@ def host_id():
 
 
 # ====================================================================================================== controls
-LAYERS = ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "leaders"]
+LAYERS = ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
 TMM_ENABLED = True              # afternoon D-C: the engine's MM is the turnover MM (False: classic MM v2, tests only)
 LAYER_STATES = ("off", "pilot", "full")
 
@@ -337,6 +339,8 @@ class Engine:
         self.truth_read_t, self.truth_prev_cur, self.pos_fail, self.faults_pulled = None, {}, 0, None
         self.order_moved_t, self.audit_first = {}, {}       # night §1.2
         self.pending_fixes = []                             # day 3 §1: subbook_fix
+        self.long_now, self.long_view, self.long_block, self.long_quota = {}, {}, {}, 0   # day 3 §2: longshot catcher
+        self.long_hist = {}
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
@@ -396,8 +400,9 @@ class Engine:
 
     MARKET_LAYERS = {"exit": "recycler", "recycle": "recycler", "take": "sniper", "touch": "mm", "mm": "mm",
                      "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs",
-                     "release": "release", "fatfinger": "fatfinger", "dump": "dump", "dumpexit": "dump"}
-    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit"}
+                     "release": "release", "fatfinger": "fatfinger", "dump": "dump", "dumpexit": "dump",
+                     "longshot": "longshot", "longexit": "longshot"}
+    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit"}
 
     def gate(self, b, wants):
         """Layer flags (data/overrides.json): a want survives only if its layer is on and allowed on this market. Pause
@@ -523,6 +528,7 @@ class Engine:
                 new_f = [f for f in self.ledger.fills[-200:] if f["order"] in self.new_fill_orders]
                 self.fat_fill_events(new_f)
                 self.dump_fill_events(new_f)
+                self.longshot_fill_events(new_f)
         except Exception as err:
             self.event("ERR", f"fat-finger events: {err!r}")
         self.ledger.init_subbooks(pos, self.manual_ex)
@@ -555,6 +561,10 @@ class Engine:
             self.track_dumps(now)
         except Exception as err:
             self.event("ERR", f"dump tranches: {err!r}")
+        try:
+            self.track_longshots(now)
+        except Exception as err:
+            self.event("ERR", f"longshot exits: {err!r}")
         self.controller(now)
         kappa, _ = self.kappa()
         used = self.bucket_usage()
@@ -573,6 +583,12 @@ class Engine:
         except Exception as err:
             self.dump_now = {}
             self.event("ERR", f"dump plan: {err!r}")
+        try:
+            self.long_now = self.longshot_plan(now)
+        except Exception as err:
+            self.long_now = {}
+            self.event("ERR", f"longshot plan: {err!r}")
+        self.long_quota = int(0.15 * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60)
         self.dump_quota = int(0.15 * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60)
         self.fat_quota = int(FAT_CAPACITY_SHARE * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60)
         engine_ex = {b.ex for b in self.bots if b.kind == "market"} | {ex for pb in self.pairs for ex in pb.legs}
@@ -1005,6 +1021,7 @@ class Engine:
                     roc_min=ROC_MIN_TIGHT if free < self.release_target()[0] else ROC_MIN, roc_hold=ROC_HOLD_MIN, held=q, release=rel,
                     fatfinger=self.fat_now.get(b.ex) or [], dump=self.dump_now.get(b.ex) or [],
                     dump_tranches=self.dump_view.get(b.ex, []), tmm=self.tmm_view(b.ex, f, bid, ask),
+                    longshot=self.long_now.get(b.ex) or [], long_exits=self.long_view.get(b.ex, []),
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
                     room={sd: max(0.0, MARKET_MAX_POS - held[sd]) for sd in ("yes", "no")},
@@ -1018,7 +1035,7 @@ class Engine:
     def bucket_usage(self):
         """What each capital bucket uses now (SIG): resting entry buys at full notional, filled inventory at cost."""
         u = dict(committed=0.0, mm=0.0, ladder_filled=0.0, ladder_resting=0.0, ladder_side={"D": 0.0, "R": 0.0, "other": 0.0},
-                 sniper_market={}, sniper_day=0.0, pairs=0.0, fat_resting=0.0, fat_filled=0.0, dump_resting=0.0)
+                 sniper_market={}, sniper_day=0.0, pairs=0.0, fat_resting=0.0, fat_filled=0.0, dump_resting=0.0, long_resting=0.0)
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
             if not rec or o["action"] != "buy" or rec["bot"] in self.position_names:
@@ -1035,6 +1052,8 @@ class Engine:
                 u["fat_resting"] += n
             elif l == "dump":
                 u["dump_resting"] += n
+            elif l == "longshot":
+                u["long_resting"] += n
         for ex, books in self.ledger.subbooks.items():
             for sub, v in books.items():
                 if sub.startswith("fatfinger:"):
@@ -1054,6 +1073,8 @@ class Engine:
                 u["fat_resting"] += n
             elif l == "dump":
                 u["dump_resting"] += n
+            elif l == "longshot":
+                u["long_resting"] += n
         for ex, books in self.ledger.subbooks.items():
             q = books.get("mm", 0)
             f = self.fair.get(ex)
@@ -1072,7 +1093,7 @@ class Engine:
             if bk.get("state", "held") in ("held", "repair"):
                 u["pairs"] += sum(l[3] * (l[4] or 0) for l in self.ledger.basket_fills(bk))
         self.used = {("mm", "inventory"): u["mm"], ("ladder", "filled"): u["ladder_filled"], ("ladder", "resting"): u["ladder_resting"],
-                     ("fatfinger", "resting"): u["fat_resting"], ("fatfinger", "filled"): u["fat_filled"], ("dump", "resting"): u["dump_resting"],
+                     ("fatfinger", "resting"): u["fat_resting"], ("fatfinger", "filled"): u["fat_filled"], ("dump", "resting"): u["dump_resting"], ("longshot", "resting"): u["long_resting"],
                      ("pairs", "capital"): u["pairs"], ("sniper", "per_day"): u["sniper_day"],
                      ("sniper", "per_market"): max(u["sniper_market"].values(), default=0.0)}
         return u
@@ -1103,6 +1124,17 @@ class Engine:
                 self.fat_quota -= 1
                 self.fat_sent.append(time.time())
                 used["fat_resting"] += n
+                out.append(w)
+                continue
+            if l == "longshot":                             # day 3 §2: total resting cap, quota, breaker, reserve fit
+                funded = max(0.0, min(float(OPPORTUNITY_RESERVE), cash - CASH_RESERVE - used["committed"]))
+                worst = sum(x["qty"] * x["px"] for x in (self.long_now.get(b.ex) or []) + (self.fat_now.get(b.ex) or [])
+                            + (self.dump_now.get(b.ex) or []) if x["side"] == w["side"])
+                if self.fills_blind or self.long_quota <= 0 or used["long_resting"] + n > self.cap("longshot", "resting") \
+                        or worst > funded or self.breaker.get(("long", "all"), 0) > time.time():
+                    continue
+                self.long_quota -= 1
+                used["long_resting"] += n
                 out.append(w)
                 continue
             if l == "dump" and self.fills_blind:           # evening §1.4: no new dump levels while fills are blind
@@ -1183,7 +1215,7 @@ class Engine:
             night["hold_logged"] = now
             self.night.line(f"pilot gates held: {'hold flag set' if c.d.get('hold_gates') else ''}"
                             f"{'; ' if c.d.get('hold_gates') and not healthy else ''}{'' if healthy else why_bad}")
-        for l in ("mm", "ladder", "pairs", "release", "fatfinger", "dump"):
+        for l in ("mm", "ladder", "pairs", "release", "fatfinger", "dump", "longshot"):
             if c.state(l) != "pilot" or hold:
                 continue
             st, age = stats.get(l, {}), now - since[l]
@@ -1241,6 +1273,13 @@ class Engine:
                 elif now - night.get(f"{l}_ext", 0) >= DUMP_PILOT_S:
                     night[f"{l}_ext"] = now
                     self.night.line(f"layer dump stays pilot: {trims} I2 trims, cash short {short}, {thr} HTTP 429s (review)")
+            if l == "longshot" and age >= LONG_PILOT_S:     # day 3 §2: 24 h pilot -> full
+                fills = [f for f in self.fills_since(since[l]) if f["layer"] == "longshot" and f["action"] == "buy"]
+                late = [f for f in fills if not self.long_exit_ok(f)]
+                trims = self.ex.trims.get("longshot", 0)
+                short = self.cash_short is not None and self.cash_short["t"] >= since[l]
+                if not late and trims == 0 and not short:
+                    ok, why = True, f"24 h pilot: {len(fills)} fills booked, exits placed, no I2 trims, no CASH SHORT"
             if l == "pairs":
                 done = [bk for bk in self.ledger.baskets if bk.get("ts", 0) >= since[l] and bk.get("state") in ("held", "unwound", "done")
                         and self.ledger.matched(bk) > 0 and not self.basket_residue(bk)]
@@ -1557,7 +1596,8 @@ class Engine:
 
     LAYER_TTL = {"mm": TMM_TTL_S, "fatfinger": FAT_TTL_S, "dump": DUMP_TTL_S, "dumpexit": DUMP_TTL_S, "ladder": LADDER_TTL_S,
                  "rebound": LADDER_TTL_S, "release": RECYCLE_TAKE_TTL_S, "take": TAKE_TTL_S, "recycle": RECYCLE_REST_TTL_S,
-                 "set": PAIR_TTL_S, "unwind": PAIR_TTL_S, "repair": PAIR_TTL_S, "touch": MM_TTL_S}
+                 "set": PAIR_TTL_S, "unwind": PAIR_TTL_S, "repair": PAIR_TTL_S, "touch": MM_TTL_S,
+                 "longshot": LONG_TTL_S, "longexit": LONG_EXIT_TTL_S}
 
     def vanished_fill(self, oid, rec, q0, now):
         """Shares an order filled since the previous snapshot: it shrank, or it left the book while we didn't cancel it
@@ -2083,6 +2123,106 @@ class Engine:
                 self.event("BREAKER", msg)
                 self.night.line(msg)
 
+    # ------------------------------------------------------------------------------------------------ longshot catcher (day 3 §2)
+    def longshot_eligible(self, ex):
+        """[(side, fair_side)]: mapped sides with Polymarket fair_side <= 0.05; never manual; not where we hold the other side."""
+        b, f = self.owner.get(ex), self.fair.get(ex)
+        if b is None or b.kind != "market" or ex in self.manual_ex or f is None:
+            return []
+        held = self.book.get(ex, {}).get("pos", 0)
+        return [(side, fs) for side, fs in (("yes", f), ("no", 1 - f))
+                if fs <= LONG_MAX_FAIR + 1e-9 and not (held <= -MIN_QTY if side == "yes" else held >= MIN_QTY)]
+
+    def longshot_levels(self, fs):
+        """[(price, shares)]: 0.005 x 20k and 0.010 x 10k; only 0.005 x 10k where fair_side < 0.005 (worst case <= 200)."""
+        lv = [(LONG_LEVELS[0][0], LONG_TINY_QTY)] if fs < LONG_TINY_FAIR else list(LONG_LEVELS)
+        out, cost = [], 0.0
+        for px, q in lv:
+            if cost + px * q <= LONG_SIDE_MAX_COST + 1e-9:
+                out.append((px, q))
+                cost += px * q
+        return out
+
+    def longshot_plan(self, now):
+        """{ex: [want-spec]}: resting longshot bids (TTL 24 h, re-placed only when gone), with the news guard."""
+        if not self.controls.on("longshot"):
+            return {}
+        plan = {}
+        for b in self.bots:
+            if b.kind != "market":
+                continue
+            ex, f = b.ex, self.fair.get(b.ex)
+            if f is not None:                               # news guard: a longshot side up > 3c in 10 min
+                h = [x for x in self.long_hist.get(ex, []) if x[0] >= now - LONG_NEWS_WINDOW_S] + [(now, f)]
+                self.long_hist[ex] = h
+                for side in ("yes", "no"):
+                    cur = f if side == "yes" else 1 - f
+                    low = min((v if side == "yes" else 1 - v) for _, v in h)
+                    if cur - low > LONG_NEWS_RISE and low <= LONG_MAX_FAIR:
+                        if self.long_block.get((ex, side), 0) < now:
+                            self.event("NEWS", f"{self.name(ex)} {side.upper()} fair rose {cur - low:.2f} in 10 min: longshot levels pulled 30 min")
+                        self.long_block[(ex, side)] = now + LONG_NEWS_HOLD_S
+            for side, fs in self.longshot_eligible(ex):
+                if self.long_block.get((ex, side), 0) > now or self.ex.is_frozen(ex):
+                    continue
+                for px, q in self.longshot_levels(fs):
+                    plan.setdefault(ex, []).append(dict(side=side, px=px, qty=q, sub=f"longshot:{ex}:{side}:{px:.3f}"))
+        return plan
+
+    def longshot_fill_events(self, fills):
+        now = time.time()
+        for f in fills:
+            if f["layer"] != "longshot" or f["action"] != "buy":
+                continue
+            fv = self.side_fair(f["ex"], f["side"])
+            msg = (f"LONGSHOT FILL {self.name(f['ex'])}: bought {f['qty']:,.0f} {f['side'].upper()} at {f['price']:.3f}"
+                   + ("" if fv is None else f" (fair {fv:.3f})") + f"; exits at {LONG_EXIT_MULT:.0f}x entry and the SIG 6-h median")
+            self.event("LONGSHOT", msg)
+            self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+            self.night.line(msg)
+        recent = {(f["ex"], f["side"]) for f in self.fills_since(now - BREAKER_WINDOW_S) if f["layer"] == "longshot" and f["action"] == "buy"}
+        if len(recent) >= LONG_BREAKER_SIDES and self.breaker.get(("long", "all"), 0) < now:
+            self.breaker[("long", "all")] = now + LONG_BREAKER_PAUSE_S
+            msg = f"LONGSHOT BREAKER: {len(recent)} longshot sides filled within 10 min: no new longshot levels for 30 min (report)"
+            self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+            self.event("BREAKER", msg)
+            self.night.line(msg)
+
+    def track_longshots(self, now):
+        """Filled longshot levels -> exits: half at 3x entry, half at max(3x entry, the side's SIG 6-h median); never below
+        3x entry (A2 exception, as the dump rebound); unsold after 72 h: kept, flagged (dashboard)."""
+        self.long_view = {}
+        for ex, books in self.ledger.subbooks.items():
+            for sub, q in books.items():
+                if not sub.startswith("longshot:") or abs(q) < MIN_QTY:
+                    continue
+                side = sub.split(":")[2]
+                if (q > 0) != (side == "yes"):
+                    continue                                # wrong side (an exit oversold): no exit of its own
+                ids = {i for i, o in self.ledger.orders.items() if o.get("sub") == sub and o.get("layer") == "longshot"}
+                fs = [f for f in self.ledger.fills if f["order"] in ids and f["action"] == "buy"]
+                tq = sum(f["qty"] for f in fs)
+                if not tq:
+                    continue
+                avg = sum(f["qty"] * f["price"] for f in fs) / tq
+                first = min(time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S")) for f in fs)
+                h = [v for t, v in (self.mid24.get(ex) or []) if t >= now - DUMP_REF_LONG_S]
+                med = None
+                if h:
+                    xs = sorted(h)
+                    med = xs[len(xs) // 2] if side == "yes" else 1 - xs[len(xs) // 2]
+                p1 = bots.tick_up(LONG_EXIT_MULT * avg)
+                p2 = bots.tick_up(max(LONG_EXIT_MULT * avg, med or 0.0))
+                self.long_view.setdefault(ex, []).append(dict(sub=sub, side=side, avg=round(avg, 4), qty=abs(q), p1=p1, p2=p2,
+                                                              stale=now - first > LONG_STALE_S))
+
+    def long_exit_ok(self, f):
+        """Gate check: a longshot fill got its exit order within 30 s (the ledger's exit orders on that sub)."""
+        t0 = time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S"))
+        sub = (self.ledger.orders.get(f["order"]) or {}).get("sub")
+        return any(o.get("sub") == sub and o.get("layer") == "longexit" and t0 - 5 <= o.get("ts", 0) <= t0 + 30
+                   for o in self.ledger.orders.values())
+
     # ------------------------------------------------------------------------------------------------ I4 self-cross guard
     @staticmethod
     def yes_quote(side, action, px):
@@ -2140,7 +2280,7 @@ class Engine:
         self.night.line(msg)
         self.controls.decide(f"STOP AND PULL at {time.strftime('%H:%M')} ({reason[:80]}): resume when SIG is healthy?")
 
-    CATCHERS = ("fatfinger", "dump")                       # resting catch levels whose fills are paid from the reserve
+    CATCHERS = ("fatfinger", "dump", "longshot")           # resting catch levels whose fills are paid from the reserve
 
     def cash_short_check(self, raw, catch_open, now):
         """Afternoon D-B: we don't know what SIG does when a fill exceeds cash (reject, partial fill, negative balance).
@@ -2303,7 +2443,7 @@ class Engine:
     def reserve_ok(self, ex, w):
         """Day 2 §3.2: only these may spend the opportunity reserve (down to the floor): fat-finger levels, sniper takes on
         a new market (< 30 min old), and takes >= 8c through fair."""
-        if w.get("layer") in ("fatfinger", "dump"):
+        if w.get("layer") in ("fatfinger", "dump", "longshot"):
             return True
         if w.get("layer") != "take":
             return False
@@ -3181,6 +3321,7 @@ class Engine:
               "sniper": ("Sniper", "Buys big gaps below fair, and new markets"),
               "fatfinger": ("Fat-finger catcher", "Cheap bids that catch wrong-side panic orders"),
               "dump": ("Dump catcher", "Bids 7-20c under fair on favourites; sells the rebound for a round trip"),
+              "longshot": ("Longshot catcher", "0.5-1c bids on sides Polymarket prices <= 5%; sells at 3x entry or more"),
               "leaders": ("Leaderboard logger", "Records the top accounts every 10 minutes")}
 
     @staticmethod
@@ -3189,7 +3330,7 @@ class Engine:
         if sub == "manual":
             return "position"
         for pre, layer in (("recycle:", "recycler"), ("tranche:", "ladder"), ("pairset:", "pairs"), ("fatfinger", "fatfinger"),
-                           ("dump:", "dump"), ("release", "release")):
+                           ("dump:", "dump"), ("longshot:", "longshot"), ("release", "release")):
             if sub.startswith(pre):
                 return layer
         return {"mm": "mm", "sniper": "sniper", "inventory": "inventory"}.get(sub, "inventory")
@@ -3277,7 +3418,7 @@ class Engine:
         new = [r for r in rows if not r["partial"] and r["date"] not in have]
         if not new or api.DRY_RUN:
             return
-        layers = ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump"]
+        layers = ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot"]
         head = ["date", "account_sig", "account_fair", "cash", "holdings_sig", "realized", "unrealized_change", "pnl_sig", "pnl_fair"]
         head += [f"{l}_{k}" for l in layers for k in ("realized", "unrealized")]
         with open(path, "a", newline="") as fh:
@@ -3374,9 +3515,9 @@ class Engine:
                 bk[0] += share * mark
                 bk[1] += share * (fv if fv is not None else mark)
         labels = {"manual": "AK / RI manual positions", "mm": "Market-maker inventory", "ladder": "Ladder tranches", "pairs": "Pair sets",
-                  "sniper": "Sniper / takes", "fatfinger": "Fat-finger catches", "dump": "Dump catches (rebound pending)", "release": "Being released",
+                  "sniper": "Sniper / takes", "fatfinger": "Fat-finger catches", "dump": "Dump catches (rebound pending)", "longshot": "Longshot catches (exits resting)", "release": "Being released",
                   "inventory": "Older inventory (recycler)"}
-        order = ["manual", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "release", "inventory"]
+        order = ["manual", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "release", "inventory"]
         out = [dict(key=k, label=labels[k], sig=round(buckets.get(k, [0, 0])[0], 2), fair=round(buckets.get(k, [0, 0])[1], 2)) for k in order]
         out.append(dict(key="cash", label="Cash", sig=money["cash"], fair=money["cash"]))
         committed = self.committed()
@@ -3459,7 +3600,7 @@ class Engine:
 
     def release_ok(self, ex, side, owner, ctf):
         """Would the release layer sell this holding now? (§3.3; the layer itself decides; this is the dashboard badge)."""
-        return ctf is not None and 0 <= ctf <= self.release_max_cost() and self.sub_layer(owner) not in ("pairs", "position", "fatfinger", "dump")
+        return ctf is not None and 0 <= ctf <= self.release_max_cost() and self.sub_layer(owner) not in ("pairs", "position", "fatfinger", "dump", "longshot")
 
     def release_max_cost(self):
         d = time.strftime("%m-%d")
@@ -3492,7 +3633,7 @@ class Engine:
             last[self.strategy_of(f["bot"], f["layer"])] = f"{f['t'][11:16]} " + self.fill_sentence(f).split(" ", 1)[1] \
                 if " " in self.fill_sentence(f) else ""
         out = []
-        for l in ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "leaders"]:
+        for l in ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]:
             label, what = self.LABELS[l]
             v = self.controls.layer(l)
             t_, a_ = pt.get(l, {}), pa.get(l, {})

@@ -128,6 +128,7 @@ LAYER_CAPS = {
     "fatfinger": {"resting": (8_000, 300_000, 400_000), "filled": (30_000, 30_000, 40_000)},  # resting = policy (no cash lock);
                                                                                                # afternoon D-B: 40k -> 300k
     "dump": {"resting": (120_000, 150_000, 200_000)},          # afternoon D-A: resting cost (policy); fills bounded by the reserve
+    "longshot": {"resting": (20_000, 20_000, 25_000)},        # day 3 §2: total resting cost (worst case 200 per side)
 }
 # fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
 FAT_LEVELS = [0.12, 0.08, 0.05]
@@ -163,6 +164,17 @@ DUMP_ARENA = [("Rhode Island Senate D", "yes"), ("Rhode Island Senate R", "no"),
 DUMP_ARENA_MIN_FAIR, DUMP_ARENA_COST = 0.85, 8_000   # arena sides eligible down to fair_side 0.85; cost per side
 DUMP_CONC_CAP = 12_000                    # no new levels where position on the side (at cost) + resting dump bids >= this
 DUMP_REF_LONG_S = 6 * 3600                # reference = max(SIG 30-min median, SIG 6-h median)
+# longshot catcher (day 3 §2): resting bids at 0.5-1c on sides Polymarket prices <= 5%, to catch sweeps through them
+LONG_MAX_FAIR = 0.05                      # sides with Polymarket fair_side <= this
+LONG_LEVELS = [(0.005, 20_000), (0.010, 10_000)]   # (price, shares): 100 SIG each
+LONG_TINY_FAIR, LONG_TINY_QTY = 0.005, 10_000      # fair_side < 0.005: only the 0.005 level, 10,000 shares
+LONG_SIDE_MAX_COST = 200
+LONG_TTL_S, LONG_EXIT_TTL_S = 24 * 3600, 24 * 3600
+LONG_EXIT_MULT = 3.0                      # exits: half at 3x entry, half at max(3x entry, SIG 6-h median); never below 3x
+LONG_STALE_S = 72 * 3600                  # unsold after this: kept, flagged on the dashboard
+LONG_NEWS_RISE, LONG_NEWS_WINDOW_S, LONG_NEWS_HOLD_S = 0.03, 600, 1800   # fair_side +3c in 10 min -> pull that side 30 min
+LONG_BREAKER_SIDES, LONG_BREAKER_PAUSE_S = 5, 1800  # >= 5 sides filled in 10 min -> no new levels for 30 min
+LONG_PILOT_S = 24 * 3600
 KAPPA_FROM_OCT30 = 0.03         # D3: capital discount from Oct 30 (election-night cash)
 LOSS_STOP = 2_000               # D5: bot-owned P&L at fair, rolling 24 h
 OPPORTUNITY_RESERVE = 25_000    # afternoon §2 (was 10k): on top of the floor; dump + fat-finger fills, snipes, >= 8c takes

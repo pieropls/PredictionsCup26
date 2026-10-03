@@ -9,7 +9,7 @@ Prices: SIG books are YES-normalized; an order's price is in its own side (a NO 
 """
 import math
 
-from a_config import (TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, ROC_MIN_TIGHT, DUMP_TTL_S, TMM_BUY_EDGE, TMM_TTL_S, RECYCLE_BID_EDGE,
+from a_config import (TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, ROC_MIN_TIGHT, DUMP_TTL_S, TMM_BUY_EDGE, TMM_TTL_S, LONG_TTL_S, LONG_EXIT_TTL_S, RECYCLE_BID_EDGE,
                       RECYCLE_REST_EDGE, RECYCLE_TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_EDGE, MM_U_MULT, MM_NOTIONAL, MM_TTL_S,
                       LADDER_LEVELS, LADDER_TTL_S, TAKE_EDGE, TAKE_U_MULT, TAKE_NOTIONAL, TAKE_TTL_S, FAT_TTL_S)
 
@@ -362,6 +362,16 @@ class MarketBot:
         out += fat
         out += [want(x["side"], "buy", x["px"], x["qty"], x["px"] - 0.015, x["px"], QTY_TOL, "dump", sub=x["sub"], ttl=DUMP_TTL_S)
                 for x in (s.get("dump") or [])]                 # afternoon D-A: own caps and reserve fit (engine)
+        # day 3 §2 longshot catcher: resting 0.5-1c bids (re-placed only when gone), exits at 3x entry / the SIG 6-h median
+        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], 1.0, "longshot", sub=x["sub"], ttl=LONG_TTL_S)
+                for x in (s.get("longshot") or [])]
+        for x in s.get("long_exits") or []:
+            q = abs(subs.get(x["sub"], 0))
+            q1 = int(q // 2)
+            legs = [(int(q), x["p1"])] if abs(x["p1"] - x["p2"]) < 1e-9 else [(q1, x["p1"]), (int(q - q1), x["p2"])]
+            for qq, px in legs:                                     # one exit when both prices coincide (no duplicate)
+                if qq >= MIN_QTY:
+                    reduce_buy(x["side"], px, qq, "longexit", x["sub"], LONG_EXIT_TTL_S, band=0.0, a2=False)
         self.orders = out
         layers = sorted({w["layer"] for w in out})
         net = sum(subs.values())
