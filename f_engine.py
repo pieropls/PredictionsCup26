@@ -1919,13 +1919,13 @@ class Engine:
                 if fs >= (DUMP_ARENA_MIN_FAIR if (ex, side) in ar else DUMP_MIN_FAIR) and rs >= DUMP_MIN_REF
                 and not (held <= -MIN_QTY if side == "yes" else held >= MIN_QTY)]
 
-    def side_cost(self, ex, side):
-        """Day 3 §1: position held on `side` at cost (SIG avgCost) + our resting dump bids on it."""
+    def side_cost(self, ex, side, bids=True):
+        """Day 3 §1: position held on `side` at cost (SIG avgCost), plus (bids=True) our resting dump bids on it."""
         b = self.book.get(ex) or {}
         pos, row = b.get("pos", 0), b.get("row") or {}
         held = pos if side == "yes" else -pos
         cost = max(0.0, held) * float(row.get("avgCost") or 0) if held > 0 else 0.0
-        for o in self.open:
+        for o in self.open if bids else []:
             rec = self.ledger.orders.get(o["id"])
             if rec and rec.get("layer") == "dump" and o["ex"] == ex and o["side"] == side:
                 cost += o["qty"] * o["price"]
@@ -2030,7 +2030,8 @@ class Engine:
                 continue
             fat_worst = sum(x["qty"] * x["px"] for x in (self.fat_now.get(ex) or []) if x["side"] == side)
             base = DUMP_ARENA_COST if ar is not None and key in ar else DUMP_COST["A" if ex in tier_a else "B"]
-            cost = min(base, funded - fat_worst, DUMP_CONC_CAP - self.side_cost(ex, side))   # day 3 §1: concentration cap
+            cost = min(base, funded - fat_worst, DUMP_CONC_CAP - self.side_cost(ex, side, bids=False))   # day 3 §1: cap on
+            # position + our levels; our own resting levels are what's being sized, so they don't count (else 8k <-> 4k each loop)
             if cost < DUMP_MIN_SIDE_COST:
                 continue
             dumping = self.dump_ref_v2(ex)[1]

@@ -1824,6 +1824,26 @@ class ArenaTests(EngineCase):
         self.assertFalse([o for o in self.dump_orders(eng, fake) if o["ex"] == ex])
         self.assertTrue([o for o in self.dump_orders(eng, fake) if o["ex"] == favs[1]])
 
+    def test_concentration_cap_is_stable_loop_to_loop(self):
+        # 04:20 on C40: MN-05 D levels flipped 2,946 <-> 1,473 every loop (own resting bids counted against the side's cap)
+        fake, eng, favs = self.rig()
+        ex = favs[0]
+        self.settle(eng, fake, favs, 3)
+        seen = []
+        for _ in range(4):
+            fake.calls.clear()
+            self.settle(eng, fake, favs, 1)
+            seen.append(sorted((o["price"], o["qty"]) for o in self.dump_orders(eng, fake) if o["ex"] == ex))
+        self.assertTrue(seen[0])
+        self.assertTrue(all(s == seen[0] for s in seen), seen)
+        self.assertLessEqual(sum(p * q for p, q in seen[0]), 8_000 + 1e-6)
+        fake.pos[ex] = 6_000                              # 6k YES held at 0.95 = 5.7k: our levels may add up to 6.3k
+        fake.avg_cost[ex] = 0.95
+        self.settle(eng, fake, favs, 3)
+        cost = sum(o["qty"] * o["price"] for o in self.dump_orders(eng, fake) if o["ex"] == ex)
+        self.assertLessEqual(cost + 5_700, 12_000 + 50)
+        self.assertGreater(cost, 5_000)
+
     def test_v2_reference_and_no_lowering_during_a_dump(self):
         fake, eng, favs = self.rig()
         self.settle(eng, fake, favs)
