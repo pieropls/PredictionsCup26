@@ -1695,6 +1695,66 @@ class OrderTruthTests(EngineCase):
         rb = [x for x in fake.open_orders() if x["id"] in eng.ledger.orders and eng.ledger.orders[x["id"]]["layer"] == "dumpexit"]
         self.assertTrue(rb)
 
+    def test_exit_never_sells_past_its_sub_book_and_never_makes_a_tranche(self):
+        # night §1.1 (ex 840): a dumpexit still resting when its tranche completed kept filling and sold inventory/mm shares
+        fake, eng, favs = self.rig()
+        led = eng.ledger
+        ex = favs[0]
+        led.subbooks[ex] = {"inventory": 797.0, "mm": 612.0, f"dump:{ex}:yes:0": 307.0}
+        oid = "x-exit"
+        led.orders[oid] = dict(id=oid, bot="b", layer="dumpexit", sub=f"dump:{ex}:yes:0", ex=ex, side="no", action="buy", price=0.13,
+                               qty=1535, filled=0.0, cost=0.0, left=1535, placed="2026-10-02 21:23:00", ts=time.time(), status="open")
+        exc = led.apply_sub(ex, led.orders[oid], -307.0)    # the tranche's own 307: fine
+        self.assertEqual(exc, 0.0)
+        exc = led.apply_sub(ex, led.orders[oid], -1228.0)   # 4 more fills of 307 after it completed: clipped
+        self.assertAlmostEqual(exc, -1228.0)
+        self.assertEqual(led.subbooks[ex][f"dump:{ex}:yes:0"], 0.0)
+        self.assertAlmostEqual(led.subbooks[ex]["inventory"], 0.0)          # out of inventory first ...
+        self.assertAlmostEqual(led.subbooks[ex]["mm"], 612.0 - 431.0)       # ... then mm
+        self.assertAlmostEqual(sum(led.subbooks[ex].values()), 797 + 612 + 307 - 307 - 1228)
+
+    def test_completed_tranche_cancels_its_resting_exit(self):
+        fake, eng, favs = self.rig()
+        o = max(self.dump_orders(eng, fake), key=lambda o: o["price"])
+        sub = eng.ledger.orders[o["id"]]["sub"]
+        eng.controls.d["truth_mode"] = "book"
+        fake.fill(o["id"], o["qty"])                      # the catch
+        loop(eng, fake)
+        loop(eng, fake)
+        ex_o = [x for x in fake.open_orders() if x["id"] in eng.ledger.orders and eng.ledger.orders[x["id"]]["layer"] == "dumpexit"]
+        self.assertTrue(ex_o)
+        e1 = ex_o[0]
+        fake.fill(e1["id"], e1["qty"] // 2)              # half the rebound sells ...
+        loop(eng, fake)
+        eng.ledger.subbooks[o["ex"]][sub] = 0.0           # ... and the tranche completes elsewhere (e.g. a late fill)
+        eng.ledger.subbooks[o["ex"]]["inventory"] = eng.ledger.subbooks[o["ex"]].get("inventory", 0) + \
+            (o["qty"] - e1["qty"] // 2) * (1 if o["side"] == "no" else -1) * -1
+        loop(eng, fake)
+        self.assertEqual(eng.ledger.tranches[sub]["state"], "closed")
+        self.assertIn(e1["id"], set(eng.ex.cancelling) | {i for i in eng.ex.gone}, "its exit is cancelled at once")
+        self.assertFalse([s for s, t_ in eng.ledger.tranches.items() if t_.get("state") == "open" and s.startswith("dump:")
+                          and s.split(":")[2] != ("yes" if eng.ledger.subbooks[t_["ex"]].get(s, 0) > 0 else "no")])
+
+    def test_late_fill_is_carried_not_pushed_into_inventory(self):
+        # night §1.2: an order vanished; SIG's (late) fill lands a loop later: the audit waits instead of using inventory
+        fake, eng, favs = self.rig(mode="shadow")
+        o = max(self.dump_orders(eng, fake), key=lambda o: o["price"])
+        sub = eng.ledger.orders[o["id"]]["sub"]
+        inv0 = eng.ledger.sub(o["ex"], "inventory")
+        fake.fill(o["id"], o["qty"])                      # the projection is stalled: the fill is late
+        loop(eng, fake)
+        self.assertAlmostEqual(eng.ledger.sub(o["ex"], "inventory"), inv0, msg="carried, not pushed into inventory")
+        fake.fill_stalled = False                         # the late fill arrives
+        loop(eng, fake)
+        self.assertAlmostEqual(abs(eng.ledger.sub(o["ex"], sub)), o["qty"])
+        self.assertAlmostEqual(eng.ledger.sub(o["ex"], "inventory"), inv0)
+        # a difference with no order behind it still goes to inventory, after 2 min
+        ex = favs[1]
+        inv1 = eng.ledger.sub(ex, "inventory")
+        fake.pos[ex] = fake.pos.get(ex, 0) + 400          # no order of ours moved here: nothing to wait for
+        loop(eng, fake)
+        self.assertAlmostEqual(eng.ledger.sub(ex, "inventory") - inv1, 400)
+
     def test_stop_and_pull_on_repeated_sig_write_faults(self):
         fake, eng, favs = self.rig()
         eng.ex.note_fault(RuntimeError("POST /orders/batch -> 503 {}"))

@@ -133,11 +133,15 @@ class Ledger:
         q = sum(f["qty"] for f in self.fills if f["order"] in ids)
         return sum(f["qty"] * f["price"] for f in self.fills if f["order"] in ids) / q if q else None
 
-    def audit_subbooks(self, positions, log=print):
-        """I3: the REST position is the truth. Any difference from the sum of sub-books goes to 'inventory' (logged)."""
+    def audit_subbooks(self, positions, log=print, skip=()):
+        """I3: the REST position is the truth. Any difference from the sum of sub-books goes to 'inventory' (logged).
+        skip: markets whose difference is carried a little longer (night §1.2: one of our orders just left the book and its
+        late fill may still arrive)."""
         with self.lock:
             fixed = []
             for ex in set(positions) | set(self.subbooks):
+                if ex in skip:
+                    continue
                 q = positions.get(ex, 0)
                 books = self.subbooks.setdefault(ex, {})
                 diff = q - sum(books.values())
@@ -215,8 +219,7 @@ class Ledger:
                 order["filled"] += qty
                 order["cost"] += qty * price
                 if sgn is not None and order.get("sub"):          # I3: an owned fill moves its own sub-book
-                    books = self.subbooks.setdefault(ex, {})
-                    books[order["sub"]] = books.get(order["sub"], 0) + sgn * (qty if side == "yes" else -qty)
+                    self.apply_sub(ex, order, sgn * (qty if side == "yes" else -qty))
             self.fills.append(rec)
             if not history:
                 new.append(rec)
@@ -227,6 +230,33 @@ class Ledger:
             if o["id"] not in keep:
                 del self.orders[o["id"]]
         return new
+
+    EXIT_LAYERS = {"dumpexit", "rebound", "recycle", "release", "exit", "unwind", "repair"}
+
+    def apply_sub(self, ex, order, delta):
+        """Night §1.1 (I2/I3): an owned fill moves its own sub-book, but an exit never takes it past zero: a fill that would
+        sell more than the sub-book holds (e.g. an exit still resting when its tranche completed) is clipped at zero and the
+        excess comes out of the sub-books that did hold those shares (inventory, then mm). -> the clipped excess."""
+        books = self.subbooks.setdefault(ex, {})
+        sub, cur = order["sub"], books.get(order["sub"], 0)
+        reducing = (cur > 1e-9 and delta < 0) or (cur < -1e-9 and delta > 0) or (abs(cur) <= 1e-9 and order.get("layer") in self.EXIT_LAYERS)
+        if not reducing:
+            books[sub] = cur + delta
+            return 0.0
+        applied = delta if abs(delta) <= abs(cur) else -cur
+        books[sub] = cur + applied
+        excess = delta - applied
+        for other in ("inventory", "mm"):
+            if abs(excess) < 1e-9 or other == sub:
+                continue
+            v = books.get(other, 0)
+            if v * excess < 0:                                # holds the side the excess sold
+                take = excess if abs(excess) <= abs(v) else -v
+                books[other] = v + take
+                excess -= take
+        if abs(excess) > 1e-9:                                # nobody held them: the audit reconciles with the position
+            books["inventory"] = books.get("inventory", 0) + excess
+        return delta - applied
 
     def book_fill(self, oid, qty, price, source, side_fair, side_mid, held=None, t=None):
         """Evening §1.2-1.4: book a fill of one of our orders from order truth (source 'order': exact totals) or the
@@ -251,8 +281,7 @@ class Ledger:
             order["cost"] += qty * price
             order["truth_q"] = order.get("truth_q", 0) + qty
             if order.get("sub"):
-                books = self.subbooks.setdefault(ex, {})
-                books[order["sub"]] = books.get(order["sub"], 0) + sgn * (qty if side == "yes" else -qty)
+                self.apply_sub(ex, order, sgn * (qty if side == "yes" else -qty))
             self.seen.add(rec["key"])
             self.fills.append(rec)
             return rec

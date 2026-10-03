@@ -334,6 +334,7 @@ class Engine:
         self.truth_prev, self.truth_carry, self.truth_live_t, self.blind_t = None, {}, None, collections.deque(maxlen=50)
         self.fills_blind, self.pending_backfill, self.last_booked_t = None, None, time.time()
         self.truth_read_t, self.truth_prev_cur, self.pos_fail, self.faults_pulled = None, {}, 0, None
+        self.order_moved_t, self.audit_first = {}, {}       # night §1.2
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
@@ -517,7 +518,7 @@ class Engine:
         except Exception as err:
             self.event("ERR", f"fat-finger events: {err!r}")
         self.ledger.init_subbooks(pos, self.manual_ex)
-        self.ledger.audit_subbooks(pos, log=lambda s: self.event("AUDIT", s.strip()[6:].strip()))
+        self.ledger.audit_subbooks(pos, log=lambda s: self.event("AUDIT", s.strip()[6:].strip()), skip=self.audit_skip(pos, now))
         self.ex.update(pos, self.open, as_of=now)
         if self.ex.frozen or self.journal.unknown():
             n = self.ex.resolve_unknown(self.open, got.get("fills", []), on_adopt=self.adopted)
@@ -602,6 +603,12 @@ class Engine:
                     if w["action"] == "buy" and jx.reduces(w["side"], "buy", net):
                         w["qty"] = int(max(0, min(w["qty"], room_r)))
                         room_r -= w["qty"]
+                        if w.get("qmax") is not None:
+                            w["qmax"] = min(w["qmax"], w["qty"])
+                subs_now = self.ledger.subbooks.get(b.ex, {})
+                for w in wants:                             # night §1.1: an exit sells only its own sub-book's shares
+                    if w.get("reduce") and w.get("sub") in subs_now and w["layer"] != "release":
+                        w["qty"] = int(min(w["qty"], abs(subs_now[w["sub"]])))
                         if w.get("qmax") is not None:
                             w["qmax"] = min(w["qmax"], w["qty"])
                 wants = [w for w in wants if w["qty"] >= MIN_QTY]
@@ -1525,6 +1532,21 @@ class Engine:
         age = "never seen" if self.cov_seq_t is None else f"unchanged for {(now - self.cov_seq_t) / 60:.0f} min"
         return False, f"fills projection sequence {self.cov_seq} {age} (newest fill {cov.get('newest')}), order-truth booking not live"
 
+    def audit_skip(self, pos, now):
+        """Night §1.2: a market where one of our orders vanished or shrank in the last 2 min carries its sub-book difference
+        (SIG's late fill is probably on its way) instead of pushing it into inventory; only a difference still there after
+        2 min goes to inventory."""
+        skip = set()
+        for ex in set(pos) | set(self.ledger.subbooks):
+            diff = pos.get(ex, 0) - sum(self.ledger.subbooks.get(ex, {}).values())
+            if abs(diff) <= 1e-6:
+                self.audit_first.pop(ex, None)
+                continue
+            first = self.audit_first.setdefault(ex, now)
+            if now - self.order_moved_t.get(ex, 0) <= 120 and now - first < 120:
+                skip.add(ex)
+        return skip
+
     LAYER_TTL = {"mm": TMM_TTL_S, "fatfinger": FAT_TTL_S, "dump": DUMP_TTL_S, "dumpexit": DUMP_TTL_S, "ladder": LADDER_TTL_S,
                  "rebound": LADDER_TTL_S, "release": RECYCLE_TAKE_TTL_S, "take": TAKE_TTL_S, "recycle": RECYCLE_REST_TTL_S,
                  "set": PAIR_TTL_S, "unwind": PAIR_TTL_S, "repair": PAIR_TTL_S, "touch": MM_TTL_S}
@@ -1568,6 +1590,7 @@ class Engine:
                 continue
             d = self.vanished_fill(oid, rec, q0, now)
             if d > 0.5:
+                self.order_moved_t[rec["ex"]] = now           # night §1.2: the audit waits up to 2 min for its late fill
                 sgn = (1 if rec["side"] == "yes" else -1) * (1 if rec["action"] == "buy" else -1)
                 cand[rec["ex"]].append((oid, d, sgn))
         carry, self.truth_carry = self.truth_carry, {}
@@ -1758,7 +1781,8 @@ class Engine:
         return dict(mid=mid, kappa_mm=min(TMM_KAPPA_MAX, abs(med - f) + 0.01), size=TMM_SIZE[tier],
                     room={"yes": max(0.0, TMM_CAP_SIDE - max(cost, 0.0)), "no": max(0.0, TMM_CAP_SIDE - max(-cost, 0.0))},
                     skew=TMM_SKEW_TICKS * max(-1.0, min(1.0, cost / (0.5 * TMM_CAP_SIDE))),
-                    offer_mid=ex in self.mm_since and time.time() - self.mm_since[ex] > TMM_OFFER_MID_S)
+                    offer_mid=ex in self.mm_since and time.time() - self.mm_since[ex] > TMM_OFFER_MID_S,
+                    max_cost=self.release_max_cost())
 
     # ------------------------------------------------------------------------------------------------ dump catcher (D-A)
     def dump_pilot_sides(self, now):
@@ -1915,6 +1939,9 @@ class Engine:
                 if not sub.startswith("dump:") or abs(q) < 1 or (sub in tr and tr[sub].get("state") == "open"):
                     continue
                 side = "yes" if q > 0 else "no"
+                if side != sub.split(":")[2]:                  # night §1.1: only a dump entry fill makes a tranche, never an exit
+                    self.event("DUMP", f"{self.name(ex)}: {sub} holds {q:+,.0f} on the wrong side (an exit oversold): no tranche")
+                    continue
                 r = self.dump_ref.get(ex, self.ref(ex))
                 tr[sub] = dict(ex=ex, side=side, kind="dump", pre_ref_side=None if r is None else (r if side == "yes" else 1 - r),
                                t=stamp(), ts=now, state="open")
@@ -1928,6 +1955,10 @@ class Engine:
             if abs(q) < 1:
                 t["state"] = "closed"
                 self.event("DUMP", f"{self.name(ex)}: tranche {sub} sold (round trip done)")
+                for o in self.open:                         # night §1.1: its exit must not keep filling
+                    rec = self.ledger.orders.get(o["id"])
+                    if rec and rec.get("sub") == sub and rec.get("layer") == "dumpexit" and o["id"] not in self.ex.cancelling:
+                        self.ex.cancel(o, reason="tranche done: exit no longer owns shares", front=True)
                 continue
             if now - t.get("ts", now) > DUMP_HOLD_S:
                 self.ledger.move_sub(ex, sub, "inventory")

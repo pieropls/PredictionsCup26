@@ -278,10 +278,11 @@ class MarketBot:
                 bid_y, ask_y = max(bid_y, bid), min(ask_y, ask)          # join or improve the best price
                 sk = t.get("skew", 0.0) * TICK                          # long YES -> both quotes lower (sell more, buy less)
                 bid_y, ask_y = tick_down(bid_y - sk), tick_up(ask_y - sk)
-                if t.get("offer_mid"):                                   # inventory older than 2 h: offered at SIG mid
-                    if mm > 0:
+                if t.get("offer_mid"):                                   # inventory older than 2 h: offered at SIG mid,
+                    mc = t.get("max_cost", 0.05)                         # only within the release cost cap (night §1.3)
+                    if mm > 0 and t["mid"] >= f * (1 - mc) - EPS:
                         ask_y = min(ask_y, tick_up(t["mid"]))
-                    elif mm < 0:
+                    elif mm < 0 and (1 - t["mid"]) >= (1 - f) * (1 - mc) - EPS:
                         bid_y = max(bid_y, tick_down(t["mid"]))
                 bid_y, ask_y = min(bid_y, tick_down(ask - TICK)), max(ask_y, tick_up(bid + TICK))   # rest, never take
                 km = t["kappa_mm"]

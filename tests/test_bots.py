@@ -42,6 +42,10 @@ class PositionBotTests(unittest.TestCase):
         self.assertLessEqual(sum(x["qty"] for x in out) + 3242, 5000)
 
 
+def tick_down_(p):
+    return bots.tick_down(p)
+
+
 def mb_state(**kw):
     s = dict(fair=0.50, u=0.005, bid=0.48, ask=0.52, ref=None, kappa=0.0, subs={}, layers={}, paused=False, blocked=set(),
              room={"yes": 3000, "no": 3000}, tranches=[], ladder_ids={}, take_notional=150)
@@ -142,6 +146,18 @@ class MarketBotTests(unittest.TestCase):
         self.assertFalse([w for w in ws if w["reduce"]])
         # inventory older than 2 h: offered at SIG mid
         ws = self.b.plan(mb_state(fair=0.53, bid=0.48, ask=0.54, subs={"mm": 2000}, layers={"mm": True}, tmm=tmm(mid=0.51, offer_mid=True)))
+        self.assertAlmostEqual(1 - [w for w in ws if w["reduce"]][0]["px"], 0.51, places=3)
+
+    def test_aged_mm_offer_respects_the_release_cost_cap(self):
+        tmm = lambda **k: dict(dict(mid=0.50, kappa_mm=0.04, size=300, room={"yes": 5000, "no": 5000}, skew=0.0, offer_mid=True,
+                                    max_cost=0.05), **k)
+        # night §1.3: South Dakota Senate R NO 0.075 vs fair 0.09 (17% under) -> no aged offer at mid
+        ws = self.b.plan(mb_state(fair=0.91, bid=0.905, ask=0.935, subs={"mm": -9326}, layers={"mm": True}, tmm=tmm(mid=0.925)))
+        sells = [w for w in ws if w["reduce"]]
+        self.assertTrue(all(round(1 - w["px"], 3) >= 0.075 for w in sells))
+        self.assertFalse([w for w in sells if w["px"] <= 0.925 - 1e-9 and w["px"] >= tick_down_(0.925)], "no YES bid at mid")
+        # within 5% of fair: offered at mid
+        ws = self.b.plan(mb_state(fair=0.53, bid=0.48, ask=0.54, subs={"mm": 2000}, layers={"mm": True}, tmm=tmm(mid=0.51)))
         self.assertAlmostEqual(1 - [w for w in ws if w["reduce"]][0]["px"], 0.51, places=3)
 
     def test_mm_reducing_side_always_quoted_even_when_paused_and_skewed(self):
