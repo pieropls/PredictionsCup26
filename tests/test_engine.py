@@ -1559,6 +1559,31 @@ class DumpTests(EngineCase):
         self.assertEqual(eng.ledger.sub(ex, sub), 0)
         self.assertGreaterEqual(abs(eng.ledger.sub(ex, "inventory")), top["qty"] - 1)
 
+    def test_rebound_survives_a_pruned_entry_order(self):
+        # Oct 3: the RI Senate D tranche lost its rebound at 12:46 when its 10:40 dump buy order record was pruned
+        fake, eng, favs = self.rig()
+        self.settle(eng, fake, favs)
+        ex = favs[0]
+        top = max(self.dump_orders(eng, fake, ex), key=lambda o: o["price"])
+        sub = eng.ledger.orders[top["id"]]["sub"]
+        fake.fill(top["id"], top["qty"])
+        self.settle(eng, fake, favs, 2)
+        self.assertTrue([o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "dumpexit"])
+        eng.ledger.tranches[sub].pop("avg", None)
+        del eng.ledger.orders[top["id"]]                  # pruned
+        eng.track_dumps(time.time())
+        self.assertTrue(eng.dump_view.get(ex), "rebound still planned (entry price from the fills)")
+        self.assertAlmostEqual(eng.dump_view[ex][0]["avg"], top["price"], places=4)
+        # and pruning keeps an order whose sub-book still holds shares
+        led = eng.ledger
+        led.orders["keep-me"] = dict(id="keep-me", bot="b", layer="dump", sub=sub, ex=ex, side="yes", action="buy", price=0.8, qty=10,
+                                     filled=10.0, cost=8.0, left=0, placed="2000-01-01 00:00:00", ts=0, status="done")
+        for i in range(4100):
+            led.orders[f"old{i}"] = dict(id=f"old{i}", bot="b", layer="mm", sub="", ex=ex, side="yes", action="buy", price=0.5, qty=1,
+                                         filled=0.0, cost=0.0, left=0, placed="2000-01-02 00:00:00", ts=0, status="done")
+        led.sync(fake.open_orders(), [], eng.bot_of, eng.side_fair, eng.side_mid, as_of=time.time())
+        self.assertIn("keep-me", led.orders)
+
     def test_news_guard_and_breaker(self):
         fake, eng, favs = self.rig()
         self.settle(eng, fake, favs)

@@ -127,11 +127,16 @@ class Ledger:
                 sub = f"tranche:{ex}{side[0]}{level}-{n}"
             return sub
 
-    def tranche_avg(self, sub, layer="ladder"):
-        """Average fill price of the entry fills (ladder, or dump) that built a tranche (orders placed into that sub-book)."""
+    def tranche_avg(self, sub, layer="ladder", ex=None, side=None, since=None):
+        """Average fill price of the entry fills (ladder, or dump) that built a tranche (orders placed into that sub-book).
+        Without those order records (pruned), the layer's buy fills on that market and side since the tranche started."""
         ids = {i for i, o in self.orders.items() if o.get("sub") == sub and o.get("layer") == layer}
-        q = sum(f["qty"] for f in self.fills if f["order"] in ids)
-        return sum(f["qty"] * f["price"] for f in self.fills if f["order"] in ids) / q if q else None
+        fs = [f for f in self.fills if f["order"] in ids]
+        if not fs and ex is not None and since is not None:
+            fs = [f for f in self.fills if f["ex"] == ex and f.get("layer") == layer and f["side"] == side and f.get("action") == "buy"
+                  and f["t"] >= since]
+        q = sum(f["qty"] for f in fs)
+        return sum(f["qty"] * f["price"] for f in fs) / q if q else None
 
     def audit_subbooks(self, positions, log=print, skip=()):
         """I3: the REST position is the truth. Any difference from the sum of sub-books goes to 'inventory' (logged).
@@ -226,6 +231,9 @@ class Ledger:
         self.fills = self.fills[-4000:]
         closed = sorted((o for o in self.orders.values() if o["status"] != "open"), key=lambda o: o["placed"])
         keep = {i for b in self.baskets[-500:] for i in b["orders"]}
+        keep |= {i for i, o in self.orders.items() if o.get("sub") and abs(self.subbooks.get(o["ex"], {}).get(o["sub"], 0)) >= 1}
+        # Oct 3: an order whose sub-book still holds shares is kept (a pruned dump buy made the RI Senate D tranche lose
+        # its entry price and its rebound from 12:46)
         for o in closed[:-4000]:
             if o["id"] not in keep:
                 del self.orders[o["id"]]

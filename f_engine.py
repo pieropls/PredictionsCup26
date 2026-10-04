@@ -2117,9 +2117,11 @@ class Engine:
                 t["state"] = "aged"
                 self.event("DUMP", f"{self.name(ex)}: rebound for {sub} not filled in 24 h: {abs(q):,.0f} shares to inventory")
                 continue
-            avg = self.ledger.tranche_avg(sub, "dump")
+            since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t.get("ts", now) - 300))
+            avg = self.ledger.tranche_avg(sub, "dump", ex=ex, side=t["side"], since=since) or t.get("avg")
             if avg is None:
                 continue
+            t["avg"] = round(avg, 5)                        # Oct 3: kept on the tranche (order records get pruned)
             pre = t.get("pre_ref_side")
             _, share = self.dump_settings()                 # 1.0: back to the pre-dump level (the plan's default)
             target = 0.0 if pre is None else (pre - TICK if share >= 0.999 else avg + share * (pre - avg))
