@@ -340,6 +340,7 @@ class Engine:
         self.fills_blind, self.pending_backfill, self.last_booked_t = None, None, time.time()
         self.truth_read_t, self.truth_prev_cur, self.pos_fail, self.faults_pulled = None, {}, 0, None
         self.order_moved_t, self.audit_first = {}, {}       # night §1.2
+        self.truth_filled = {}                              # Oct 3: booked shares per open order at the last snapshot
         self.pending_fixes = []                             # day 3 §1: subbook_fix
         self.long_now, self.long_view, self.long_block, self.long_quota = {}, {}, {}, 0   # day 3 §2: longshot catcher
         self.long_hist = {}
@@ -1633,8 +1634,10 @@ class Engine:
         cur = {o["id"]: o["qty"] for o in self.open if o["id"] in self.ledger.orders}
         before, self.truth_prev = self.truth_prev, cur
         self.truth_prev_cur = cur
+        filled_prev = self.truth_filled                    # each order's booked shares at the previous snapshot
         prev_t, self.truth_read_t = self.truth_read_t, now
         if before is None or not prev:
+            self.truth_filled = {oid: (self.ledger.orders.get(oid) or {}).get("filled") or 0.0 for oid in cur}
             return []
         if self.truth_live_t is None:
             self.truth_live_t = now
@@ -1649,6 +1652,9 @@ class Engine:
             if not rec or rec.get("action") not in ("buy", "sell"):
                 continue
             d = self.vanished_fill(oid, rec, q0, now)
+            # Oct 3 (13:24 840 double count): SIG's own fill for this order may have been booked by this loop's sync already
+            # (its trade fell between our orders and positions reads); count only what isn't booked yet
+            d -= max(0.0, (rec.get("filled") or 0) - filled_prev.get(oid, 0.0 if oid not in (before or {}) else (rec.get("filled") or 0)))
             if d > 0.5:
                 self.order_moved_t[rec["ex"]] = now           # night §1.2: the audit waits up to 2 min for its late fill
                 sgn = (1 if rec["side"] == "yes" else -1) * (1 if rec["action"] == "buy" else -1)
@@ -1709,6 +1715,7 @@ class Engine:
             self.fills_blind = None
         if not unexplained and book:
             self.truth_t = now
+        self.truth_filled = {oid: (self.ledger.orders.get(oid) or {}).get("filled") or 0.0 for oid in cur}
         return booked
 
     def apply_subbook_fix(self, fix):

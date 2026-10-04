@@ -1680,6 +1680,48 @@ class OrderTruthTests(EngineCase):
         self.assertAlmostEqual(sum(f["qty"] for f in eng.ledger.fills if f["order"] in (o["id"], o2["id"])), 300 + o2["qty"])
         self.assertAlmostEqual(eng.ledger.sub(o["ex"], "inventory"), inv0)
 
+    def test_carried_move_plus_sig_fill_in_the_same_loop_is_not_booked_again(self):
+        # the exact 13:24 state: an order left the book, this loop's sync already booked SIG's fill for it, and a move of
+        # the same size was carried from the last loop: the carry branch matched and booked it a second time
+        fake, eng, favs = self.rig()
+        o = max(self.dump_orders(eng, fake), key=lambda o: o["price"])
+        oid, ex, q = o["id"], o["ex"], o["qty"]
+        rec = eng.ledger.orders[oid]
+        sgn = (1 if rec["side"] == "yes" else -1) * (1 if rec["action"] == "buy" else -1)
+        eng.truth_prev = {oid: q}                         # last snapshot: open, nothing booked
+        eng.truth_filled = {oid: 0.0}
+        eng.truth_carry = {ex: sgn * q}                   # the move was seen (and carried) last loop
+        rec["filled"] = float(q)                          # this loop's sync booked SIG's fill for it
+        eng.open = [x for x in eng.open if x["id"] != oid]   # and it's gone from the book
+        p0 = eng.book.get(ex, {}).get("pos", 0)
+        prev = {e_: (b_["pos"], b_["row"]) for e_, b_ in eng.book.items()}
+        prev[ex] = (p0, (prev.get(ex) or (0, None))[1])
+        pos = {e_: v[0] for e_, v in prev.items()}
+        pos[ex] = p0 + sgn * q                            # positions show the move this loop
+        proj = collections.Counter({ex: sgn * q})         # ... explained by SIG's fill booked this loop
+        n0 = len(eng.ledger.fills)
+        booked = eng.order_truth(pos, prev, proj, time.time(), True)
+        self.assertEqual([r for r in booked if r["order"] == oid], [], "already booked from SIG: not again")
+        self.assertEqual(len(eng.ledger.fills), n0)
+
+    def test_sig_fill_and_vanish_in_the_same_loop_is_booked_once(self):
+        # Oct 3 13:24 (840, order 6287642): the trade fell between our orders read and our positions read (position moved,
+        # order still listed); next loop SIG's fill arrived AND the order was gone: it was booked twice
+        fake, eng, favs = self.rig()
+        o = max(self.dump_orders(eng, fake), key=lambda o: o["price"])
+        stale = fake.open_orders()                        # the snapshot before the trade
+        real_oo = fake.open_orders
+        fake.fill(o["id"], o["qty"])                      # the trade: position moves, the order leaves the book
+        fake.open_orders = lambda: stale                  # ... but this loop's orders read still lists it
+        loop(eng, fake)                                   # (projection still stalled: no SIG fill yet)
+        fake.open_orders = real_oo
+        fake.fill_stalled = False                         # next loop: SIG's fill arrives, the order is gone
+        loop(eng, fake)
+        loop(eng, fake)
+        fs = [f for f in eng.ledger.fills if f["order"] == o["id"]]
+        self.assertAlmostEqual(sum(f["qty"] for f in fs), o["qty"], msg=[(f["qty"], f.get("source")) for f in fs])
+        self.assertLessEqual(eng.ledger.orders[o["id"]]["filled"], o["qty"] + 1e-6)
+
     def test_order_gone_without_position_move_is_not_a_fill(self):
         fake, eng, favs = self.rig()
         o = max(self.dump_orders(eng, fake), key=lambda o: o["price"])
