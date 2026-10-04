@@ -50,7 +50,8 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       DUMP_REF_GAP, DUMP_COST, DUMP_MIN_SIDE_COST, DUMP_QUEUE_S, DUMP_BOOK_READS, DUMP_REBOUND_MIN, DUMP_HOLD_S,
                       DUMP_NEWS_DROP, DUMP_BREAKER_MARKETS, DUMP_BREAKER_FAIR, DUMP_PILOT_SIDES, DUMP_PILOT_S, DUMP_REARM_S, DUMP_ARENA, DUMP_ARENA_MIN_FAIR,
                       DUMP_ARENA_COST, DUMP_CONC_CAP, DUMP_REF_LONG_S, DUMP_OTHER_COST, DUMP_OTHER_OFFSETS,
-                      DUMP_OTHER_FAIR_GAP, RELEASE_FALLBACK_QTY, FAT_BAND_EDGES, LONG_MAX_FAIR, LONG_LEVELS,
+                      DUMP_OTHER_FAIR_GAP, RELEASE_FALLBACK_QTY, FAT_BAND_EDGES, FAT_TIER_A_ONLY, FAT_NEW_LEVEL,
+                      FAT_NEW_SIZES, DUMP_OTHER_COST_HI, DUMP_OTHER_HI_ON, DUMP_OTHER_HI_OFF, RELEASE_MAX_COST, LONG_MAX_FAIR, LONG_LEVELS,
                       LONG_TINY_FAIR, LONG_TINY_QTY, LONG_SIDE_MAX_COST, LONG_TTL_S, LONG_EXIT_TTL_S, LONG_EXIT_MULT, LONG_STALE_S,
                       LONG_NEWS_RISE, LONG_NEWS_WINDOW_S, LONG_NEWS_HOLD_S, LONG_BREAKER_SIDES, LONG_BREAKER_PAUSE_S, LONG_PILOT_S,
                       TMM_MID_HALF_LIFE_S, TMM_KAPPA_MAX, TMM_SIZE, TMM_CAP_SIDE, TMM_SKEW_TICKS, TMM_OFFER_MID_S, TMM_RELEASE_S,
@@ -342,6 +343,7 @@ class Engine:
         self.pending_fixes = []                             # day 3 §1: subbook_fix
         self.long_now, self.long_view, self.long_block, self.long_quota = {}, {}, {}, 0   # day 3 §2: longshot catcher
         self.long_hist = {}
+        self.dump_other_hi = False                          # Oct 3: non-arena dump sides at 5k (free cash >= 35k)
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
@@ -1425,6 +1427,11 @@ class Engine:
             bids = [p for p, _ in yb] if side == "yes" else [round(1 - p, 3) for p, _ in ya]
         out, used = [], set()
         new_unmapped = scale == 0.5 and value == 0.5
+        if new_unmapped:                                    # Oct 3: brand-new unmapped market: 0.05 at half size, both sides
+            rivals = [p for p in bids if p <= FAT_NEW_LEVEL + 1e-9]
+            px = bots.tick_down(min(FAT_NEW_LEVEL, max(rivals) + TICK)) if rivals else FAT_NEW_LEVEL
+            q = int(FAT_NEW_SIZES[tier] * scale)
+            return [(FAT_NEW_LEVEL, px, q)] if q >= MIN_QTY and px >= 0.01 else []
         bands = sorted(set(FAT_BAND_EDGES) | set(FAT_LEVELS))   # Oct 3: the original bands, whatever is placed
         for lvl in FAT_LEVELS:
             if lvl not in sizes or (new_unmapped and lvl != 0.05):
@@ -1443,6 +1450,10 @@ class Engine:
                 out.append((lvl, px, q))
         return out
 
+    def new_unmapped(self, ex):
+        """A brand-new market (seen < 3 h ago, or still unmapped since) with no Polymarket mapping."""
+        return ex not in {m["ex"] for m in self.mp} and (time.time() - self.new_markets.get(ex, 0) < 3 * 3600 or ex in self.unmapped_new)
+
     def fat_plan(self, now):
         """{ex: [want-spec]} for the fat-finger layer; also refreshes queue reads (<= FAT_BOOK_READS per loop, tier A first,
         every FAT_QUEUE_S) and the news guard; records coverage reasons."""
@@ -1452,8 +1463,8 @@ class Engine:
         tier_a = self.fat_tiers()
         st = self.controls.state("fatfinger")
         exs = [b.ex for b in self.bots if b.kind == "market"]
-        if st == "pilot":
-            exs = [ex for ex in exs if ex in tier_a]
+        if st == "pilot" or FAT_TIER_A_ONLY:               # Oct 3: tier A only (plus brand-new unmapped markets)
+            exs = [ex for ex in exs if ex in tier_a or self.new_unmapped(ex)]
         exs.sort(key=lambda ex: (ex not in tier_a, -self.sweep_rank.get(ex, (0, 0))[1]))
         # queue reads: oldest first, a few per loop
         stale = [ex for ex in exs if now - (self.fat_book.get(ex) or (0,))[0] > FAT_QUEUE_S and self.fat_eligible(ex)]
@@ -2021,6 +2032,13 @@ class Engine:
                         self.event("NEWS", f"{self.name(ex)} {side.upper()} fair fell {top - cur:.2f} in 10 min: dump levels pulled 30 min")
                     self.dump_block[(ex, side)] = now + FAT_NEWS_HOLD_S
         funded = max(0.0, min(float(OPPORTUNITY_RESERVE), cash - CASH_RESERVE - used["committed"]))
+        free = cash - CASH_RESERVE                          # Oct 3: non-arena sides 3k -> 5k at >= 35k free cash (33k back)
+        if not self.dump_other_hi and free >= DUMP_OTHER_HI_ON:
+            self.dump_other_hi = True
+            self.event("DUMP", f"free cash {free:,.0f} >= {DUMP_OTHER_HI_ON:,}: non-arena dump sides 3k -> 5k")
+        elif self.dump_other_hi and free < DUMP_OTHER_HI_OFF:
+            self.dump_other_hi = False
+            self.event("DUMP", f"free cash {free:,.0f} < {DUMP_OTHER_HI_OFF:,}: non-arena dump sides back to 3k")
         recent_fill = {(f["ex"], f["side"]) for f in self.fills_since(now - DUMP_REARM_S) if f["layer"] == "dump"}
         resting = {}
         for o in self.open:
@@ -2034,7 +2052,8 @@ class Engine:
                 continue
             fat_worst = sum(x["qty"] * x["px"] for x in (self.fat_now.get(ex) or []) if x["side"] == side)
             arena_style = ar is None or key in ar           # no arena configured: the original 3 levels everywhere
-            base = (DUMP_ARENA_COST if key in ar else DUMP_OTHER_COST) if ar is not None else DUMP_COST["A" if ex in tier_a else "B"]
+            other = DUMP_OTHER_COST_HI if self.dump_other_hi else DUMP_OTHER_COST
+            base = (DUMP_ARENA_COST if key in ar else other) if ar is not None else DUMP_COST["A" if ex in tier_a else "B"]
             cost = min(base, funded - fat_worst, DUMP_CONC_CAP - self.side_cost(ex, side, bids=False))   # day 3 §1: cap on
             # position + our levels; our own resting levels are what's being sized, so they don't count (else 8k <-> 4k each loop)
             if cost < DUMP_MIN_SIDE_COST:
@@ -3607,7 +3626,7 @@ class Engine:
 
     def release_max_cost(self):
         d = time.strftime("%m-%d")
-        return 0.06 if d >= "10-30" else 0.05                # afternoon §2.2: 5% now (was 3%), 6% from Oct 30
+        return RELEASE_MAX_COST                             # Oct 3: 10% flat (was 5%, 6% from Oct 30)
 
     def fill_sentence(self, f):
         l = self.strategy_of(f["bot"], f["layer"])

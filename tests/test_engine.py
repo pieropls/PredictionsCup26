@@ -1208,6 +1208,11 @@ class TakeCapTests(EngineCase):
 class FatFingerTests(EngineCase):
     LAYERS = dict(position=dict(state="full"), fatfinger=dict(state="full"))
 
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, f_engine, "FAT_TIER_A_ONLY", f_engine.FAT_TIER_A_ONLY)
+        f_engine.FAT_TIER_A_ONLY = False                  # every eligible side (tier-A-only has its own test)
+
     def rig(self, cash_above_floor=20_000):
         fresh_data(layers=self.LAYERS)
         fake = new_fake(writes_per_min=10_000)
@@ -1419,6 +1424,23 @@ class FatFingerTests(EngineCase):
         eng.fat_sent.clear()                              # (the gate also wants a quiet last hour of placements)
         eng.controller(time.time())
         self.assertEqual(c.state("fatfinger"), "full")
+
+    def test_tier_a_only_plus_new_unmapped_markets(self):
+        fake, eng = self.rig()
+        f_engine.FAT_TIER_A_ONLY = True                   # Oct 3: tier-A sides only
+        exs = sorted({b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS})
+        tier_a = exs[:6]
+        os.makedirs(os.path.join(TMP, "intel"), exist_ok=True)
+        json.dump(dict(tier_a=tier_a), open(os.path.join(TMP, "intel", "tiers.json"), "w"))
+        self.settle(eng, fake, 4)
+        mine = self.fat_orders(eng, fake)
+        self.assertTrue(mine)
+        self.assertTrue(all(o["ex"] in tier_a for o in mine), "tier-A sides only")
+        self.assertTrue(all(o["price"] <= 0.12 + 1e-9 for o in mine), "one level, at most 0.12")
+        # a brand-new unmapped market (not tier A): 0.05 at half size on both sides
+        lv = eng.fat_levels("x", "yes", 0.5, 0.5, "B")
+        self.assertEqual(lv, [(0.05, 0.05, 3_000)])
+        self.assertEqual(eng.fat_levels("x", "no", 0.5, 0.5, "A"), [(0.05, 0.05, 10_000)])
 
     def test_write_budget_is_about_zero_after_placement(self):
         fake, eng = self.rig()
@@ -1862,11 +1884,43 @@ class ArenaTests(EngineCase):
                 self.assertLessEqual(cost, a_config.DUMP_ARENA_COST + 1e-6)
             else:
                 self.assertLessEqual(len(lv), 2)
-                self.assertLessEqual(cost, a_config.DUMP_OTHER_COST + 1e-6)
+                self.assertLessEqual(cost, (a_config.DUMP_OTHER_COST_HI if eng.dump_other_hi else a_config.DUMP_OTHER_COST) + 1e-6)
                 ref = eng.dump_ref_v2(key[0])[0]
                 rs = ref if key[1] == "yes" else 1 - ref
                 for p, _ in lv:
                     self.assertLessEqual(p, min(rs - 0.04, fs - 0.05) + 1e-9, (key, lv))
+
+    def test_non_arena_sides_go_to_5k_at_35k_free_cash_with_hysteresis(self):
+        fake, eng, favs = self.rig()                      # 40k free cash: 5k
+        eng.controls.layer("dump")["state"] = "full"
+        self.settle(eng, fake, favs, 3)
+        self.assertTrue(eng.dump_other_hi)
+        base = fake.pnl()
+        hold = base["totalHoldingsValue"]
+        fake.pnl = lambda: dict(base, totalAccountValue=hold + a_config.CASH_RESERVE + 34_000)   # 34k: still 5k (hysteresis)
+        self.settle(eng, fake, favs, 4)
+        self.assertTrue(eng.dump_other_hi)
+        fake.pnl = lambda: dict(base, totalAccountValue=hold + a_config.CASH_RESERVE + 32_000)   # < 33k: back to 3k
+        self.settle(eng, fake, favs, 4)
+        self.assertFalse(eng.dump_other_hi)
+        ar = eng.arena()
+        for o in self.dump_orders(eng, fake):
+            if (o["ex"], o["side"]) not in ar:
+                cost = sum(x["qty"] * x["price"] for x in self.dump_orders(eng, fake) if (x["ex"], x["side"]) == (o["ex"], o["side"]))
+                self.assertLessEqual(cost, a_config.DUMP_OTHER_COST + 1e-6)
+
+    def test_release_cost_cap_is_10_percent(self):
+        fake, eng, favs = self.rig()
+        self.assertEqual(eng.release_max_cost(), 0.10)
+        ex = favs[0]
+        bid = eng.px[ex][0]
+        f = eng.fair[ex]
+        eng.fair[ex] = bid * 1.12                         # 12% to free: the 10-20% bucket is never released
+        self.assertGreater(eng.cost_to_free(ex, "yes"), 0.10)
+        self.assertFalse(eng.release_ok(ex, "yes", "inventory", eng.cost_to_free(ex, "yes")))
+        eng.fair[ex] = bid * 1.08                         # 8% to free: released
+        self.assertTrue(eng.release_ok(ex, "yes", "inventory", eng.cost_to_free(ex, "yes")))
+        eng.fair[ex] = f
 
     def test_release_without_a_spare_read_sells_at_most_500_at_the_bid(self):
         fake, eng, favs = self.rig()

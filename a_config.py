@@ -127,14 +127,16 @@ LAYER_CAPS = {
     "sniper": {"per_market": (1_000, 3_000, 3_000), "per_day": (10_000, 10_000, 10_000)},
     "fatfinger": {"resting": (8_000, 300_000, 400_000), "filled": (30_000, 30_000, 40_000)},  # resting = policy (no cash lock);
                                                                                                # afternoon D-B: 40k -> 300k
-    "dump": {"resting": (120_000, 450_000, 500_000)},          # resting cost (policy; fills bounded by the per-side reserve fit);
-                                                               # Oct 3: full = every eligible favourite side (~125 sides, ~440k)
+    "dump": {"resting": (120_000, 700_000, 800_000)},          # resting cost (policy; fills bounded by the per-side reserve fit);
+                                                               # Oct 3: full = every eligible side (~125: 84k arena + 118 x 3k/5k)
     "longshot": {"resting": (20_000, 20_000, 25_000)},        # day 3 §2: total resting cost (worst case 200 per side)
 }
 # fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
 FAT_LEVELS = [0.12]             # Oct 3 (Piero): only the 0.12 level on each side (0.08 / 0.05: 0 fills since day 1)
 FAT_SIZES = {"A": {0.12: 5_000}, "B": {0.12: 3_000}}   # shares (tier B had no 0.12 level: its old top size, 3,000)
 FAT_BAND_EDGES = [0.05, 0.08, 0.12]  # queue bands stay (0.08, 0.12] etc. so the 0.12 level means 0.12 (one tick over a rival there)
+FAT_TIER_A_ONLY = True          # Oct 3 (Piero): fat-finger levels on tier-A sides only (open orders < 600: one read page fewer)
+FAT_NEW_LEVEL, FAT_NEW_SIZES = 0.05, {"A": 20_000, "B": 6_000}   # brand-new unmapped markets: 0.05 at half these, both sides
 FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP = 0.35, 0.60, 0.25   # eligible side; unmapped: SIG ref >= 0.60 (half size)
 FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S = 24 * 3600, 2 * 3600, 600
 FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S = 0.15, 600, 1800
@@ -166,6 +168,8 @@ DUMP_ARENA = [("Rhode Island Senate D", "yes"), ("Rhode Island Senate R", "no"),
 DUMP_ARENA_MIN_FAIR, DUMP_ARENA_COST = 0.85, 12_000  # arena sides eligible down to fair_side 0.85; cost per side (day 3 §3: 8k -> 12k)
 DUMP_CONC_CAP = 12_000                    # no new levels where position on the side (at cost) + resting dump bids >= this
 DUMP_OTHER_COST = 3_000                   # Oct 3 (dump full): non-arena favourite sides, 3k over 2 levels
+DUMP_OTHER_COST_HI = 5_000                # ... 5k once free cash (above the floor) >= 35k; back to 3k below 33k (hysteresis)
+DUMP_OTHER_HI_ON, DUMP_OTHER_HI_OFF = 35_000, 33_000
 DUMP_OTHER_OFFSETS = [0.04, 0.07]         # ... at ref - these, each <= fair_side - DUMP_OTHER_FAIR_GAP
 DUMP_OTHER_FAIR_GAP = 0.05
 RELEASE_FALLBACK_QTY = 500                # Oct 3 (b): no spare read for the depth -> sell <= this many shares at the bid
@@ -188,6 +192,7 @@ AK_RELEASE = 0.50               # D1 + D1b (day 2 §1): share of the original AK
 RELEASE_EVERY_S, RELEASE_MARKETS = 30, 3   # release layer (day 2 §3.3): plan every 30 s, <= 3 markets (= order-book reads)
 RELEASE_PILOT_TARGET = 10_000   # pilot: free cash above the floor
 RELEASE_TARGET = 40_000         # day 3 §3: free cash above the floor, from Oct 3 to Nov 3 (was 25k by Oct 3, 40k by Oct 10)
+RELEASE_MAX_COST = 0.10         # Oct 3 (Piero): 5% -> 10%; holdings costing more (the 10-20% bucket) are never released
 
 # A7. files ---------------------------------------------------------------------------------------------------------
 DATA = os.environ.get("SIG_DATA") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")   # releases share it
