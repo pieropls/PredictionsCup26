@@ -1237,13 +1237,13 @@ class FatFingerTests(EngineCase):
                 self.assertGreaterEqual(fs, a_config.FAT_MIN_FAIR - 1e-9, o)
                 self.assertLessEqual(o["price"], min(0.12, 0.25 * fs) + 1e-9, o)
         self.assertFalse([o for o in mine if o["ex"] in (AK, RI)], "never on manual positions")
-        # queue step-up: someone already bids 0.05 on a side we cover -> our 0.05 level goes to 0.055, not above caps
+        # queue step-up: someone already bids 0.10 (inside the 0.12 level's band (0.08, 0.12]) -> our level goes to 0.105
         ex, side = mine[0]["ex"], mine[0]["side"]
-        yb = [(0.05, 500.0)] if side == "yes" else []
-        ya = [(0.95, 500.0)] if side == "no" else []
+        yb = [(0.10, 500.0)] if side == "yes" else []
+        ya = [(0.90, 500.0)] if side == "no" else []
         eng.fat_book[ex] = (time.time(), yb, ya)
         lv = eng.fat_levels(ex, side, eng.side_fair(ex, side), 1.0, "A")
-        self.assertIn(0.055, [px for _, px, _ in lv])
+        self.assertIn(0.105, [px for _, px, _ in lv])
         self.assertTrue(all(px <= 0.12 + 1e-9 for _, px, _ in lv))
         self.assertTrue(all(px <= 0.075 + 1e-9 for _, px, _ in eng.fat_levels(ex, side, 0.30, 1.0, "A")), "cap: 25% of a 0.30 side")
 
@@ -1262,7 +1262,8 @@ class FatFingerTests(EngineCase):
         loop(eng, fake)
         _, yb, ya = eng.fat_book[ex]
         self.assertEqual([p for p, _ in (yb or ya)], [0.05 if side == "yes" else 0.95], "only the rival is left in the queue")
-        self.assertEqual(sorted(px for _, px, _ in eng.fat_levels(ex, side, eng.side_fair(ex, side), 1.0, "A")), [0.055, 0.08, 0.12])
+        self.assertEqual(sorted(px for _, px, _ in eng.fat_levels(ex, side, eng.side_fair(ex, side), 1.0, "A")), [0.12],
+                         "only the 0.12 level (Oct 3); a rival at 0.05 is below its band (0.08, 0.12]")
 
     def test_optional_reads_wait_for_spare_budget(self):
         fake, eng = self.rig()
@@ -1297,7 +1298,7 @@ class FatFingerTests(EngineCase):
             self.assertIn("FATFINGER FILL", fh.read())
 
     def test_reserve_must_cover_the_worst_single_market_fill(self):
-        fake, eng = self.rig(cash_above_floor=500)        # reserve unfunded: nothing armed
+        fake, eng = self.rig(cash_above_floor=100)        # reserve below any side's worst case (unmapped half size: 180)
         self.settle(eng, fake, 4)
         self.assertEqual(self.fat_orders(eng, fake), [])
         self.assertTrue(any(v == "reserve not funded" for v in (eng.coverage or {}).get("reasons", {}).values()))
@@ -1843,6 +1844,35 @@ class ArenaTests(EngineCase):
         cost = sum(o["qty"] * o["price"] for o in self.dump_orders(eng, fake) if o["ex"] == ex)
         self.assertLessEqual(cost + 5_700, 12_000 + 50)
         self.assertGreater(cost, 5_000)
+
+    def test_full_covers_every_eligible_side_arena_12k_others_3k(self):
+        fake, eng, favs = self.rig()
+        eng.controls.layer("dump")["state"] = "full"        # Oct 3: Piero approved the promotion
+        self.settle(eng, fake, favs, 4)
+        mine = self.dump_orders(eng, fake)
+        sides = {(o["ex"], o["side"]) for o in mine}
+        self.assertGreater(len(sides), 2, "beyond the two arena sides")
+        ar = eng.arena()
+        for key in sides:
+            lv = sorted(((o["price"], o["qty"]) for o in mine if (o["ex"], o["side"]) == key), reverse=True)
+            cost = sum(p * q for p, q in lv)
+            fs = eng.side_fair(*key)
+            if key in ar:
+                self.assertLessEqual(len(lv), 3)
+                self.assertLessEqual(cost, a_config.DUMP_ARENA_COST + 1e-6)
+            else:
+                self.assertLessEqual(len(lv), 2)
+                self.assertLessEqual(cost, a_config.DUMP_OTHER_COST + 1e-6)
+                ref = eng.dump_ref_v2(key[0])[0]
+                rs = ref if key[1] == "yes" else 1 - ref
+                for p, _ in lv:
+                    self.assertLessEqual(p, min(rs - 0.04, fs - 0.05) + 1e-9, (key, lv))
+
+    def test_release_without_a_spare_read_sells_at_most_500_at_the_bid(self):
+        fake, eng, favs = self.rig()
+        fake.spare = False                                # no spare read for the order book depth
+        eng.depth_cache.clear()
+        self.assertEqual(eng.bid_depth(favs[0], "yes", time.time()), float(a_config.RELEASE_FALLBACK_QTY))
 
     def test_v2_reference_and_no_lowering_during_a_dump(self):
         fake, eng, favs = self.rig()

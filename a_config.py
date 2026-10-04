@@ -127,12 +127,14 @@ LAYER_CAPS = {
     "sniper": {"per_market": (1_000, 3_000, 3_000), "per_day": (10_000, 10_000, 10_000)},
     "fatfinger": {"resting": (8_000, 300_000, 400_000), "filled": (30_000, 30_000, 40_000)},  # resting = policy (no cash lock);
                                                                                                # afternoon D-B: 40k -> 300k
-    "dump": {"resting": (120_000, 150_000, 200_000)},          # afternoon D-A: resting cost (policy); fills bounded by the reserve
+    "dump": {"resting": (120_000, 450_000, 500_000)},          # resting cost (policy; fills bounded by the per-side reserve fit);
+                                                               # Oct 3: full = every eligible favourite side (~125 sides, ~440k)
     "longshot": {"resting": (20_000, 20_000, 25_000)},        # day 3 §2: total resting cost (worst case 200 per side)
 }
 # fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
-FAT_LEVELS = [0.12, 0.08, 0.05]
-FAT_SIZES = {"A": {0.12: 5_000, 0.08: 10_000, 0.05: 20_000}, "B": {0.08: 3_000, 0.05: 6_000}}   # shares
+FAT_LEVELS = [0.12]             # Oct 3 (Piero): only the 0.12 level on each side (0.08 / 0.05: 0 fills since day 1)
+FAT_SIZES = {"A": {0.12: 5_000}, "B": {0.12: 3_000}}   # shares (tier B had no 0.12 level: its old top size, 3,000)
+FAT_BAND_EDGES = [0.05, 0.08, 0.12]  # queue bands stay (0.08, 0.12] etc. so the 0.12 level means 0.12 (one tick over a rival there)
 FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP = 0.35, 0.60, 0.25   # eligible side; unmapped: SIG ref >= 0.60 (half size)
 FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S = 24 * 3600, 2 * 3600, 600
 FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S = 0.15, 600, 1800
@@ -163,6 +165,10 @@ DUMP_ARENA = [("Rhode Island Senate D", "yes"), ("Rhode Island Senate R", "no"),
               ("Minnesota Senate D", "yes"), ("U.S. House D", "yes"), ("MN-05 House race D", "yes")]
 DUMP_ARENA_MIN_FAIR, DUMP_ARENA_COST = 0.85, 12_000  # arena sides eligible down to fair_side 0.85; cost per side (day 3 §3: 8k -> 12k)
 DUMP_CONC_CAP = 12_000                    # no new levels where position on the side (at cost) + resting dump bids >= this
+DUMP_OTHER_COST = 3_000                   # Oct 3 (dump full): non-arena favourite sides, 3k over 2 levels
+DUMP_OTHER_OFFSETS = [0.04, 0.07]         # ... at ref - these, each <= fair_side - DUMP_OTHER_FAIR_GAP
+DUMP_OTHER_FAIR_GAP = 0.05
+RELEASE_FALLBACK_QTY = 500                # Oct 3 (b): no spare read for the depth -> sell <= this many shares at the bid
 DUMP_REF_LONG_S = 6 * 3600                # reference = max(SIG 30-min median, SIG 6-h median)
 # longshot catcher (day 3 §2): resting bids at 0.5-1c on sides Polymarket prices <= 5%, to catch sweeps through them
 LONG_MAX_FAIR = 0.05                      # sides with Polymarket fair_side <= this

@@ -49,7 +49,8 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, RELEASE_TARGET, TMM_TTL_S, LADDER_TTL_S, RECYCLE_TAKE_TTL_S, TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_TTL_S, DUMP_TTL_S, DUMP_MIN_FAIR, DUMP_MIN_REF, DUMP_OFFSETS,
                       DUMP_REF_GAP, DUMP_COST, DUMP_MIN_SIDE_COST, DUMP_QUEUE_S, DUMP_BOOK_READS, DUMP_REBOUND_MIN, DUMP_HOLD_S,
                       DUMP_NEWS_DROP, DUMP_BREAKER_MARKETS, DUMP_BREAKER_FAIR, DUMP_PILOT_SIDES, DUMP_PILOT_S, DUMP_REARM_S, DUMP_ARENA, DUMP_ARENA_MIN_FAIR,
-                      DUMP_ARENA_COST, DUMP_CONC_CAP, DUMP_REF_LONG_S, LONG_MAX_FAIR, LONG_LEVELS,
+                      DUMP_ARENA_COST, DUMP_CONC_CAP, DUMP_REF_LONG_S, DUMP_OTHER_COST, DUMP_OTHER_OFFSETS,
+                      DUMP_OTHER_FAIR_GAP, RELEASE_FALLBACK_QTY, FAT_BAND_EDGES, LONG_MAX_FAIR, LONG_LEVELS,
                       LONG_TINY_FAIR, LONG_TINY_QTY, LONG_SIDE_MAX_COST, LONG_TTL_S, LONG_EXIT_TTL_S, LONG_EXIT_MULT, LONG_STALE_S,
                       LONG_NEWS_RISE, LONG_NEWS_WINDOW_S, LONG_NEWS_HOLD_S, LONG_BREAKER_SIDES, LONG_BREAKER_PAUSE_S, LONG_PILOT_S,
                       TMM_MID_HALF_LIFE_S, TMM_KAPPA_MAX, TMM_SIZE, TMM_CAP_SIDE, TMM_SKEW_TICKS, TMM_OFFER_MID_S, TMM_RELEASE_S,
@@ -1424,7 +1425,7 @@ class Engine:
             bids = [p for p, _ in yb] if side == "yes" else [round(1 - p, 3) for p, _ in ya]
         out, used = [], set()
         new_unmapped = scale == 0.5 and value == 0.5
-        bands = sorted(FAT_LEVELS)
+        bands = sorted(set(FAT_BAND_EDGES) | set(FAT_LEVELS))   # Oct 3: the original bands, whatever is placed
         for lvl in FAT_LEVELS:
             if lvl not in sizes or (new_unmapped and lvl != 0.05):
                 continue
@@ -1916,7 +1917,7 @@ class Engine:
         held = self.book.get(ex, {}).get("pos", 0)         # never a bid that would net against shares we hold on the other
         ar = self.arena() if DUMP_ARENA else set()
         return [(side, fs, rs) for side, fs, rs in (("yes", f, r), ("no", 1 - f, 1 - r))   # side (pair-set legs, inventory)
-                if fs >= (DUMP_ARENA_MIN_FAIR if (ex, side) in ar else DUMP_MIN_FAIR) and rs >= DUMP_MIN_REF
+                if fs >= (DUMP_ARENA_MIN_FAIR if DUMP_ARENA else DUMP_MIN_FAIR) and rs >= DUMP_MIN_REF   # Oct 3: 0.85 for every side
                 and not (held <= -MIN_QTY if side == "yes" else held >= MIN_QTY)]
 
     def side_cost(self, ex, side, bids=True):
@@ -1931,7 +1932,7 @@ class Engine:
                 cost += o["qty"] * o["price"]
         return cost
 
-    def dump_levels(self, ex, side, fs, rs, cost):
+    def dump_levels(self, ex, side, fs, rs, cost, arena_style=True):
         """[(i, price, shares)]: fair_side - 0.07 / 0.12 / 0.20, each <= ref_side - 0.04, one tick above the best rival bid
         at or below the level (and above the next deeper level), resting below the side's best ask; cost split evenly."""
         book = self.dump_book.get(ex)
@@ -1941,7 +1942,10 @@ class Engine:
             bids = [p for p, _ in yb] if side == "yes" else [round(1 - p, 3) for p, _ in ya]
         ask_s = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[1]
         offsets, _ = self.dump_settings()
-        lv = [bots.tick_down(min(fs - off, rs - DUMP_REF_GAP)) for off in offsets]
+        if arena_style:
+            lv = [bots.tick_down(min(fs - off, rs - DUMP_REF_GAP)) for off in offsets]
+        else:                                               # Oct 3: non-arena sides: ref - 0.04 / - 0.07, each <= fair - 0.05
+            lv = [bots.tick_down(min(rs - off, fs - DUMP_OTHER_FAIR_GAP)) for off in DUMP_OTHER_OFFSETS]
         out, used = [], set()
         for i, lvl in enumerate(lv):
             deeper = lv[i + 1] if i + 1 < len(lv) else 0.0
@@ -1952,7 +1956,7 @@ class Engine:
             if px < 0.01 or px in used:
                 continue
             used.add(px)
-            q = int(cost / len(lv) / px)
+            q = int(cost / len(lv) / px)                    # even split (3 arena levels / 2 other levels)
             if q >= MIN_QTY:
                 out.append((i, px, q))
         return out
@@ -1965,7 +1969,7 @@ class Engine:
         tier_a = self.fat_tiers()
         pilot = self.dump_pilot_sides(now) if st == "pilot" else None
         ar = self.arena() if DUMP_ARENA else None
-        if ar is not None:                                  # day 3 §1: arena sides only (pilot or full)
+        if ar is not None and st == "pilot":                # pilot: arena sides only; full (Oct 3): every eligible side
             pilot = ar
         cands = []
         for b in self.bots:
@@ -2029,7 +2033,8 @@ class Engine:
             if self.dump_block.get(key, 0) > now or self.breaker.get(("dump", self.pol(ex, side)), 0) > now or self.ex.is_frozen(ex):
                 continue
             fat_worst = sum(x["qty"] * x["px"] for x in (self.fat_now.get(ex) or []) if x["side"] == side)
-            base = DUMP_ARENA_COST if ar is not None and key in ar else DUMP_COST["A" if ex in tier_a else "B"]
+            arena_style = ar is None or key in ar           # no arena configured: the original 3 levels everywhere
+            base = (DUMP_ARENA_COST if key in ar else DUMP_OTHER_COST) if ar is not None else DUMP_COST["A" if ex in tier_a else "B"]
             cost = min(base, funded - fat_worst, DUMP_CONC_CAP - self.side_cost(ex, side, bids=False))   # day 3 §1: cap on
             # position + our levels; our own resting levels are what's being sized, so they don't count (else 8k <-> 4k each loop)
             if cost < DUMP_MIN_SIDE_COST:
@@ -2040,11 +2045,12 @@ class Engine:
                 rec = self.ledger.orders.get(o["id"])
                 if rec and rec.get("layer") == "dump" and o["ex"] == ex and o["side"] == side:
                     rest_px[rec.get("sub")] = o["price"]
-            for i, px, q in self.dump_levels(ex, side, fs, rs, cost):
+            levels = self.dump_levels(ex, side, fs, rs, cost, arena_style=arena_style)
+            for i, px, q in levels:
                 sub = f"dump:{ex}:{side}:{i}"
                 if dumping and sub in rest_px and px < rest_px[sub] - 1e-9:
                     px = rest_px[sub]                       # never lower a resting level while a dump is in progress
-                    q = int(cost / len(DUMP_OFFSETS) / px)
+                    q = int(cost / (len(DUMP_OFFSETS) if arena_style else len(DUMP_OTHER_OFFSETS)) / px)
                 if key in recent_fill and round(px, 3) not in resting.get(key, set()):
                     continue                                # re-arm a filled side only after 10 min
                 plan.setdefault(ex, []).append(dict(side=side, px=px, qty=q, sub=sub, level=i))
@@ -2356,8 +2362,8 @@ class Engine:
         """Shares at the best SIG bid of `side` (order book read, cached 60 s)."""
         c = self.depth_cache.get(ex)
         if not c or now - c[0] > 60:
-            if not api.spare_reads():                       # §6: no spare read now -> no release this market this time
-                return 0.0
+            if not api.spare_reads():                       # Oct 3 (b): no spare read -> size from the prices read: <= 500
+                return float(RELEASE_FALLBACK_QTY)          # shares, still a limit at the bid
             bids, asks = api.orderbook(ex, depth=1)
             c = self.depth_cache[ex] = (now, bids, asks)
         _, bids, asks = c
@@ -3945,7 +3951,8 @@ def main():
                 reads = api.health(60)["reads_last_min"]    # ~8 SIG reads a loop; SIG allows 100 a minute
                 with eng.rt_lock:
                     ours = any(k != "pm_move" for _, k, _ in eng.rt_pending)
-                gap = 10.0 if reads >= 75 else 6.0 if reads >= 60 or not ours else 2.0   # own fills: 2 s (A7) while cheap
+                gap = 15.0 if reads >= 75 else 6.0 if reads >= 60 or not ours else 2.0   # own fills: 2 s (A7) while cheap;
+                # Oct 3 (a): 15 s (was 10) when reads are high: SIG 429s at ~80+/min counted on our side
                 time.sleep(max(0.0, gap - (time.time() - t)))
     except KeyboardInterrupt:
         pass
