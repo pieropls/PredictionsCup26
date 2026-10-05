@@ -20,6 +20,7 @@ import math
 import os
 import re
 import signal
+import statistics
 import subprocess
 import sys
 import threading
@@ -46,12 +47,11 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       OPPORTUNITY_RESERVE, ROC_MIN, ROC_MIN_TIGHT, RELEASE_EVERY_S, RELEASE_MARKETS, RELEASE_PILOT_TARGET,
                       FAT_LEVELS, FAT_SIZES, FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP, FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S,
                       FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S, FAT_MOVE, FAT_CAPACITY_SHARE, FAT_BOOK_READS, QTY_TOL,
-                      FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, RELEASE_TARGET, TMM_TTL_S, LADDER_TTL_S, RECYCLE_TAKE_TTL_S, TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_TTL_S, DUMP_TTL_S, DUMP_MIN_FAIR, DUMP_MIN_REF, DUMP_OFFSETS,
-                      DUMP_REF_GAP, DUMP_COST, DUMP_MIN_SIDE_COST, DUMP_QUEUE_S, DUMP_BOOK_READS, DUMP_REBOUND_MIN, DUMP_HOLD_S,
-                      DUMP_NEWS_DROP, DUMP_BREAKER_MARKETS, DUMP_BREAKER_FAIR, DUMP_PILOT_SIDES, DUMP_PILOT_S, DUMP_REARM_S, DUMP_ARENA, DUMP_ARENA_MIN_FAIR,
-                      DUMP_ARENA_COST, DUMP_CONC_CAP, DUMP_REF_LONG_S, DUMP_OTHER_COST, DUMP_OTHER_OFFSETS,
-                      DUMP_OTHER_FAIR_GAP, RELEASE_FALLBACK_QTY, FAT_BAND_EDGES, FAT_TIER_A_ONLY, FAT_NEW_LEVEL,
-                      FAT_NEW_SIZES, DUMP_OTHER_COST_HI, DUMP_OTHER_HI_ON, DUMP_OTHER_HI_OFF, RELEASE_MAX_COST, LONG_MAX_FAIR, LONG_LEVELS,
+                      FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, RELEASE_TARGET, TMM_TTL_S, LADDER_TTL_S, RECYCLE_TAKE_TTL_S, TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_TTL_S, DUMP_TTL_S, DUMP_MIN_FAIR, DUMP_V3_OFFSETS, DUMP_V3_WEIGHTS, DUMP_FAIR_GAP, DUMP_SLIDE, DUMP_SIDE_DIV, DUMP_SIDE_MIN,
+                      DUMP_SIDE_MAX, DUMP_ARENA_MULT, DUMP_ARENA_N, DUMP_SELL_MIN, DUMP_SELL_FAIR_GAP, DUMP_STEP_S, DUMP_STEP_MIN,
+                      DUMP_BREAKER_SIDES, DUMP_WRITE_SHARE, DUMP_WRITES_IDLE, DUMP_MIN_SIDE_COST, DUMP_QUEUE_S, DUMP_BOOK_READS, DUMP_HOLD_S,
+                      DUMP_NEWS_DROP, DUMP_BREAKER_FAIR, DUMP_PILOT_S, DUMP_CONC_CAP, RELEASE_FALLBACK_QTY, FAT_BAND_EDGES, FAT_TIER_A_ONLY, FAT_NEW_LEVEL,
+                      FAT_NEW_SIZES, RELEASE_MAX_COST, LONG_MAX_FAIR, LONG_LEVELS,
                       LONG_TINY_FAIR, LONG_TINY_QTY, LONG_SIDE_MAX_COST, LONG_TTL_S, LONG_EXIT_TTL_S, LONG_EXIT_MULT, LONG_STALE_S,
                       LONG_NEWS_RISE, LONG_NEWS_WINDOW_S, LONG_NEWS_HOLD_S, LONG_BREAKER_SIDES, LONG_BREAKER_PAUSE_S, LONG_PILOT_S,
                       TMM_MID_HALF_LIFE_S, TMM_KAPPA_MAX, TMM_SIZE, TMM_CAP_SIDE, TMM_SKEW_TICKS, TMM_OFFER_MID_S, TMM_RELEASE_S,
@@ -332,9 +332,10 @@ class Engine:
         self.release_now, self.release_t, self.depth_cache = {}, 0.0, {}
         self.fat_book, self.fat_anchor, self.fat_block, self.fair_hist, self.fat_now = {}, {}, {}, {}, {}
         self.fat_sent = collections.deque(maxlen=5000)      # placement times (pilot gate: write usage)
-        self.dump_now, self.dump_book, self.dump_block, self.dump_view, self.dump_ref = {}, {}, {}, {}, {}   # afternoon D-A
-        self.dump_quota, self.dump_pilot, self.cross_log = 0, None, {}
-        self.dump_track, self.dump_params = read_json(os.path.join(DATA, "intel", "dump_track.json"), {}) or {}, None
+        self.dump_now, self.dump_book, self.dump_block, self.dump_view, self.dump_ref = {}, {}, {}, {}, {}   # dump catcher
+        self.dump_frozen, self.dump_arena_t, self.dump_arena_set = {}, 0.0, set()   # v3 (day 4 §2)
+        self.dump_quota, self.cross_log = 0, {}
+        self.dump_track = read_json(os.path.join(DATA, "intel", "dump_track.json"), {}) or {}
         self.tmm_mid, self.mid24, self.mm_since, self.tmm_inv = {}, {}, {}, collections.deque(maxlen=5000)   # afternoon D-C
         self.cov_seq, self.cov_seq_t, self.truth_t = None, None, None   # evening §1: fills projection / order-truth health
         self.truth_prev, self.truth_carry, self.truth_live_t, self.blind_t = None, {}, None, collections.deque(maxlen=50)
@@ -345,7 +346,6 @@ class Engine:
         self.pending_fixes = []                             # day 3 §1: subbook_fix
         self.long_now, self.long_view, self.long_block, self.long_quota = {}, {}, {}, 0   # day 3 §2: longshot catcher
         self.long_hist = {}
-        self.dump_other_hi = False                          # Oct 3: non-arena dump sides at 5k (free cash >= 35k)
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
@@ -594,7 +594,8 @@ class Engine:
             self.long_now = {}
             self.event("ERR", f"longshot plan: {err!r}")
         self.long_quota = int(0.15 * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60)
-        self.dump_quota = int(0.15 * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60)
+        self.dump_quota = int(DUMP_WRITE_SHARE * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60) \
+            if api.writes_left() >= DUMP_WRITES_IDLE else 0     # day 4 §2: place only while writes are idle
         self.fat_quota = int(FAT_CAPACITY_SHARE * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60)
         engine_ex = {b.ex for b in self.bots if b.kind == "market"} | {ex for pb in self.pairs for ex in pb.legs}
         filled = sum(self.risk(ex, pos.get(ex, 0)) for ex in engine_ex)
@@ -809,15 +810,6 @@ class Engine:
                 json.dump(self.dump_track, fh)
         except OSError:
             pass
-
-    def dump_settings(self):
-        """Daily settings from tracked dumps (data/intel/dump_params.json, written only with >= 5 dumps), else the plan's."""
-        if time.time() - self.intel_s.get("dump_params", 0) > 600:
-            self.intel_s["dump_params"] = time.time()
-            p = read_json(os.path.join(DATA, "intel", "dump_params.json"), None)
-            self.dump_params = p if p and p.get("n", 0) >= 5 else None
-        p = self.dump_params
-        return (p["offsets"], p["rebound_share"]) if p else (DUMP_OFFSETS, 1.0)
 
     def intel_event(self, e):
         """One big event: what we caught, what our current levels would have caught (missed), logged everywhere."""
@@ -1216,12 +1208,13 @@ class Engine:
         # promotions (pilot -> full) and pilot extensions; evening §1.5: none while the hold flag is set or fills are blind
         healthy, why_bad = self.fills_health(now)
         hold = bool(c.d.get("hold_gates")) or not healthy
+        gate_free = set(c.d.get("gate_free") or [])         # day 4: layers Piero let promote while the hold is on
         if hold and now - night.get("hold_logged", 0) >= 1800:
             night["hold_logged"] = now
             self.night.line(f"pilot gates held: {'hold flag set' if c.d.get('hold_gates') else ''}"
                             f"{'; ' if c.d.get('hold_gates') and not healthy else ''}{'' if healthy else why_bad}")
         for l in ("mm", "ladder", "pairs", "release", "fatfinger", "dump", "longshot"):
-            if c.state(l) != "pilot" or hold:
+            if c.state(l) != "pilot" or (hold and not (l in gate_free and healthy)):
                 continue
             st, age = stats.get(l, {}), now - since[l]
             ok, why = False, ""
@@ -1268,16 +1261,13 @@ class Engine:
                     night[f"{l}_ext"] = now
                     self.night.line(f"layer fatfinger stays pilot: {len(close)} fills within 25c of fair, {trims} I2 trims, "
                                     f"{thr} HTTP 429s, {late} placements last hour (review)")
-            if l == "dump" and age >= DUMP_PILOT_S:         # afternoon D-A: 4 h pilot on 15 tier-A sides -> full
-                trims = self.ex.trims.get("dump", 0)
-                short = self.cash_short is not None and self.cash_short["t"] >= since[l]
-                thr = api.health(DUMP_PILOT_S).get("throttled", 0)
-                n_f = sum(1 for f in self.fills_since(since[l]) if f["layer"] == "dump")
-                if trims == 0 and not short and thr == 0:
-                    ok, why = True, f"4 h pilot: {n_f} dump fills, no I2 trims, no CASH SHORT, no HTTP 429s"
-                elif now - night.get(f"{l}_ext", 0) >= DUMP_PILOT_S:
+            if l == "dump" and age >= DUMP_PILOT_S:         # day 4 §2 gate: 4 h pilot at half size on every side
+                g = self.dump_gate(since[l], now)
+                if g["ok"]:
+                    ok, why = True, g["why"]
+                elif now - night.get(f"{l}_ext", 0) >= 1800:
                     night[f"{l}_ext"] = now
-                    self.night.line(f"layer dump stays pilot: {trims} I2 trims, cash short {short}, {thr} HTTP 429s (review)")
+                    self.night.line(f"layer dump stays pilot: {g['why']}")
             if l == "longshot" and age >= LONG_PILOT_S:     # day 3 §2: 24 h pilot -> full
                 fills = [f for f in self.fills_since(since[l]) if f["layer"] == "longshot" and f["action"] == "buy"]
                 late = [f for f in fills if not self.long_exit_ok(f)]
@@ -1879,69 +1869,52 @@ class Engine:
                     offer_mid=ex in self.mm_since and time.time() - self.mm_since[ex] > TMM_OFFER_MID_S,
                     max_cost=self.release_max_cost())
 
-    # ------------------------------------------------------------------------------------------------ dump catcher (D-A)
-    def dump_pilot_sides(self, now):
-        """The DUMP_PILOT_SIDES eligible sides of the markets with the largest dumps: value at a wrong price on the tape
-        (TAPE_STUDY by market + live big events), recomputed every 30 min; written to data/intel/dump_pilot.json."""
-        if self.dump_pilot and now - self.dump_pilot[0] < 1800:
-            return self.dump_pilot[1]
-        val = collections.Counter()
-        try:
-            by_title = {m["title"]: ex for ex, m in self.meta.items()}
-            for title, v in (read_json(os.path.join(DATA, "tape", "summary.json"), {}).get("by_market") or {}).items():
-                if title in by_title:
-                    val[by_title[title]] += v.get("value", 0)
-        except Exception:
-            pass
-        for ev in intel._jsonl(os.path.join(DATA, "intel", "events.jsonl"), now - 7 * 86400):
-            val[ev["ex"]] += ev.get("value") or 0
-        tier_a = self.fat_tiers()
-        sides = []
-        for ex, v in val.most_common():
-            if ex in tier_a or not tier_a:
-                sides += [(ex, side) for side, _, _ in self.dump_eligible(ex)]
-            if len(sides) >= DUMP_PILOT_SIDES:
-                break
-        sides = sides[:DUMP_PILOT_SIDES]
-        self.dump_pilot = (now, set(sides))
-        try:
-            with open(os.path.join(DATA, "intel", "dump_pilot.json"), "w") as fh:
-                json.dump(dict(t=stamp(), sides=[dict(ex=ex, side=sd, market=self.name(ex), value=round(val[ex])) for ex, sd in sides]), fh, indent=1)
-        except OSError:
-            pass
-        return self.dump_pilot[1]
+    # ------------------------------------------------------------------------------------------------ dump catcher v3 (day 4 §2)
+    def dump_arena(self, now):
+        """{ex} of the DUMP_ARENA_N markets with the most big events in the last 48 h (intel events + tracked dumps),
+        recomputed every 30 min (arena sides get 1.5x size)."""
+        if self.dump_arena_t and now - self.dump_arena_t < 1800:
+            return self.dump_arena_set
+        n = collections.Counter()
+        for row in intel._jsonl(os.path.join(DATA, "intel", "events.jsonl"), now - 48 * 3600):
+            n[row["ex"]] += 1
+        for row in intel._jsonl(os.path.join(DATA, "intel", "dumps.jsonl"), now - 48 * 3600):
+            n[row["ex"]] += 1
+        self.dump_arena_t, self.dump_arena_set = now, {ex for ex, _ in n.most_common(DUMP_ARENA_N)}
+        return self.dump_arena_set
 
-    def dump_ref_v2(self, ex):
-        """Day 3 §1 (v2 reference): max(SIG 30-min median, SIG 6-h median of the 5-min mid samples); the 30-min median alone
-        until 1 h of samples. -> (ref, dumping: 30-min median below the 6-h one)."""
+    def dump_ref_v3(self, ex):
+        """(ref, sliding): ref = the SIG 30-min median (the pre-dump price); sliding while it sits > 2c under the 6-h
+        median (a slide in progress: the ref is frozen at its last value and levels are never lowered)."""
         r30 = self.ref(ex)
-        h = [v for t, v in (self.mid24.get(ex) or []) if t >= time.time() - DUMP_REF_LONG_S]
-        if r30 is None or len(h) < 12:
-            return r30, False
-        xs = sorted(h)
-        r6 = xs[len(xs) // 2]
-        return max(r30, r6), r30 < r6
-
-    def arena(self):
-        """{(ex, side)} of DUMP_ARENA by market name (empty = the dump catcher isn't limited to an arena)."""
-        names = {self.name(b.ex): b.ex for b in self.bots if b.kind == "market"}
-        return {(names[n], sd) for n, sd in DUMP_ARENA if n in names}
+        if r30 is None:
+            return None, False
+        h = [v for t, v in (self.mid24.get(ex) or []) if t >= time.time() - 6 * 3600]
+        sliding = False
+        if len(h) >= 12:
+            xs = sorted(h)
+            sliding = r30 < xs[len(xs) // 2] - DUMP_SLIDE
+        if sliding and ex in self.dump_frozen:
+            return self.dump_frozen[ex], True
+        if sliding:
+            self.dump_frozen[ex] = r30
+            return r30, True
+        self.dump_frozen.pop(ex, None)
+        return r30, False
 
     def dump_eligible(self, ex):
-        """[(side, fair_side, ref_side)]: mapped sides with fair_side >= 0.90 (arena sides: >= 0.85) and SIG ref_side >= 0.80
-        (ref = the v2 reference), no manual market, no side whose opposite we hold."""
+        """[(side, fair_side, ref_side)]: mapped sides with a fresh Polymarket fair_side >= 0.80 and a SIG 30-min
+        reference; never a manual market; never a side whose opposite we hold (the bid would net against it)."""
         b = self.owner.get(ex)
-        f, r = self.fair.get(ex), self.dump_ref_v2(ex)[0]
+        f, (r, _) = self.fair.get(ex), self.dump_ref_v3(ex)
         if b is None or b.kind != "market" or ex in self.manual_ex or f is None or r is None:
             return []
-        held = self.book.get(ex, {}).get("pos", 0)         # never a bid that would net against shares we hold on the other
-        ar = self.arena() if DUMP_ARENA else set()
-        return [(side, fs, rs) for side, fs, rs in (("yes", f, r), ("no", 1 - f, 1 - r))   # side (pair-set legs, inventory)
-                if fs >= (DUMP_ARENA_MIN_FAIR if DUMP_ARENA else DUMP_MIN_FAIR) and rs >= DUMP_MIN_REF   # Oct 3: 0.85 for every side
-                and not (held <= -MIN_QTY if side == "yes" else held >= MIN_QTY)]
+        held = self.book.get(ex, {}).get("pos", 0)
+        return [(side, fs, rs) for side, fs, rs in (("yes", f, r), ("no", 1 - f, 1 - r))
+                if fs >= DUMP_MIN_FAIR and not (held <= -MIN_QTY if side == "yes" else held >= MIN_QTY)]
 
     def side_cost(self, ex, side, bids=True):
-        """Day 3 §1: position held on `side` at cost (SIG avgCost), plus (bids=True) our resting dump bids on it."""
+        """Position held on `side` at cost (SIG avgCost), plus (bids=True) our resting dump bids on it."""
         b = self.book.get(ex) or {}
         pos, row = b.get("pos", 0), b.get("row") or {}
         held = pos if side == "yes" else -pos
@@ -1952,45 +1925,35 @@ class Engine:
                 cost += o["qty"] * o["price"]
         return cost
 
-    def dump_levels(self, ex, side, fs, rs, cost, arena_style=True):
-        """[(i, price, shares)]: fair_side - 0.07 / 0.12 / 0.20, each <= ref_side - 0.04, one tick above the best rival bid
-        at or below the level (and above the next deeper level), resting below the side's best ask; cost split evenly."""
-        book = self.dump_book.get(ex)
-        bids = []
-        if book:
-            _, yb, ya = book
-            bids = [p for p, _ in yb] if side == "yes" else [round(1 - p, 3) for p, _ in ya]
-        ask_s = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[1]
-        offsets, _ = self.dump_settings()
-        if arena_style:
-            lv = [bots.tick_down(min(fs - off, rs - DUMP_REF_GAP)) for off in offsets]
-        else:                                               # Oct 3: non-arena sides: ref - 0.04 / - 0.07, each <= fair - 0.05
-            lv = [bots.tick_down(min(rs - off, fs - DUMP_OTHER_FAIR_GAP)) for off in DUMP_OTHER_OFFSETS]
+    def dump_levels(self, ex, side, fs, rs, cost):
+        """[(i, price, shares)]: L1/L2/L3 = ref - 1 / 2 / 3.5c, each <= fair_side - 3c and <= best bid + 1 tick (join or
+        improve, never cross the ask); shares by weight 40 / 35 / 25 of `cost`."""
+        bid_s, ask_s = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)
         out, used = [], set()
-        for i, lvl in enumerate(lv):
-            deeper = lv[i + 1] if i + 1 < len(lv) else 0.0
-            rivals = [p for p in bids if deeper < p <= lvl + 1e-9]
-            px = bots.tick_down(min(lvl, max(rivals) + TICK)) if rivals else lvl
+        for i, (off, w) in enumerate(zip(DUMP_V3_OFFSETS, DUMP_V3_WEIGHTS)):
+            px = min(rs - off, fs - DUMP_FAIR_GAP)
+            if bid_s is not None:
+                px = min(px, bid_s + TICK)
             if ask_s is not None:
-                px = min(px, bots.tick_down(ask_s - TICK))  # rest, never take
+                px = min(px, ask_s - TICK)
+            px = bots.tick_down(px)
             if px < 0.01 or px in used:
                 continue
             used.add(px)
-            q = int(cost / len(lv) / px)                    # even split (3 arena levels / 2 other levels)
+            q = int(cost * w / px)
             if q >= MIN_QTY:
                 out.append((i, px, q))
         return out
 
     def dump_plan(self, now, cash, used):
-        """{ex: [want-spec]} for the dump catcher (afternoon D-A), with its queue reads, news guard and per-side reserve fit."""
+        """{ex: [want-spec]} for dump catcher v3: every eligible side, size = funded reserve / 8 (1.5k..6k, arena x 1.5,
+        pilot x 0.5), concentration cap 12k per side, news guard, breaker, reserve fit (admission). A level whose
+        tranche is still being sold back is not re-placed; it re-arms as soon as the sell-back fills. After a restart
+        L1 goes out on every side first, then L2, then L3."""
         if not self.controls.on("dump"):
             return {}
-        st = self.controls.state("dump")
-        tier_a = self.fat_tiers()
-        pilot = self.dump_pilot_sides(now) if st == "pilot" else None
-        ar = self.arena() if DUMP_ARENA else None
-        if ar is not None and st == "pilot":                # pilot: arena sides only; full (Oct 3): every eligible side
-            pilot = ar
+        half = 0.5 if self.controls.state("dump") == "pilot" else 1.0
+        arena = self.dump_arena(now)
         cands = []
         for b in self.bots:
             if b.kind != "market":
@@ -1999,33 +1962,8 @@ class Engine:
             if r is not None:
                 self.dump_ref[b.ex] = r                     # the pre-dump reference for the next loop's fills
             for side, fs, rs in self.dump_eligible(b.ex):
-                if pilot is None or (b.ex, side) in pilot:
-                    cands.append((b.ex, side, fs, rs))
-        stale = sorted({ex for ex, _, _, _ in cands if now - (self.dump_book.get(ex) or (0,))[0] > DUMP_QUEUE_S},
-                       key=lambda ex: (self.dump_book.get(ex) or (0,))[0])
-        for ex in stale[:DUMP_BOOK_READS]:
-            if not api.spare_reads():
-                break
-            try:
-                bids, asks = api.orderbook(ex, depth=50)
-            except Exception as err:
-                self.event("ERR", f"dump queue read {self.name(ex)}: {str(err)[:80]}")
-                break
-            mine = collections.Counter()                    # I4: our own resting orders are not the queue
-            for o in self.open:
-                if o["ex"] == ex:
-                    k, p = self.yes_quote(o["side"], o["action"], o["price"])
-                    mine[("b" if k == "bid" else "a", round(p, 3))] += o["qty"]
-            def strip(rows, k):
-                out = []
-                for p, q in rows:
-                    cut = min(q, mine[(k, round(p, 3))])
-                    mine[(k, round(p, 3))] -= cut
-                    if q - cut > QTY_TOL:
-                        out.append((p, q - cut))
-                return out
-            self.dump_book[ex] = (now, strip(bids, "b"), strip(asks, "a"))
-        # news guard: fair_side down > 5c within 10 min pulls that side's levels for 30 min
+                cands.append((b.ex, side, fs, rs))
+        # news guard: a side's fair down > 3c within 10 min pulls its levels for 30 min
         for ex in {c[0] for c in cands}:
             h = [x for x in self.fair_hist.get(ex, []) if x[0] >= now - FAT_NEWS_WINDOW_S]
             f = self.fair.get(ex)
@@ -2041,59 +1979,51 @@ class Engine:
                         self.event("NEWS", f"{self.name(ex)} {side.upper()} fair fell {top - cur:.2f} in 10 min: dump levels pulled 30 min")
                     self.dump_block[(ex, side)] = now + FAT_NEWS_HOLD_S
         funded = max(0.0, min(float(OPPORTUNITY_RESERVE), cash - CASH_RESERVE - used["committed"]))
-        free = cash - CASH_RESERVE                          # Oct 3: non-arena sides 3k -> 5k at >= 35k free cash (33k back)
-        if not self.dump_other_hi and free >= DUMP_OTHER_HI_ON:
-            self.dump_other_hi = True
-            self.event("DUMP", f"free cash {free:,.0f} >= {DUMP_OTHER_HI_ON:,}: non-arena dump sides 3k -> 5k")
-        elif self.dump_other_hi and free < DUMP_OTHER_HI_OFF:
-            self.dump_other_hi = False
-            self.event("DUMP", f"free cash {free:,.0f} < {DUMP_OTHER_HI_OFF:,}: non-arena dump sides back to 3k")
-        recent_fill = {(f["ex"], f["side"]) for f in self.fills_since(now - DUMP_REARM_S) if f["layer"] == "dump"}
-        resting = {}
+        per_side = max(DUMP_SIDE_MIN, min(DUMP_SIDE_MAX, funded / DUMP_SIDE_DIV))
+        resting, rest_px = {}, {}
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
             if rec and rec.get("layer") == "dump":
-                resting.setdefault((o["ex"], o["side"]), set()).add(round(o["price"], 3))
-        plan = {}
+                tail = str(rec.get("sub", "")).rsplit(":", 1)[-1]
+                resting.setdefault((o["ex"], o["side"]), set()).add(int(tail) if tail.isdigit() else 0)
+                rest_px[rec.get("sub")] = o["price"]
+        plan, rows = {}, []
         for ex, side, fs, rs in cands:
             key = (ex, side)
             if self.dump_block.get(key, 0) > now or self.breaker.get(("dump", self.pol(ex, side)), 0) > now or self.ex.is_frozen(ex):
                 continue
-            fat_worst = sum(x["qty"] * x["px"] for x in (self.fat_now.get(ex) or []) if x["side"] == side)
-            arena_style = ar is None or key in ar           # no arena configured: the original 3 levels everywhere
-            other = DUMP_OTHER_COST_HI if self.dump_other_hi else DUMP_OTHER_COST
-            base = (DUMP_ARENA_COST if key in ar else other) if ar is not None else DUMP_COST["A" if ex in tier_a else "B"]
-            cost = min(base, funded - fat_worst, DUMP_CONC_CAP - self.side_cost(ex, side, bids=False))   # day 3 §1: cap on
-            # position + our levels; our own resting levels are what's being sized, so they don't count (else 8k <-> 4k each loop)
+            room = DUMP_CONC_CAP - self.side_cost(ex, side, bids=False)   # position + our levels <= 12k (levels sized here)
+            cost = min(per_side * (DUMP_ARENA_MULT if ex in arena else 1.0) * half, room)
             if cost < DUMP_MIN_SIDE_COST:
                 continue
-            dumping = self.dump_ref_v2(ex)[1]
-            rest_px = {}
-            for o in self.open:
-                rec = self.ledger.orders.get(o["id"])
-                if rec and rec.get("layer") == "dump" and o["ex"] == ex and o["side"] == side:
-                    rest_px[rec.get("sub")] = o["price"]
-            levels = self.dump_levels(ex, side, fs, rs, cost, arena_style=arena_style)
-            for i, px, q in levels:
+            sliding = self.dump_ref_v3(ex)[1]
+            books = self.ledger.subbooks.get(ex, {})
+            for i, px, q in self.dump_levels(ex, side, fs, rs, cost):
                 sub = f"dump:{ex}:{side}:{i}"
-                if dumping and sub in rest_px and px < rest_px[sub] - 1e-9:
-                    px = rest_px[sub]                       # never lower a resting level while a dump is in progress
-                    q = int(cost / (len(DUMP_OFFSETS) if arena_style else len(DUMP_OTHER_OFFSETS)) / px)
-                if key in recent_fill and round(px, 3) not in resting.get(key, set()):
-                    continue                                # re-arm a filled side only after 10 min
-                plan.setdefault(ex, []).append(dict(side=side, px=px, qty=q, sub=sub, level=i))
+                if abs(books.get(sub, 0)) >= MIN_QTY:
+                    continue                                # its tranche is being sold back: re-arms when that fills
+                if sliding and sub in rest_px and px < rest_px[sub] - 1e-9:
+                    px = rest_px[sub]                       # a slide in progress: never lower a resting level
+                    q = int(cost * DUMP_V3_WEIGHTS[i] / px)
+                rows.append((i, i in resting.get(key, set()), ex, dict(side=side, px=px, qty=q, sub=sub, level=i)))
+        # L1 everywhere first: a new L2 goes out only when no side is missing L1, a new L3 only when none is missing L2
+        missing = {lvl: any(r[0] == lvl and not r[1] for r in rows) for lvl in range(3)}
+        for lvl, is_resting, ex, w in rows:
+            if is_resting or lvl == 0 or (lvl == 1 and not missing[0]) or (lvl == 2 and not missing[0] and not missing[1]):
+                plan.setdefault(ex, []).append(w)
         return plan
 
     def track_dumps(self, now):
-        """Dump fills become tranches: rebound sell at max(pre-dump SIG ref_side - 1 tick, fill + 5c), the A2 exception
-        for this layer; after 24 h an unsold tranche goes to inventory (normal A2 rules)."""
+        """A filled level becomes a tranche: sell-back for the whole tranche at max(pre-dump ref_side, fill + 1.5c), never
+        above fair_side - 0.5c (the A2 exception); unfilled after 60 min it steps down to fill + 1c; after 6 h the
+        tranche goes to inventory (held to settlement: every fill was >= 3c under fair)."""
         tr, self.dump_view = self.ledger.tranches, {}
         for ex, books in list(self.ledger.subbooks.items()):
             for sub, q in list(books.items()):
                 if not sub.startswith("dump:") or abs(q) < 1 or (sub in tr and tr[sub].get("state") == "open"):
                     continue
                 side = "yes" if q > 0 else "no"
-                if side != sub.split(":")[2]:                  # night §1.1: only a dump entry fill makes a tranche, never an exit
+                if side != sub.split(":")[2]:                  # only a dump entry fill makes a tranche, never an exit
                     self.event("DUMP", f"{self.name(ex)}: {sub} holds {q:+,.0f} on the wrong side (an exit oversold): no tranche")
                     continue
                 r = self.dump_ref.get(ex, self.ref(ex))
@@ -2107,27 +2037,29 @@ class Engine:
             ex = t["ex"]
             q = self.ledger.subbooks.get(ex, {}).get(sub, 0)
             if abs(q) < 1:
-                t["state"] = "closed"
-                self.event("DUMP", f"{self.name(ex)}: tranche {sub} sold (round trip done)")
-                for o in self.open:                         # night §1.1: its exit must not keep filling
+                t.update(state="closed", closed_ts=now, hold_min=round((now - t.get("ts", now)) / 60, 1))
+                self.event("DUMP", f"{self.name(ex)}: tranche {sub} sold back after {t['hold_min']:.0f} min (round trip done)")
+                for o in self.open:                         # its exit must not keep filling
                     rec = self.ledger.orders.get(o["id"])
                     if rec and rec.get("sub") == sub and rec.get("layer") == "dumpexit" and o["id"] not in self.ex.cancelling:
                         self.ex.cancel(o, reason="tranche done: exit no longer owns shares", front=True)
                 continue
-            if now - t.get("ts", now) > DUMP_HOLD_S:
+            age = now - t.get("ts", now)
+            if age > DUMP_HOLD_S:
                 self.ledger.move_sub(ex, sub, "inventory")
                 t["state"] = "aged"
-                self.event("DUMP", f"{self.name(ex)}: rebound for {sub} not filled in 24 h: {abs(q):,.0f} shares to inventory")
+                self.event("DUMP", f"{self.name(ex)}: sell-back for {sub} not filled in 6 h: {abs(q):,.0f} shares to inventory")
                 continue
             since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t.get("ts", now) - 300))
             avg = self.ledger.tranche_avg(sub, "dump", ex=ex, side=t["side"], since=since) or t.get("avg")
             if avg is None:
                 continue
-            t["avg"] = round(avg, 5)                        # Oct 3: kept on the tranche (order records get pruned)
-            pre = t.get("pre_ref_side")
-            _, share = self.dump_settings()                 # 1.0: back to the pre-dump level (the plan's default)
-            target = 0.0 if pre is None else (pre - TICK if share >= 0.999 else avg + share * (pre - avg))
-            rebound = bots.tick_up(max(avg + DUMP_REBOUND_MIN, target))
+            t["avg"] = round(avg, 5)
+            pre, fs = t.get("pre_ref_side"), self.side_fair(ex, t["side"])
+            target = max(avg + DUMP_SELL_MIN, pre or 0.0) if age <= DUMP_STEP_S else avg + DUMP_STEP_MIN
+            if fs is not None:
+                target = min(target, fs - DUMP_SELL_FAIR_GAP)
+            rebound = bots.tick_up(round(max(target, avg + DUMP_STEP_MIN), 6))   # never below fill + 1c
             self.dump_view.setdefault(ex, []).append(dict(sub=sub, rebound=min(rebound, 0.99), avg=avg))
 
     def dump_fill_events(self, fills):
@@ -2144,9 +2076,10 @@ class Engine:
         recent = [f for f in self.fills_since(now - BREAKER_WINDOW_S) if f["layer"] == "dump" and f["action"] == "buy"]
         for direction in ("D", "R"):
             fs = [f for f in recent if self.pol(f["ex"], f["side"]) == direction]
+            sides = {(f["ex"], f["side"]) for f in fs}
             moved = [f["fair"] - self.side_fair(f["ex"], f["side"]) for f in fs
                      if f.get("fair") is not None and self.side_fair(f["ex"], f["side"]) is not None]
-            if len({f["ex"] for f in fs}) >= DUMP_BREAKER_MARKETS and moved and sum(moved) / len(moved) >= DUMP_BREAKER_FAIR \
+            if len(sides) >= DUMP_BREAKER_SIDES and moved and sum(moved) / len(moved) >= DUMP_BREAKER_FAIR \
                     and self.breaker.get(("dump", direction), 0) < now:
                 self.breaker[("dump", direction)] = now + BREAKER_PAUSE_S
                 n = 0
@@ -2154,8 +2087,8 @@ class Engine:
                     rec = self.ledger.orders.get(o["id"])
                     if rec and rec["layer"] == "dump" and self.pol(o["ex"], o["side"]) == direction:
                         n += bool(self.ex.cancel(o, reason="dump breaker"))
-                msg = (f"DUMP BREAKER pro-{direction}: dump fills in {len({f['ex'] for f in fs})} markets within 10 min and Polymarket "
-                       f"moved {sum(moved) / len(moved) * 100:+.1f}c against them (news): {n} {direction}-side dump bids pulled 30 min")
+                msg = (f"DUMP BREAKER pro-{direction}: dump fills on {len(sides)} sides within 10 min and Polymarket moved "
+                       f"{sum(moved) / len(moved) * 100:+.1f}c against them (news): {n} {direction}-side dump bids pulled 30 min")
                 self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
                 self.event("BREAKER", msg)
                 self.night.line(msg)
@@ -2243,7 +2176,7 @@ class Engine:
                     continue
                 avg = sum(f["qty"] * f["price"] for f in fs) / tq
                 first = min(time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S")) for f in fs)
-                h = [v for t, v in (self.mid24.get(ex) or []) if t >= now - DUMP_REF_LONG_S]
+                h = [v for t, v in (self.mid24.get(ex) or []) if t >= now - 6 * 3600]
                 med = None
                 if h:
                     xs = sorted(h)
@@ -2363,6 +2296,30 @@ class Engine:
         msg = f"AUTO-RESUME after {kind}: paused {(now - ap['t']) / 60:.0f} min ({ap.get('reason', '')[:100]})"
         self.event("PAUSE", msg)
         self.night.line(msg)
+
+    def dump_stats(self, since):
+        """Dump v3 KPIs since `since`: fills, round trips, realized, edge vs fair at fill, median hold (min), mark-out 30m."""
+        fills = [f for f in self.fills_since(since) if f["layer"] == "dump" and f["action"] == "buy"]
+        exits = [f for f in self.fills_since(since) if f["layer"] == "dumpexit"]
+        holds = [t.get("hold_min") for t in self.ledger.tranches.values()
+                 if t.get("kind") == "dump" and t.get("state") == "closed" and (t.get("closed_ts") or 0) >= since and t.get("hold_min") is not None]
+        mo = [f["mo30"] for f in fills if f.get("mo30") is not None]
+        return dict(fills=len(fills), shares=sum(f["qty"] for f in fills), cost=round(sum(f["qty"] * f["price"] for f in fills)),
+                    edge_fair=round(sum(f["qty"] * ((f.get("fair") or f["price"]) - f["price"]) for f in fills)),
+                    round_trips=len(holds), realized=round(sum(f.get("realized") or 0 for f in exits), 2),
+                    median_hold_min=statistics.median(holds) if holds else None,
+                    markout30=round(sum(mo) / len(mo), 4) if mo else None, n_mo=len(mo))
+
+    def dump_gate(self, since, now):
+        s = self.dump_stats(since)
+        trims = self.ex.trims.get("dump", 0)
+        short = self.cash_short is not None and self.cash_short["t"] >= since
+        ok = (s["fills"] >= 20 and s["median_hold_min"] is not None and s["median_hold_min"] <= 60 and s["realized"] > 0
+              and (s["markout30"] is None or s["markout30"] >= 0) and trims == 0 and not short)
+        why = (f"{s['fills']} fills, {s['round_trips']} round trips, median hold {s['median_hold_min']} min, realized {s['realized']:+,.0f}, "
+               f"mark-out 30m {s['markout30']}, {trims} I2 trims, cash short {short} (gate: >= 20 fills, hold <= 60, realized > 0, "
+               f"mark-out >= 0, no trims, no CASH SHORT)")
+        return dict(ok=ok, why=why, stats=s)
 
     def pause_view(self):
         """{kind, reason, since, minutes, auto} while new risk is paused (dashboard banner; status block)."""

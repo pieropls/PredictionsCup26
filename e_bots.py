@@ -340,7 +340,8 @@ class MarketBot:
         for t in s.get("dump_tranches", []):                        # afternoon D-A: sell the rebound (A2 exception)
             q = subs.get(t["sub"], 0)
             if abs(q) >= MIN_QTY:
-                reduce_buy("yes" if q > 0 else "no", t["rebound"], abs(q), "dumpexit", t["sub"], DUMP_TTL_S, a2=False)
+                reduce_buy("yes" if q > 0 else "no", t["rebound"], abs(q), "dumpexit", t["sub"], DUMP_TTL_S, band=0.0, a2=False)
+                # v3: the sell-back steps down by 0.5-1c, so an exit a tick away is re-quoted (no band)
         for t in s.get("tranches", []):                             # rebounds run even when entries are paused
             q = subs.get(t["sub"], 0)
             if abs(q) < MIN_QTY or t.get("state") == "news":
@@ -360,8 +361,8 @@ class MarketBot:
                     add_entry(side, px, s.get("take_notional", TAKE_NOTIONAL), "take", px - 0.01, px, TAKE_TTL_S, sub="sniper")
 
         out += fat
-        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"] - 0.015, x["px"], QTY_TOL, "dump", sub=x["sub"], ttl=DUMP_TTL_S)
-                for x in (s.get("dump") or [])]                 # afternoon D-A: own caps and reserve fit (engine)
+        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"] - 0.005, x["px"], QTY_TOL, "dump", sub=x["sub"], ttl=DUMP_TTL_S)
+                for x in (s.get("dump") or [])]                 # dump v3 (day 4 §2): 1c level spacing -> a 1-tick band
         # day 3 §2 longshot catcher: resting 0.5-1c bids (re-placed only when gone), exits at 3x entry / the SIG 6-h median
         out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], 1.0, "longshot", sub=x["sub"], ttl=LONG_TTL_S)
                 for x in (s.get("longshot") or [])]

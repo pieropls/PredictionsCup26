@@ -127,8 +127,7 @@ LAYER_CAPS = {
     "sniper": {"per_market": (1_000, 3_000, 3_000), "per_day": (10_000, 10_000, 10_000)},
     "fatfinger": {"resting": (8_000, 300_000, 400_000), "filled": (30_000, 30_000, 40_000)},  # resting = policy (no cash lock);
                                                                                                # afternoon D-B: 40k -> 300k
-    "dump": {"resting": (120_000, 700_000, 800_000)},          # resting cost (policy; fills bounded by the per-side reserve fit);
-                                                               # Oct 3: full = every eligible side (~125: 84k arena + 118 x 3k/5k)
+    "dump": {"resting": (400_000, 800_000, 900_000)},          # resting cost (policy; fills bounded by the per-side reserve fit)
     "longshot": {"resting": (20_000, 20_000, 25_000)},        # day 3 §2: total resting cost (worst case 200 per side)
 }
 # fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
@@ -148,32 +147,25 @@ INTEL_DAILY_HOUR = 7                      # docs/daily + docs/leaders + tier A r
 HEADLINE_RACES = ["U.S. Senate", "U.S. House", "Rhode Island Senate", "Oklahoma Senate", "Massachusetts Governor",
                   "New Hampshire Senate", "Minnesota Senate"]   # always fat-finger tier A (morning_plan 1.4)
 FAT_BOOK_READS = 3              # queue reads (order books) per loop
-# dump catcher (afternoon D-A): big players dumping size 7-20c under fair on favourites; buy it, sell the rebound
-DUMP_MIN_FAIR, DUMP_MIN_REF = 0.90, 0.80   # sides with Polymarket fair_side >= 0.90 and SIG 30-min ref_side >= 0.80
-DUMP_OFFSETS = [0.07, 0.12, 0.20]          # levels at fair_side - these, each also <= ref_side - DUMP_REF_GAP
-DUMP_REF_GAP = 0.04
-DUMP_COST = {"A": 8_000, "B": 2_000}       # SIG cost of a full fill of all three levels, per side (split evenly)
-DUMP_MIN_SIDE_COST = 300                   # a side whose reserve room is below this gets no levels
+# dump catcher v3 (day 4 §2, "shallow and fast"): rest just under SIG's price on every favourite side, sell back within minutes
+DUMP_MIN_FAIR = 0.80                      # sides with Polymarket fair_side >= this (not manual, no opposite holding, PM fresh)
+DUMP_V3_OFFSETS = [0.01, 0.02, 0.035]     # L1/L2/L3 = SIG 30-min median of the side - these
+DUMP_V3_WEIGHTS = [0.40, 0.35, 0.25]
+DUMP_FAIR_GAP = 0.03                      # every level <= fair_side - 3c: we only buy at least 3c under fair
+DUMP_SLIDE = 0.02                         # 30-min median < 6-h median - 2c: a slide in progress -> freeze the ref, never lower
+DUMP_SIDE_DIV, DUMP_SIDE_MIN, DUMP_SIDE_MAX = 8, 1_500, 6_000   # per side = funded reserve / 8, clipped; arena sides x 1.5
+DUMP_ARENA_MULT, DUMP_ARENA_N = 1.5, 10   # arena = the markets with the most big events in the last 48 h (intel events + dumps)
+DUMP_CONC_CAP = 12_000                    # position (at cost) + resting dump bids on a side <= this
+DUMP_SELL_MIN, DUMP_SELL_FAIR_GAP = 0.015, 0.005   # sell-back at max(pre-dump ref, fill + 1.5c), <= fair_side - 0.5c
+DUMP_STEP_S, DUMP_STEP_MIN = 3600, 0.01   # unfilled after 60 min: sell-back steps down to fill + 1c
+DUMP_HOLD_S = 6 * 3600                    # unfilled after 6 h: the tranche goes to inventory (held to settlement)
 DUMP_TTL_S, DUMP_QUEUE_S, DUMP_BOOK_READS = 6 * 3600, 1800, 2
-DUMP_REBOUND_MIN = 0.05                    # rebound sell at max(pre-dump ref_side - 1 tick, fill + 5c): A2 exception
-DUMP_HOLD_S = 24 * 3600                    # an unsold rebound tranche goes to inventory (normal A2 rules) after this
-DUMP_NEWS_DROP = 0.05                      # Polymarket fair_side drop > 5c in 10 min -> that side's levels pulled 30 min
-DUMP_BREAKER_MARKETS, DUMP_BREAKER_FAIR = 3, 0.01   # >= 3 markets filled in 10 min, same political side, PM >= 1c against
-DUMP_PILOT_SIDES, DUMP_PILOT_S = 15, 4 * 3600
-DUMP_REARM_S = 600
-# day 3 §1 (night §2): the dump catcher on the arena sides only (where the sweeps happen), v2 reference, concentration cap
-DUMP_ARENA = [("Rhode Island Senate D", "yes"), ("Rhode Island Senate R", "no"), ("Oklahoma Senate D", "no"),
-              ("Massachusetts Governor R", "no"), ("New Hampshire Senate D", "yes"), ("New Hampshire Senate R", "no"),
-              ("Minnesota Senate D", "yes"), ("U.S. House D", "yes"), ("MN-05 House race D", "yes")]
-DUMP_ARENA_MIN_FAIR, DUMP_ARENA_COST = 0.85, 12_000  # arena sides eligible down to fair_side 0.85; cost per side (day 3 §3: 8k -> 12k)
-DUMP_CONC_CAP = 12_000                    # no new levels where position on the side (at cost) + resting dump bids >= this
-DUMP_OTHER_COST = 3_000                   # Oct 3 (dump full): non-arena favourite sides, 3k over 2 levels
-DUMP_OTHER_COST_HI = 5_000                # ... 5k once free cash (above the floor) >= 35k; back to 3k below 33k (hysteresis)
-DUMP_OTHER_HI_ON, DUMP_OTHER_HI_OFF = 35_000, 33_000
-DUMP_OTHER_OFFSETS = [0.04, 0.07]         # ... at ref - these, each <= fair_side - DUMP_OTHER_FAIR_GAP
-DUMP_OTHER_FAIR_GAP = 0.05
+DUMP_NEWS_DROP = 0.03                     # fair_side -3c in 10 min -> that side's levels pulled 30 min
+DUMP_BREAKER_SIDES, DUMP_BREAKER_FAIR = 4, 0.01   # >= 4 sides of one party filled in 10 min AND PM >= 1c against -> 30 min
+DUMP_WRITE_SHARE, DUMP_WRITES_IDLE = 0.30, 15   # placement <= 30% of SIG write capacity, only while writes_left >= 15
+DUMP_PILOT_S = 4 * 3600                   # pilot: 4 h at half size on every side, then the gate
+DUMP_MIN_SIDE_COST = 300
 RELEASE_FALLBACK_QTY = 500                # Oct 3 (b): no spare read for the depth -> sell <= this many shares at the bid
-DUMP_REF_LONG_S = 6 * 3600                # reference = max(SIG 30-min median, SIG 6-h median)
 # longshot catcher (day 3 §2): resting bids at 0.5-1c on sides Polymarket prices <= 5%, to catch sweeps through them
 LONG_MAX_FAIR = 0.05                      # sides with Polymarket fair_side <= this
 LONG_LEVELS = [(0.005, 20_000), (0.010, 10_000)]   # (price, shares): 100 SIG each
