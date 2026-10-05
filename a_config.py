@@ -107,6 +107,25 @@ TMM_CAP_SIDE = 5_000            # inventory at cost per market per side
 TMM_SKEW_TICKS = 3              # skew grows linearly to this at 50% of TMM_CAP_SIDE
 TMM_OFFER_MID_S, TMM_RELEASE_S = 2 * 3600, 6 * 3600   # older inventory: offered at SIG mid; then to the release layer
 TMM_TTL_S = 900
+# scalper (day 5 §2, "Mode A"): the turnover MM redesigned; it runs only on cash the dump catcher isn't using
+SCALP_MARKETS, SCALP_PILOT_MARKETS = 20, 10   # the highest-traded markets over 24 h (our own tape)
+SCALP_BUY_EDGE = 0.02           # join the best bid (improve it by a tick when the spread is >= 2 ticks) only at <= fair_side - 2c
+SCALP_IMPROVE_SPREAD = 2        # ticks
+SCALP_CLIP_MIN, SCALP_CLIP_MAX = 300, 500
+SCALP_MAX_BUYS = 2              # resting buys per market
+SCALP_SELL_MIN = 0.005          # ask at best ask - 1 tick, never below entry + 0.5c
+SCALP_STEP1_S, SCALP_STEP1_GAP = 1800, 0.04   # after 30 min: entry + 0 if that is still >= fair_side - 4c
+SCALP_HAND_S = 2 * 3600         # after 2 h: the dump catcher's tranche rules (held to settlement if not sold)
+SCALP_INV_MARKET = 3_000        # inventory at cost per market
+SCALP_SLICE_MAX = 20_000        # the slice never grows past this (ratchet, idle-cash rule)
+SCALP_YIELD_RESERVE = 15_000    # no new buys while the dump catcher's funded reserve < 15k
+SCALP_WRITES_PER_MIN = 6        # placements per minute for the layer (entries wait; the plan freezes at the cap)
+SCALP_TTL_S = 900
+SCALP_PILOT_S = 2 * 3600
+SCALP_GATE_TRADES, SCALP_GATE_PACE = 60, 3.0   # gate: realized > 0, mark-out 30m >= 0, >= 60 trades, >= 3x/day turnover of the slice
+# no idle cash (day 5 §3): capital use = (tranches + scalper inventory + takes) / free cash above the floor
+IDLE_USE_LOW, IDLE_USE_HIGH, IDLE_HOLD_S = 0.40, 0.70, 2 * 3600
+IDLE_SLICE_STEP, IDLE_ROC_MIN = 5_000, 0.08    # step 1: scalper slice +5k (max 20k); step 2: takes at ROC >= 8% for 2 h
 
 # A6. pair bots: one per race. NO on every party pays >= legs-1; YES on every party pays 1 unless an outsider wins ---
 PAIR_ENABLED = True
@@ -129,6 +148,7 @@ LAYER_CAPS = {
                                                                                                # afternoon D-B: 40k -> 300k
     "dump": {"resting": (400_000, 800_000, 900_000)},          # resting cost (policy; fills bounded by the per-side reserve fit)
     "longshot": {"resting": (20_000, 20_000, 25_000)},        # day 3 §2: total resting cost (worst case 200 per side)
+    "scalp": {"inventory": (10_000, 10_000, 20_000)},         # day 5 §2: the slice at cost (3k per market); ratchet / idle rule up to 20k
 }
 # fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
 FAT_LEVELS = [0.12]             # Oct 3 (Piero): only the 0.12 level on each side (0.08 / 0.05: 0 fills since day 1)

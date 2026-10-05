@@ -36,6 +36,10 @@ import i_realtime as rt
 import j_executor as jx
 import l_intel as intel
 import m_dash4 as dash4
+from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_IMPROVE_SPREAD, SCALP_CLIP_MIN, SCALP_CLIP_MAX, SCALP_MAX_BUYS,
+                      SCALP_SELL_MIN, SCALP_STEP1_S, SCALP_STEP1_GAP, SCALP_HAND_S, SCALP_INV_MARKET, SCALP_SLICE_MAX, SCALP_YIELD_RESERVE,
+                      SCALP_WRITES_PER_MIN, SCALP_TTL_S, SCALP_PILOT_S, SCALP_GATE_TRADES, SCALP_GATE_PACE,
+                      IDLE_USE_LOW, IDLE_USE_HIGH, IDLE_HOLD_S, IDLE_SLICE_STEP, IDLE_ROC_MIN, TICK, MB_MIN_PX, MB_MAX_PX)
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
                       RISK_MAX_EXPOSURE, CASH_RESERVE, POSITION_BOTS, POSITION_MAX_ADD, MANUAL_MARKETS, MB_PM_MAX_SPREAD,
                       MB_FOCUS, MB_REFILL_S, MB_QUOTE_TTL_S, PAIR_ENABLED, PAIR_EDGE, PAIR_THIRD_PARTY, PAIR_MAX_QTY,
@@ -98,7 +102,7 @@ def host_id():
 
 
 # ====================================================================================================== controls
-LAYERS = ["position", "recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
+LAYERS = ["position", "recycler", "release", "mm", "scalp", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
 TMM_ENABLED = True              # afternoon D-C: the engine's MM is the turnover MM (False: classic MM v2, tests only)
 LAYER_STATES = ("off", "pilot", "full")
 
@@ -351,6 +355,11 @@ class Engine:
         self.fat_book, self.fat_anchor, self.fat_block, self.fair_hist, self.fat_now = {}, {}, {}, {}, {}
         self.fat_sent = collections.deque(maxlen=5000)      # placement times (pilot gate: write usage)
         self.dump_now, self.dump_book, self.dump_block, self.dump_view, self.dump_ref = {}, {}, {}, {}, {}   # dump catcher
+        self.scalp_now, self.scalp_view, self.scalp_inv, self.vol24, self.scalp_note, self.pause_t = {}, {}, collections.deque(maxlen=5000), {}, {}, 0.0   # day 5 §2
+        try:
+            self.load_vol24()
+        except Exception as err:
+            print(f"tape volume load: {err!r}")
         self.dump_frozen, self.dump_arena_t, self.dump_arena_set = {}, 0.0, set()   # v3 (day 4 §2)
         self.dump_quota, self.cross_log = 0, {}
         self.dump_track = read_json(os.path.join(DATA, "intel", "dump_track.json"), {}) or {}
@@ -425,8 +434,8 @@ class Engine:
     MARKET_LAYERS = {"exit": "recycler", "recycle": "recycler", "take": "sniper", "touch": "mm", "mm": "mm",
                      "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs",
                      "release": "release", "fatfinger": "fatfinger", "dump": "dump", "dumpexit": "dump",
-                     "longshot": "longshot", "longexit": "longshot"}
-    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit"}
+                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp"}
+    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit"}
 
     def gate(self, b, wants):
         """Layer flags (data/overrides.json): a want survives only if its layer is on and allowed on this market. Pause
@@ -466,6 +475,8 @@ class Engine:
         # 100 a loop); open orders after our own writes / fills, else every 30 s; P&L every 60 s
         all_ex = sorted(set(self.owner) | {ex for pb in self.pairs for ex in pb.legs})
         core = {o["ex"] for o in self.open} | {ex for ex, b in self.book.items() if abs(b.get("pos", 0)) >= 1} | set(self.focus)
+        if self.controls.on("scalp"):                       # day 5 §2: the scalper requotes on the touch, so its markets read every loop
+            core |= set(self.scalp_rank(SCALP_MARKETS if self.controls.state("scalp") == "full" else SCALP_PILOT_MARKETS))
         rest = [ex for ex in all_ex if ex not in core]
         if rest:
             k = self.px_rot % max(1, -(-len(rest) // PRICE_ROTATE))
@@ -576,6 +587,12 @@ class Engine:
                 self.fat_fill_events(new_f)
                 self.dump_fill_events(new_f)
                 self.longshot_fill_events(new_f)
+                self.scalp_fill_events(new_f)
+                for f in new_f:                             # an order filled out before any snapshot showed it: no longer "acked, resting"
+                    rec = self.ledger.orders.get(str(f.get("order") or ""))
+                    if rec and rec.get("filled", 0) >= rec.get("qty", 0) - QTY_TOL:
+                        with self.ex.wake:
+                            self.ex.recent.pop(str(f["order"]), None)
         except Exception as err:
             self.event("ERR", f"fat-finger events: {err!r}")
         self.ledger.init_subbooks(pos, self.manual_ex)
@@ -612,6 +629,10 @@ class Engine:
             self.track_longshots(now)
         except Exception as err:
             self.event("ERR", f"longshot exits: {err!r}")
+        try:
+            self.track_scalps(now)
+        except Exception as err:
+            self.event("ERR", f"scalper exits: {err!r}")
         self.controller(now)
         kappa, _ = self.kappa()
         used = self.bucket_usage()
@@ -635,6 +656,11 @@ class Engine:
         except Exception as err:
             self.long_now = {}
             self.event("ERR", f"longshot plan: {err!r}")
+        try:
+            self.scalp_now = self.scalp_plan(now, cash, used)
+        except Exception as err:
+            self.scalp_now = {}
+            self.event("ERR", f"scalper plan: {err!r}")
         self.long_quota = int(0.15 * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60)
         self.dump_quota = int(DUMP_WRITE_SHARE * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60) \
             if api.writes_left() >= DUMP_WRITES_IDLE else 0     # day 4 §2: place only while writes are idle
@@ -847,6 +873,7 @@ class Engine:
             for r in new:
                 r["fair"] = self.fair_at(ex, r["ts"])
                 self.intel_write(f"trades/{datetime.fromtimestamp(r['ts']).strftime('%Y-%m-%d')}.jsonl", r)
+                self.note_volume(ex, r["ts"], r["p"] * r["q"])
             for e in intel.detect(new, self.fair_at, {ex: self.name(ex)}):
                 self.intel_event(e)
 
@@ -1063,10 +1090,11 @@ class Engine:
         free = cash - CASH_RESERVE                          # §3.4: below the free-cash target, entries need ROC >= 6%
         rel = self.release_now.get(b.ex)
         return dict(fair=f, u=self.ft.u.get(b.ex), bid=bid, ask=ask, ref=self.ref(b.ex), kappa=kappa,
-                    roc_min=ROC_MIN_TIGHT if free < self.release_target()[0] else ROC_MIN, roc_hold=ROC_HOLD_MIN, held=q, release=rel,
+                    roc_min=ROC_MIN_TIGHT if free < self.release_target()[0] else ROC_MIN, roc_hold=self.roc_hold(time.time()), held=q, release=rel,
                     fatfinger=self.fat_now.get(b.ex) or [], dump=self.dump_now.get(b.ex) or [],
                     dump_tranches=self.dump_view.get(b.ex, []), tmm=self.tmm_view(b.ex, f, bid, ask),
                     longshot=self.long_now.get(b.ex) or [], long_exits=self.long_view.get(b.ex, []),
+                    scalp=self.scalp_now.get(b.ex) or [], scalp_exits=self.scalp_view.get(b.ex, []),
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
                     room={sd: max(0.0, MARKET_MAX_POS - held[sd]) for sd in ("yes", "no")},
@@ -1261,7 +1289,7 @@ class Engine:
             night["hold_logged"] = now
             self.night.line(f"pilot gates held: {'hold flag set' if c.d.get('hold_gates') else ''}"
                             f"{'; ' if c.d.get('hold_gates') and not healthy else ''}{'' if healthy else why_bad}")
-        for l in ("mm", "ladder", "pairs", "release", "fatfinger", "dump", "longshot"):
+        for l in ("mm", "scalp", "ladder", "pairs", "release", "fatfinger", "dump", "longshot"):
             if c.state(l) != "pilot" or (hold and not (l in gate_free and healthy)):
                 continue
             st, age = stats.get(l, {}), now - since[l]
@@ -1316,6 +1344,13 @@ class Engine:
                 elif now - night.get(f"{l}_ext", 0) >= 1800:
                     night[f"{l}_ext"] = now
                     self.night.line(f"layer dump stays pilot: {g['why']}")
+            if l == "scalp" and age >= SCALP_PILOT_S:       # day 5 §2 gate: 2 h pilot on 10 markets
+                g = self.scalp_gate(since[l], now)
+                if g["ok"]:
+                    ok, why = True, g["why"]
+                elif now - night.get(f"{l}_ext", 0) >= 1800:
+                    night[f"{l}_ext"] = now
+                    self.night.line(f"layer scalp stays pilot: {g['why']}")
             if l == "longshot" and age >= LONG_PILOT_S:     # day 3 §2: 24 h pilot -> full
                 fills = [f for f in self.fills_since(since[l]) if f["layer"] == "longshot" and f["action"] == "buy"]
                 late = [f for f in fills if not self.long_exit_ok(f)]
@@ -1333,6 +1368,8 @@ class Engine:
         # Piero's unattended rule: writes/cancels failing with 5xx / UNKNOWN repeatedly -> stop and pull at-risk orders
         try:
             self.ratchet("dump", now)
+            self.ratchet("scalp", now)
+            self.idle_rule(now)
         except Exception as err:
             self.event("ERR", f"ratchet: {err!r}")
         hw = api.health(600).get("write") or {}
@@ -1653,7 +1690,7 @@ class Engine:
     LAYER_TTL = {"mm": TMM_TTL_S, "fatfinger": FAT_TTL_S, "dump": DUMP_TTL_S, "dumpexit": DUMP_TTL_S, "ladder": LADDER_TTL_S,
                  "rebound": LADDER_TTL_S, "release": RECYCLE_TAKE_TTL_S, "take": TAKE_TTL_S, "recycle": RECYCLE_REST_TTL_S,
                  "set": PAIR_TTL_S, "unwind": PAIR_TTL_S, "repair": PAIR_TTL_S, "touch": MM_TTL_S,
-                 "longshot": LONG_TTL_S, "longexit": LONG_EXIT_TTL_S}
+                 "longshot": LONG_TTL_S, "longexit": LONG_EXIT_TTL_S, "scalp": SCALP_TTL_S, "scalpexit": SCALP_TTL_S}
 
     def vanished_fill(self, oid, rec, q0, now):
         """Shares an order filled since the previous snapshot: it shrank, or it left the book while we didn't cancel it
@@ -2320,6 +2357,7 @@ class Engine:
         """Day 4 §1.3: a safety pause the engine lifts itself once its condition is gone (manual pauses wait for Piero).
         The same kind 3x in 2 h stays paused and raises an alert."""
         c = self.controls
+        self.pause_t = now
         with c.lock:
             ap = c.d.setdefault("auto_pause", {})
             hist = [t for t in ap.get("history", {}).get(kind, []) if t >= now - 7200] + [now]
@@ -2394,8 +2432,249 @@ class Engine:
         self.event("RATCHET", msg)
         self.night.line(msg)
 
+    # ------------------------------------------------------------------------------------------------ scalper (day 5 §2, Mode A)
+    def note_volume(self, ex, ts, notional):
+        """Our own tape -> traded value per market over the last 24 h (the scalper's market ranking)."""
+        d = self.vol24.setdefault(str(ex), collections.deque())
+        d.append((ts, notional))
+        cut = time.time() - 86400
+        while d and d[0][0] < cut:
+            d.popleft()
+
+    def load_vol24(self):
+        """Startup: the last 24 h of data/intel/trades/<day>.jsonl (the tape the engine itself collects)."""
+        now, cut = time.time(), time.time() - 86400
+        for day in (cut, now):
+            path = os.path.join(DATA, "intel", "trades", time.strftime("%Y-%m-%d", time.localtime(day)) + ".jsonl")
+            if not os.path.exists(path):
+                continue
+            with open(path) as fh:
+                for line in fh:
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (r.get("ts") or 0) >= cut and r.get("p") is not None:
+                        self.note_volume(r["ex"], r["ts"], float(r["p"]) * float(r.get("q") or 0))
+
+    def scalp_rank(self, n):
+        """The n highest-traded mapped markets over 24 h (traded value on our tape); never a manual market."""
+        vols = {ex: sum(v for _, v in d) for ex, d in self.vol24.items()}
+        mk = [b.ex for b in self.bots if b.kind == "market" and vols.get(b.ex) and b.ex not in self.manual_ex]
+        return sorted(mk, key=lambda ex: -vols[ex])[:n]
+
+    def scalp_slice(self):
+        """The scalper's inventory slice at cost: the layer cap x the ratchet, plus the idle-cash rule's bonus, <= 20k."""
+        bonus = float((self.controls.d.get("idle") or {}).get("scalp_bonus") or 0)
+        return min(float(SCALP_SLICE_MAX), self.cap("scalp", "inventory") * self.ratchet_mult("scalp") + bonus)
+
+    def scalp_cost(self, ex=None):
+        """Scalper inventory at cost (its tranche's average entry), one market or all."""
+        out = 0.0
+        for e, books in self.ledger.subbooks.items():
+            if ex is not None and e != ex:
+                continue
+            for sub, q in books.items():
+                if sub.startswith("scalp:") and abs(q) >= MIN_QTY:
+                    avg = (self.ledger.tranches.get(sub) or {}).get("avg") or self.sig_mark(e, "yes" if q > 0 else "no") or 0.0
+                    out += abs(q) * float(avg)
+        return out
+
+    def scalp_plan(self, now, cash, used):
+        """{ex: [want-spec]} (day 5 §2): on the 20 busiest markets (10 in the pilot) join the best bid, or improve it by a
+        tick when the spread is >= 2 ticks, only at <= fair_side - 2c; clips 300-500 shares; <= 2 resting buys per market;
+        inventory 3k per market and the slice in total (resting buys count against the room only for new placements, so
+        a resting order never cancels itself); no new buys while the dump catcher's funded reserve < 15k, new risk is
+        paused, or fills are blind; <= 6 placements/min for the layer (requotes and new sides wait for budget)."""
+        c = self.controls
+        if not c.on("scalp") or c.paused or self.fills_blind:
+            return {}
+        funded = self.dump_demand(cash, used)["funded"]
+        if funded < SCALP_YIELD_RESERVE:
+            if now - self.scalp_note.get("yield", 0) >= 1800:
+                self.scalp_note["yield"] = now
+                self.event("SCALP", f"scalper yields to the dump catcher: funded reserve {funded:,.0f} < {SCALP_YIELD_RESERVE:,.0f} (no new buys)")
+            return {}
+        budget = SCALP_WRITES_PER_MIN - sum(1 for o in self.ledger.orders.values()
+                                            if o.get("layer") in ("scalp", "scalpexit") and (o.get("ts") or 0) >= now - 60)
+        existing, resting_cost = {}, 0.0
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"])
+            if rec and rec.get("layer") == "scalp" and o["id"] not in self.ex.cancelling:
+                existing[(o["ex"], o["side"])] = o
+                resting_cost += o["qty"] * o["price"]
+        n = SCALP_MARKETS if c.state("scalp") == "full" else SCALP_PILOT_MARKETS
+        room_total = self.scalp_slice() - self.scalp_cost() - resting_cost
+        plan = {}
+        for ex in self.scalp_rank(n):
+            f, px = self.fair.get(ex), self.px.get(ex)
+            if f is None or px is None or px[0] is None or px[1] is None or px[1] <= px[0] or self.ex.is_frozen(ex):
+                continue
+            bid_y, ask_y = px[0], px[1]
+            held = self.book.get(ex, {}).get("pos", 0)
+            room_m = SCALP_INV_MARKET - self.scalp_cost(ex) - sum(o["qty"] * o["price"] for (e, _), o in existing.items() if e == ex)
+            n_rest = 0
+            for side in ("yes", "no"):
+                if n_rest >= SCALP_MAX_BUYS:
+                    break
+                fs = f if side == "yes" else 1 - f
+                best = bid_y if side == "yes" else round(1 - ask_y, 3)
+                p = round(best + TICK, 3) if round((ask_y - bid_y) / TICK) >= SCALP_IMPROVE_SPREAD else best
+                exits = [x["px"] for x in self.scalp_view.get(ex, []) if x["side"] == side]
+                if exits:                                                  # I4: the bid stays a tick under our own exit
+                    p = min(p, round(min(exits) - TICK, 3))
+                cur = existing.get((ex, side))
+                if cur is not None and exits and cur["price"] > min(exits) - TICK + 1e-9:
+                    if budget <= 0:                                        # it would trade with our exit: pull it (a cancel, no placement)
+                        continue
+                elif cur is not None and abs(cur["price"] - p) < 1e-9:    # resting at the right price: keep (no write)
+                    plan.setdefault(ex, []).append(dict(side=side, px=cur["price"], qty=int(cur["qty"]), sub=f"scalp:{ex}:{side}"))
+                    n_rest += 1
+                    continue
+                if (p > fs - SCALP_BUY_EDGE + 1e-9 or not (MB_MIN_PX <= p <= MB_MAX_PX)
+                        or (held <= -MIN_QTY if side == "yes" else held >= MIN_QTY)      # never bid against our own other side
+                        or self.dump_block.get((ex, side), 0) > now):                   # news guard (3c in 10 min)
+                    if cur is not None and budget <= 0:
+                        plan.setdefault(ex, []).append(dict(side=side, px=cur["price"], qty=int(cur["qty"]), sub=f"scalp:{ex}:{side}"))
+                        n_rest += 1
+                    continue
+                if cur is not None:                                        # the touch moved: requote when there is budget
+                    if budget <= 0:
+                        plan.setdefault(ex, []).append(dict(side=side, px=cur["price"], qty=int(cur["qty"]), sub=f"scalp:{ex}:{side}"))
+                    else:
+                        plan.setdefault(ex, []).append(dict(side=side, px=p, qty=int(cur["qty"]), sub=f"scalp:{ex}:{side}"))
+                        budget -= 1
+                    n_rest += 1
+                    continue
+                room = min(room_m, room_total)
+                q = min(SCALP_CLIP_MAX, int(room / p)) if room > 0 else 0
+                if q < SCALP_CLIP_MIN or budget <= 0:
+                    continue
+                plan.setdefault(ex, []).append(dict(side=side, px=p, qty=q, sub=f"scalp:{ex}:{side}"))
+                room_m -= q * p
+                room_total -= q * p
+                budget -= 1
+                n_rest += 1
+        return plan
+
+    def track_scalps(self, now):
+        """Scalper inventory -> exits: ask at best ask - 1 tick, never below entry + 0.5c; after 30 min entry + 0 when that
+        is still >= fair_side - 4c; after 2 h the shares are handed to the dump catcher's tranche rules (sell-back, then
+        inventory). A tranche per market and side; a sold-out tranche closes (round trip)."""
+        tr, self.scalp_view = self.ledger.tranches, {}
+        for ex, books in list(self.ledger.subbooks.items()):
+            for sub, q in list(books.items()):
+                if not sub.startswith("scalp:") or abs(q) < MIN_QTY:
+                    continue
+                side = sub.split(":")[2]
+                if (q > 0) != (side == "yes"):
+                    continue                                 # wrong side (an exit oversold): the audit's business
+                t = tr.get(sub)
+                if t is None or t.get("state") != "open":
+                    t = tr[sub] = dict(ex=ex, side=side, kind="scalp", t=stamp(), ts=now, state="open")
+                since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t.get("ts", now) - 300))
+                avg = self.ledger.tranche_avg(sub, "scalp", ex=ex, side=side, since=since) or t.get("avg")
+                if avg is None:
+                    continue
+                t["avg"] = round(avg, 5)
+                age = now - t.get("ts", now)
+                if age > SCALP_HAND_S:
+                    dsub = f"dump:{ex}:{side}:scalp"
+                    self.ledger.move_sub(ex, sub, dsub)
+                    t["state"] = "handed"
+                    r = self.dump_ref.get(ex, self.ref(ex))
+                    tr[dsub] = dict(ex=ex, side=side, kind="dump", pre_ref_side=None if r is None else (r if side == "yes" else 1 - r),
+                                    t=stamp(), ts=now, state="open", avg=t["avg"], from_="scalp")
+                    self.event("SCALP", f"{self.name(ex)}: {abs(q):,.0f} {side.upper()} unsold after 2 h (entry {avg:.3f}): handed to the dump catcher's tranche rules")
+                    continue
+                px = self.px.get(ex)
+                if px is None or px[0] is None or px[1] is None:
+                    continue
+                best_ask = px[1] if side == "yes" else round(1 - px[0], 3)
+                fs = self.side_fair(ex, side)
+                floor_ = avg + SCALP_SELL_MIN
+                if age > SCALP_STEP1_S and fs is not None and avg >= fs - SCALP_STEP1_GAP - 1e-9:
+                    floor_ = avg
+                p = bots.tick_up(round(max(round(best_ask - TICK, 3), floor_), 6))
+                self.scalp_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(p, 0.99), avg=avg, age_min=round(age / 60, 1)))
+        for sub, t in tr.items():
+            if t.get("kind") == "scalp" and t.get("state") == "open" and abs(self.ledger.subbooks.get(t["ex"], {}).get(sub, 0)) < MIN_QTY:
+                t.update(state="closed", closed_ts=now, hold_min=round((now - t.get("ts", now)) / 60, 1))
+                self.event("SCALP", f"{self.name(t['ex'])}: scalp {sub} sold after {t['hold_min']:.0f} min (round trip done)")
+        self.scalp_inv.append((now, self.scalp_cost()))
+
+    def scalp_fill_events(self, fills):
+        for f in fills:
+            if f["layer"] not in ("scalp", "scalpexit"):
+                continue
+            fs = self.side_fair(f["ex"], f["side"])
+            what = "bought" if f["layer"] == "scalp" else "sold (closing buy)"
+            self.event("SCALP", f"SCALP {what} {f['qty']:,.0f} {f['side'].upper()} on {self.name(f['ex'])} at {f['price']:.3f}"
+                                + ("" if fs is None else f" (fair {fs:.3f})") + ("" if f["layer"] == "scalp" else f", realized {f.get('realized') or 0:+,.0f}"))
+
+    def scalp_stats(self, since):
+        """Scalper KPIs since `since`: trades (buys + sells), realized (sells), mark-out 30m of the buys, turnover pace of
+        the slice (traded value / average inventory, per day)."""
+        buys = [f for f in self.fills_since(since) if f["layer"] == "scalp"]
+        sells = [f for f in self.fills_since(since) if f["layer"] == "scalpexit"]
+        mo = [f["mo30"] for f in buys if f.get("mo30") is not None]
+        vol = sum(f["qty"] * f["price"] for f in buys + sells)
+        inv = [v for t, v in self.scalp_inv if t >= since]
+        avg_inv = max(1_000.0, sum(inv) / len(inv)) if inv else 1_000.0
+        age = max(time.time() - since, 1.0)
+        return dict(trades=len(buys) + len(sells), buys=len(buys), sells=len(sells), volume=round(vol, 2),
+                    realized=round(sum(f.get("realized") or 0 for f in sells), 2),
+                    markout30=round(sum(mo) / len(mo), 4) if mo else None, n_mo=len(mo),
+                    avg_inv=round(avg_inv), pace=round(vol / avg_inv * 86400 / age, 2))
+
     def scalp_gate(self, since, now):
-        return dict(ok=False, why="scalper gate not built yet")
+        s = self.scalp_stats(since)
+        trims = self.ex.trims.get("scalp", 0) + self.ex.trims.get("scalpexit", 0)
+        ok = (s["realized"] > 0 and (s["markout30"] is None or s["markout30"] >= 0) and s["trades"] >= SCALP_GATE_TRADES
+              and s["pace"] >= SCALP_GATE_PACE and trims == 0)
+        why = (f"{s['trades']} trades ({s['buys']} buys, {s['sells']} sells), realized {s['realized']:+,.0f}, mark-out 30m {s['markout30']}, "
+               f"turnover {s['pace']:.1f}x/day on {s['avg_inv']:,.0f} average inventory, {trims} I2 trims (gate: realized > 0, "
+               f"mark-out >= 0, >= {SCALP_GATE_TRADES} trades, >= {SCALP_GATE_PACE:.0f}x/day, no trims)")
+        return dict(ok=ok, why=why, stats=s)
+
+    # ------------------------------------------------------------------------------------------------ no idle cash (day 5 §3)
+    def roc_hold(self, now):
+        """The minimum return to settlement for takes: 8% while the idle-cash rule's second step is on, else 10%."""
+        return IDLE_ROC_MIN if ((self.controls.d.get("idle") or {}).get("roc_until") or 0) > now else ROC_HOLD_MIN
+
+    def idle_rule(self, now):
+        """Capital use < 40% for 2 h with no pause -> first the scalper slice +5k (max 20k), then takes at ROC >= 8% for 2 h;
+        one step per 2 h, each logged; reversed as soon as use > 70%."""
+        c = self.controls
+        hist = [(t, u) for t, u in self.cap_use_hist if t >= now - IDLE_HOLD_S and u is not None]
+        if len(hist) < 2 or hist[0][0] > now - IDLE_HOLD_S + 600:
+            return                                          # less than 2 h of samples
+        idle = c.d.get("idle") or {}
+        use_now, use_max = hist[-1][1], max(u for _, u in hist)
+        if use_now > IDLE_USE_HIGH and (idle.get("scalp_bonus") or (idle.get("roc_until") or 0) > now):
+            with c.lock:
+                c.d["idle"] = dict(scalp_bonus=0, roc_until=0, t=now)
+                c.save()
+            msg = f"IDLE RULE reversed: capital use {use_now:.0%} > {IDLE_USE_HIGH:.0%}: scalper bonus 0, takes back to ROC >= {ROC_HOLD_MIN:.0%}"
+        elif use_max < IDLE_USE_LOW and not c.paused and self.pause_t < now - IDLE_HOLD_S and now - (idle.get("t") or 0) >= IDLE_HOLD_S \
+                and c.on("scalp"):
+            if self.scalp_slice() < SCALP_SLICE_MAX - 1e-9:
+                add = min(float(IDLE_SLICE_STEP), SCALP_SLICE_MAX - self.scalp_slice())
+                with c.lock:
+                    c.d["idle"] = dict(idle, scalp_bonus=float(idle.get("scalp_bonus") or 0) + add, t=now)
+                    c.save()
+                msg = f"IDLE RULE step 1: capital use {use_max:.0%} max over 2 h < {IDLE_USE_LOW:.0%}: scalper slice +{add:,.0f} -> {self.scalp_slice():,.0f}"
+            elif (idle.get("roc_until") or 0) < now:
+                with c.lock:
+                    c.d["idle"] = dict(idle, roc_until=now + IDLE_HOLD_S, t=now)
+                    c.save()
+                msg = f"IDLE RULE step 2: capital use {use_max:.0%} max over 2 h < {IDLE_USE_LOW:.0%}: takes allowed at ROC >= {IDLE_ROC_MIN:.0%} for 2 h"
+            else:
+                return
+        else:
+            return
+        self.event("IDLE", msg)
+        self.night.line(msg)
 
     def dump_stats(self, since):
         """Dump v3 KPIs since `since`: fills, round trips, realized, edge vs fair at fill, median hold (min), mark-out 30m."""
@@ -3502,6 +3781,7 @@ class Engine:
               "recycler": ("Recycler", "Sells older inventory into bids above the Polymarket price"),
               "release": ("Capital release", "Sells holdings where freeing the cash is cheap"),
               "mm": ("Market maker", "Quotes both sides around the Polymarket price"),
+              "scalp": ("Scalper", "Joins the best bid 2c+ under fair on the busiest markets; sells a tick inside the ask"),
               "ladder": ("Deep ladders", "Deep bids that catch sweeps, then sell back"),
               "pairs": ("Pair sets", "Buys every side of a race when the set costs less than it pays"),
               "sniper": ("Sniper", "Buys big gaps below fair, and new markets"),

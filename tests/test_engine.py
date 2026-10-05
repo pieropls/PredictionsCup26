@@ -2436,7 +2436,7 @@ class DashV4PayloadTests(EngineCase):
         self.assertAlmostEqual(sd["our_trades"] + sd["drift"], sd["today"], delta=25)
         self.assertTrue(sd["ok"])
         rows = s["strategies4"]
-        self.assertEqual([r["key"] for r in rows], ["dump", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])
+        self.assertEqual([r["key"] for r in rows], ["dump", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])
         self.assertEqual(next(r for r in rows if r["key"] == "mm")["trades_today"], 1)
         self.assertAlmostEqual(sum(r["pnl_today"] for r in rows) + sd["drift"], sd["today"], delta=25, msg="Strategies total = Live today")
         self.assertAlmostEqual(sum(h["value_sig"] for h in s["holdings4"]), s["capital4"]["holdings"], places=2, msg="Holdings total = Capital in holdings")
@@ -2459,6 +2459,228 @@ class DashV4PayloadTests(EngineCase):
         if os.environ.get("DASH_FIXTURE"):
             with open(os.path.join(os.path.dirname(__file__), "fixtures", "dash_v4.json"), "w") as fh:
                 fh.write(dashboard.dumps(s))
+
+
+class ScalperTests(EngineCase):
+    """Day 5 §2 (Mode A): on the busiest markets join the best bid (improve by a tick when the spread is >= 2 ticks) only
+    at <= fair_side - 2c, clips 300-500, <= 2 buys per market, 3k per market / the slice in total; exits a tick inside the
+    ask >= entry + 0.5c, entry + 0 after 30 min, the dump tranche rules after 2 h; yields to the dump catcher; 6 writes/min;
+    the 2 h gate; the §3 idle-cash rule."""
+
+    def rig(self, state="pilot", cash_above_floor=60_000, n_markets=12, spread_ticks=2):
+        fresh_data(layers=dict(position=dict(state="full"), scalp=dict(state=state)))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + cash_above_floor)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        mids = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None
+                and 0.20 <= eng.fair[b.ex] <= 0.80][:n_markets]
+        self.assertGreaterEqual(len(mids), n_markets)
+        now = time.time()
+        for i, ex in enumerate(mids):                      # traded value ranks them: mids[0] busiest
+            eng.vol24[ex] = collections.deque([(now - 600, 100_000.0 - i * 1_000)])
+            f = eng.fair[ex]
+            bid = bots.tick_down(round(f - 0.05, 3))
+            fake.px[ex] = (bid, round(bid + spread_ticks * a_config.TICK, 3), bid)
+        return fake, eng, mids
+
+    def scalp_orders(self, eng, fake, ex=None, layer="scalp"):
+        return [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == layer
+                and (ex is None or o["ex"] == ex)]
+
+    def age_orders(self, eng, seconds=61):
+        for o in eng.ledger.orders.values():
+            if o.get("layer") in ("scalp", "scalpexit"):
+                o["ts"] = (o.get("ts") or time.time()) - seconds
+
+    def test_pilot_bids_on_the_10_busiest_markets_within_the_write_budget(self):
+        fake, eng, mids = self.rig()
+        loop(eng, fake)
+        mine = self.scalp_orders(eng, fake)
+        self.assertEqual(len(mine), a_config.SCALP_WRITES_PER_MIN, "6 placements in the first minute")
+        for _ in range(3):                                 # the ledger's placements age out of the minute: 6 more each time
+            self.age_orders(eng)
+            loop(eng, fake)
+        mine = self.scalp_orders(eng, fake)
+        exs = {o["ex"] for o in mine}
+        self.assertTrue(exs <= set(mids[:a_config.SCALP_PILOT_MARKETS]), "pilot: only the 10 busiest")
+        self.assertNotIn(mids[11], exs)
+        per = collections.Counter(o["ex"] for o in mine)
+        self.assertTrue(all(n <= a_config.SCALP_MAX_BUYS for n in per.values()), per)
+        for o in mine:
+            f = eng.fair[o["ex"]]
+            fs = f if o["side"] == "yes" else 1 - f
+            bid_y, ask_y, _ = fake.px[o["ex"]]
+            best = bid_y if o["side"] == "yes" else round(1 - ask_y, 3)
+            self.assertAlmostEqual(o["price"], round(best + a_config.TICK, 3), places=3, msg="spread 2 ticks: improve by a tick")
+            self.assertLessEqual(o["price"], fs - a_config.SCALP_BUY_EDGE + 1e-9)
+            self.assertEqual(o["qty"], a_config.SCALP_CLIP_MAX)
+            self.assertEqual(eng.ledger.orders[o["id"]]["sub"], f"scalp:{o['ex']}:{o['side']}")
+        self.assertLessEqual(sum(o["qty"] * o["price"] for o in mine), eng.scalp_slice() + 1e-6)
+        self.assertEqual(engine_order_problems(fake, eng.ledger), [])
+
+    def test_join_when_the_spread_is_one_tick_and_never_above_fair_minus_2c(self):
+        fake, eng, mids = self.rig(spread_ticks=1)
+        ex = mids[0]
+        fake.px[ex] = (bots.tick_down(round(eng.fair[ex] - 0.015, 3)), bots.tick_down(round(eng.fair[ex] - 0.010, 3)), 0.5)   # bid 1.5c under fair
+        loop(eng, fake)
+        mine = self.scalp_orders(eng, fake)
+        self.assertTrue(mine)
+        self.assertFalse([o for o in mine if o["ex"] == ex and o["side"] == "yes"], "YES bid would be above fair - 2c")
+        for o in mine:
+            bid_y, ask_y, _ = fake.px[o["ex"]]
+            best = bid_y if o["side"] == "yes" else round(1 - ask_y, 3)
+            self.assertAlmostEqual(o["price"], best, places=3, msg="spread 1 tick: join")
+
+    def test_fill_exit_steps_and_handover_to_the_dump_rules(self):
+        fake, eng, mids = self.rig()
+        loop(eng, fake)
+        o = next(o for o in self.scalp_orders(eng, fake) if o["side"] == "yes")
+        ex, px = o["ex"], o["price"]
+        fake.fill(o["id"], o["qty"])
+        loop(eng, fake)
+        sub = f"scalp:{ex}:yes"
+        self.assertEqual(eng.ledger.subbooks[ex].get(sub), o["qty"])
+        ex_orders = self.scalp_orders(eng, fake, ex, layer="scalpexit")
+        self.assertEqual(len(ex_orders), 1, ex_orders)
+        ask_y = fake.px[ex][1]
+        want_px = bots.tick_up(round(max(ask_y - a_config.TICK, px + a_config.SCALP_SELL_MIN), 6))
+        self.assertAlmostEqual(1 - ex_orders[0]["price"], want_px, places=3, msg="ask - 1 tick, never below entry + 0.5c")
+        self.assertEqual(ex_orders[0]["qty"], o["qty"])
+        self.assertEqual(engine_order_problems(fake, eng.ledger), [])
+        t = eng.ledger.tranches[sub]
+        self.assertEqual((t["kind"], t["state"]), ("scalp", "open"))
+        self.assertAlmostEqual(t["avg"], px, places=4)
+        t["ts"] -= a_config.SCALP_STEP1_S + 60                 # 30 min later: entry + 0 only if that is >= fair - 4c
+        loop(eng, fake)
+        ex_orders = self.scalp_orders(eng, fake, ex, layer="scalpexit")
+        self.assertLess(px, eng.fair[ex] - a_config.SCALP_STEP1_GAP, "the rig buys 4.5c under fair")
+        self.assertAlmostEqual(1 - ex_orders[0]["price"], want_px, places=3, msg="entry + 0 would be under fair - 4c: keep entry + 0.5c")
+        self.addCleanup(setattr, f_engine, "SCALP_STEP1_GAP", f_engine.SCALP_STEP1_GAP)
+        f_engine.SCALP_STEP1_GAP = 0.05
+        loop(eng, fake)
+        loop(eng, fake)                                        # the requote: cancel first (I6), then the new exit
+        ex_orders = self.scalp_orders(eng, fake, ex, layer="scalpexit")
+        self.assertEqual(len(ex_orders), 1, [e["text"] for e in eng.events[-5:]])
+        self.assertAlmostEqual(1 - ex_orders[0]["price"], bots.tick_up(round(max(ask_y - a_config.TICK, px), 6)), places=3, msg="entry + 0")
+        t["ts"] -= a_config.SCALP_HAND_S                       # 2 h later: the dump catcher's tranche rules
+        loop(eng, fake)
+        self.assertNotIn(sub, {k for k, v in eng.ledger.subbooks[ex].items() if abs(v) >= 1})
+        dsub = f"dump:{ex}:yes:scalp"
+        self.assertEqual(eng.ledger.subbooks[ex].get(dsub), o["qty"])
+        self.assertEqual(eng.ledger.tranches[dsub]["state"], "open")
+        self.assertEqual(eng.ledger.tranches[sub]["state"], "handed")
+        loop(eng, fake)
+        self.assertTrue(eng.dump_view.get(ex), "the dump tracker now owns the sell-back")
+        self.assertFalse(self.scalp_orders(eng, fake, ex, layer="scalpexit"))
+        self.assertTrue(self.scalp_orders(eng, fake, ex, layer="dumpexit"))
+
+    def test_round_trip_closes_the_tranche_and_counts_realized(self):
+        fake, eng, mids = self.rig()
+        loop(eng, fake)
+        o = next(o for o in self.scalp_orders(eng, fake) if o["side"] == "yes")
+        fake.fill(o["id"], o["qty"])
+        loop(eng, fake)
+        x = self.scalp_orders(eng, fake, o["ex"], layer="scalpexit")[0]
+        fake.fill(x["id"], x["qty"])
+        loop(eng, fake)
+        t = eng.ledger.tranches[f"scalp:{o['ex']}:yes"]
+        self.assertEqual(t["state"], "closed")
+        s = eng.scalp_stats(time.time() - 3600)
+        self.assertEqual((s["buys"], s["sells"], s["trades"]), (1, 1, 2))
+        self.assertGreater(s["realized"], 0)
+        self.assertGreater(s["volume"], 0)
+
+    def test_yields_to_the_dump_catcher_and_pauses(self):
+        fake, eng, mids = self.rig(cash_above_floor=12_000)        # funded reserve 12k < 15k
+        loop(eng, fake)
+        self.assertEqual(self.scalp_orders(eng, fake), [])
+        self.assertTrue(any("yields to the dump catcher" in e["text"] for e in eng.events))
+        fake, eng, mids = self.rig()
+        eng.controls.set_paused(True, "test")
+        loop(eng, fake)
+        self.assertEqual(self.scalp_orders(eng, fake), [])
+
+    def test_inventory_caps_per_market_and_slice(self):
+        fake, eng, mids = self.rig()
+        eng.scalp_cost = lambda ex=None: 9_990.0 if ex is None else 0.0        # the slice is nearly full (room 10 < a 300-share clip)
+        loop(eng, fake)
+        self.assertEqual(self.scalp_orders(eng, fake), [], "no room for a 300-share clip")
+        eng.scalp_cost = lambda ex=None: 0.0 if ex is None else (2_960.0 if ex == mids[0] else 0.0)
+        loop(eng, fake)
+        self.assertEqual(self.scalp_orders(eng, fake, mids[0]), [], "market at its 3k cap")
+        self.assertTrue(self.scalp_orders(eng, fake, mids[1]))
+
+    def test_requotes_only_with_budget_and_keeps_resting_orders(self):
+        fake, eng, mids = self.rig()
+        loop(eng, fake)
+        before = {o["id"]: o["price"] for o in self.scalp_orders(eng, fake)}
+        for ex in mids:                                    # the touch moves a tick everywhere
+            b, a, l = fake.px[ex]
+            fake.px[ex] = (round(b - a_config.TICK, 3), round(a - a_config.TICK, 3), l)
+        loop(eng, fake)
+        after = {o["id"]: o["price"] for o in self.scalp_orders(eng, fake)}
+        self.assertEqual(set(after), set(before), "no budget this minute: the resting orders stay as they are")
+        self.age_orders(eng)
+        loop(eng, fake)
+        after = {o["id"]: o["price"] for o in self.scalp_orders(eng, fake)}
+        self.assertTrue(set(after) != set(before), "with budget the touch move is requoted")
+        self.assertLessEqual(len(after), len(before) + a_config.SCALP_WRITES_PER_MIN)
+
+    def test_gate_and_promotion(self):
+        fake, eng, mids = self.rig()
+        g = eng.scalp_gate(time.time() - 7200, time.time())
+        self.assertFalse(g["ok"])
+        eng.scalp_stats = lambda since: dict(trades=80, buys=40, sells=40, volume=60_000.0, realized=120.0, markout30=0.001, n_mo=40, avg_inv=8_000, pace=4.5)
+        self.assertTrue(eng.scalp_gate(time.time() - 7200, time.time())["ok"])
+        eng.scalp_stats = lambda since: dict(trades=80, buys=40, sells=40, volume=60_000.0, realized=120.0, markout30=0.001, n_mo=40, avg_inv=8_000, pace=2.0)
+        self.assertFalse(eng.scalp_gate(time.time() - 7200, time.time())["ok"], "turnover below 3x/day")
+        eng.scalp_stats = lambda since: dict(trades=80, buys=40, sells=40, volume=60_000.0, realized=120.0, markout30=0.001, n_mo=40, avg_inv=8_000, pace=4.5)
+        with eng.controls.lock:
+            eng.controls.d["layers"]["scalp"]["since"] = time.time() - a_config.SCALP_PILOT_S - 10
+            eng.controls.save()
+        loop(eng, fake)
+        self.assertEqual(eng.controls.state("scalp"), "full")
+        self.assertEqual(eng.scalp_slice(), a_config.LAYER_CAPS["scalp"]["inventory"][1])
+        with eng.controls.lock:                           # the ratchet: a passing gate 2 h later raises the slice x1.25
+            eng.controls.d["ratchet"] = {"scalp": dict(level=0, since=time.time() - a_config.RATCHET_EVERY_S - 1, hold_until=0.0, history=[])}
+        loop(eng, fake)
+        self.assertEqual(eng.controls.d["ratchet"]["scalp"]["level"], 1)
+        self.assertAlmostEqual(eng.scalp_slice(), 12_500.0)
+
+    def test_idle_cash_rule_steps_and_reverses(self):
+        fake, eng, mids = self.rig(state="full")
+        now = time.time()
+        eng.cap_use_hist.clear()
+        for i in range(25):                                # 2 h of 20% capital use
+            eng.cap_use_hist.append((now - a_config.IDLE_HOLD_S + i * 300, 0.20))
+        eng.idle_rule(now)
+        self.assertEqual(eng.controls.d["idle"]["scalp_bonus"], 5_000)
+        self.assertAlmostEqual(eng.scalp_slice(), 15_000.0)
+        eng.idle_rule(now)
+        self.assertEqual(eng.controls.d["idle"]["scalp_bonus"], 5_000, "one step per 2 h")
+        eng.controls.d["idle"]["t"] = now - a_config.IDLE_HOLD_S
+        eng.idle_rule(now)
+        self.assertAlmostEqual(eng.scalp_slice(), 20_000.0, msg="capped at 20k")
+        eng.controls.d["idle"]["t"] = now - a_config.IDLE_HOLD_S
+        eng.idle_rule(now)
+        self.assertGreater(eng.controls.d["idle"]["roc_until"], now)
+        self.assertEqual(eng.roc_hold(now), a_config.IDLE_ROC_MIN)
+        self.assertEqual(len([e for e in eng.events if e["kind"] == "IDLE"]), 3)
+        eng.cap_use_hist.append((now, 0.75))                # use > 70%: reversed
+        eng.idle_rule(now)
+        self.assertEqual(eng.controls.d["idle"]["scalp_bonus"], 0)
+        self.assertEqual(eng.roc_hold(now), a_config.ROC_HOLD_MIN)
+        self.assertAlmostEqual(eng.scalp_slice(), 10_000.0)
+        eng.cap_use_hist.clear()                            # a pause in the last 2 h: no step
+        for i in range(25):
+            eng.cap_use_hist.append((now - a_config.IDLE_HOLD_S + i * 300, 0.20))
+        eng.controls.d["idle"]["t"] = 0
+        eng.pause_t = now - 600
+        eng.idle_rule(now)
+        self.assertEqual(eng.controls.d["idle"]["scalp_bonus"], 0)
 
 
 class ControlTests(EngineCase):

@@ -163,7 +163,7 @@ def strategies_v4(eng, now, sigday, since_oct1_fills):
             last[l].append(dict(t=f["t"], text=eng.fill_sentence(f)))
     hold = bool(c.d.get("hold_gates"))
     rows = []
-    for key in ["dump", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"]:
+    for key in ["dump", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"]:
         st = c.state(key)
         v = c.layer(key)
         status = "PAUSED" if c.paused and key not in ("recycler", "release", "position") else "HELD" if (st == "pilot" and hold and key not in (c.d.get("gate_free") or [])) \
@@ -171,7 +171,7 @@ def strategies_v4(eng, now, sigday, since_oct1_fills):
         why = v.get("killed", {}).get("reason") if v.get("killed") else ("gate held" if status == "HELD" else "")
         t_ = sigday["strategies"].get(key, {})
         rows.append(dict(key=key, label=eng.LABELS.get(key, (key,))[0], what=eng.LABELS.get(key, ("", ""))[1], status=status, why=why,
-                         resting=resting.get(key, 0), cash_in_use=round(cap.get("manual" if key == "position" else key, 0.0), 2),
+                         resting=resting.get(key, 0), cash_in_use=round(eng.scalp_cost() if key == "scalp" else cap.get("manual" if key == "position" else key, 0.0), 2),
                          trades_today=t_.get("trades", 0), pnl_today=t_.get("pnl", 0.0),
                          pnl_since=round(all_strat.get(key, {}).get("pnl", 0.0), 2), last=last.get(key, [])))
     return rows
@@ -198,7 +198,7 @@ def capital_v4(eng, now, capital, holdings=()):
     free = cash - eng.CASH_RESERVE
     tr = sum(abs(q) * ((eng.ledger.tranches.get(sub) or {}).get("avg") or eng.sig_mark(ex, "yes" if q > 0 else "no") or 0)
              for ex, books in eng.ledger.subbooks.items() for sub, q in books.items() if sub.startswith("dump:") and abs(q) >= 1)
-    scalp = sum(abs(q) * (eng.sig_mark(ex, "yes" if q > 0 else "no") or 0) for ex, books in eng.ledger.subbooks.items() for sub, q in books.items() if sub == "scalp" and abs(q) >= 1)
+    scalp = eng.scalp_cost()
     takes = sum(abs(q) * (eng.sig_mark(ex, "yes" if q > 0 else "no") or 0) for ex, books in eng.ledger.subbooks.items() for sub, q in books.items() if sub == "sniper" and abs(q) >= 1)
     in_use = tr + scalp + takes
     use = in_use / free if free > 0 else None
@@ -211,7 +211,7 @@ def capital_v4(eng, now, capital, holdings=()):
                 bar=[dict(key="floor", label="Cash floor", sig=eng.CASH_RESERVE), dict(key="reserve", label="Dump reserve", sig=min(max(0.0, free), eng.OPPORTUNITY_RESERVE)),
                      dict(key="free", label="Free for scalper / takes", sig=max(0.0, free - eng.OPPORTUNITY_RESERVE)),
                      dict(key="tranches", label="In tranches", sig=round(in_use, 2)), dict(key="settle", label="Holdings to settlement", sig=round(settle, 2))],
-                released=capital.get("released_today"), idle=capital.get("idle"))
+                released=capital.get("released_today"), idle=capital.get("idle"), idle_rule=dict(eng.controls.d.get("idle") or {}), scalp_slice=eng.scalp_slice())
 
 
 def holdings_v4(eng, rows):

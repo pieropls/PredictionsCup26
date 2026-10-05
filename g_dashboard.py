@@ -349,10 +349,10 @@ try { S = JSON.parse(document.getElementById("data").textContent || "{}") || {};
 const ui = {tab: "live", shown: null, cache: {}, basis: "sig", hsort: {k: "value_sig", dir: -1}, hq: "", hl: "", hr: false, hall: false, al: "", aq: "", aall: false, feed: "", hf: "", sopen: null,
   page: 0, q: "", layer: "", haspos: false, mis: "", ev: "", evq: "", open: null, detail: null, updated: Date.now(), connected: false, errors: [], theme: "auto"};
 const TABS = {live: "Live", strategies: "Strategies", capital: "Capital", holdings: "Holdings", leaders: "Leaders", admin: "Admin"};   // dashboard_v4.md
-const LAYERS = ["recycler", "release", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "position", "leaders"];   // controls
-const ORDER = ["position", "mm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "recycler", "release"];  // colour slots, fixed per layer
-const SLOT = {position: 1, manual: 1, mm: 2, ladder: 3, pairs: 4, sniper: 5, fatfinger: 6, recycler: 7, inventory: 7, release: 8, dump: 9, longshot: 6};
-const NAMES = {position: "Position exits (AK, RI)", manual: "AK / RI manual positions", recycler: "Recycler", inventory: "Older inventory (recycler)",
+const LAYERS = ["recycler", "release", "mm", "scalp", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "position", "leaders"];   // controls
+const ORDER = ["position", "mm", "scalp", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "recycler", "release"];  // colour slots, fixed per layer
+const SLOT = {position: 1, manual: 1, mm: 2, scalp: 2, ladder: 3, pairs: 4, sniper: 5, fatfinger: 6, recycler: 7, inventory: 7, release: 8, dump: 9, longshot: 6};
+const NAMES = {position: "Position exits (AK, RI)", manual: "AK / RI manual positions", scalp: "Scalper", recycler: "Recycler", inventory: "Older inventory (recycler)",
   release: "Capital release", mm: "Market maker", ladder: "Deep ladders", pairs: "Pair sets", sniper: "Sniper", fatfinger: "Fat-finger catcher", dump: "Dump catcher", longshot: "Longshot catcher",
   leaders: "Leaderboard logger", cash: "Cash", "old engine": "Old engine"};
 const FILTERS = new Set(["hq", "b-hlopts", "hr", "b-alopts", "aq", "b-evkinds", "evq", "q", "lf", "hp", "mis"]);
@@ -938,7 +938,7 @@ function cap4() {
   const p = obj(c.party), capP = val(c.party_cap) || 40000, use = val(c.use);
   const tiles = `<div class="tiles t4">
     ${tile("Free cash <span class='mute' style='font-weight:400'>(above the 5k floor)</span>", num(c.free_cash), `cash ${num(c.cash)} · reserve ${num(obj(S.capital).reserve)}`)}
-    ${tile("In use", num(c.in_use), `dump tranches ${num(c.tranches)} · scalper ${num(c.scalper)} · takes ${num(c.takes)}`)}
+    ${tile("In use", num(c.in_use), `dump tranches ${num(c.tranches)} · scalper ${num(c.scalper)}${val(c.scalp_slice) ? ` of ${num(c.scalp_slice)}` : ""} · takes ${num(c.takes)}${obj(c.idle_rule).scalp_bonus ? ` · idle rule +${num(obj(c.idle_rule).scalp_bonus)}` : ""}${val(obj(c.idle_rule).roc_until) > Date.now() / 1000 ? " · takes at ROC ≥ 8%" : ""}`)}
     ${tile("Capital use", use == null ? "–" : pct(use, 0), spark(c.use_hist), use != null && use < 0.4 ? "warn" : "")}
     ${tile("Party exposure", `<span style="font-size:22px">D ${num(p.D)} · R ${num(p.R)}</span>`, `held dump inventory at cost, caps ${num(capP)} each${(p.D >= capP || p.R >= capP) ? ' · <b class="bad">at cap</b>' : ""}`)}</div>`;
   const bk = arr(c.bar).filter(b => b && val(b.sig) > 0), tot = bk.reduce((a, b) => a + val(b.sig), 0) || 1;
