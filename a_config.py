@@ -180,7 +180,11 @@ DUMP_PARTY_CAP = 40_000                   # day 5 §1.5: held dump inventory at 
 RATCHET_STEP, RATCHET_EVERY_S = 1.25, 3600       # day 6 §1.1: +25% per passing 1-h gate (was 2 h); one notch back + 1 h hold on a failure
 RATCHET_MIN_FILLS_DAY, RATCHET_MIN_FILLS_NIGHT = 10, 5   # fewer fills in the hour: hold the level (not a fail)
 DAY_WINDOW = (6, 15)            # PT hours of the day window (06:00-15:00): 10x the dumps of the night
-DUMP_CONC_CAPS = [(0.95, 20_000), (0.90, 15_000), (0.0, 12_000)]   # day 6 §1.2: concentration cap by fair_side (position at cost)
+DUMP_CONC_CAPS = [(0.95, 20_000), (0.90, 15_000), (0.0, 12_000)]   # day 7 §2.2: cap per RACE by fair_side (position + resting at cost, all engine layers)
+RI_RACES, RI_ENGINE_CAP = ("Rhode Island Senate", "Rhode Island Governor"), 10_000   # day 7 §2.3: engine tranches get their own 10k on RI beyond the old position
+DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP = 0.90, 0.05, 2_000   # day 7 §2.1: L0 joins the SIG best bid when it sits >= 5c under a >= 90% fair
+DUMP_L0_REFILLS, DUMP_L0_WINDOW_S = 3, 600            # sweep follow: at most 3 refills per side per 10 min while the tranche is open
+UNCOVERED_LOG_S = 30            # §1.3: an eligible side without its level for > 30 s is logged
 DUMP_V3_OFFSETS_DAY, DUMP_V3_WEIGHTS_DAY = [0.01, 0.02, 0.035, 0.05], [0.45, 0.25, 0.15, 0.15]   # §1.3: L4 in the day window (replay: 5c)
 DUMP_RECYCLE_FAST_S = 1800      # §1.5: cash-constrained -> a tranche older than 30 min sells back at fill + 0.5c
 CONSTRAINED_FREE, CONSTRAINED_FILLS_30M = 10_000, 3_000   # §3.3: constrained = free cash < 10k AND dump fills >= 3k cost in 30 min

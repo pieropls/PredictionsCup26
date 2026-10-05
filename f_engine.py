@@ -45,7 +45,8 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                       DUMP_REFRESH_S, DUMP_REFRESH_JITTER_S, LEADERS_DAY_EVERY_S, JUMP_MIN, TOUCH_MIN_FAIR, TOUCH_GAP, TOUCH_CLIP, TOUCH_RACE_CAP, TOUCH_TTL_S, TOUCH_SELL_MIN,
                       TOUCH_NEWS_FAIR, TOUCH_NEWS_SIG, TOUCH_NEWS_HOLD_S, TOUCH_YIELD_RESERVE, TOUCH_PILOT_S, TOUCH_GATE_FILLS, TOUCH_RATCHET_MAX,
                       RULE0_MARGIN, DAY1_CUTOFF, CASH_T_START, CASH_T_STEP, CASH_T_MIN, CASH_T_MAX, CASH_T_CONSTRAINED_MIN, CASH_T_PEAK_UP,
-                      CASH_T_PEAK_DOWN, CASH_T_IDLE_H, RELEASE_TIER0, RELEASE_TIER1, RELEASE_TIER2, RELEASE_TIER2_RETURN)
+                      CASH_T_PEAK_DOWN, CASH_T_IDLE_H, RELEASE_TIER0, RELEASE_TIER1, RELEASE_TIER2, RELEASE_TIER2_RETURN,
+                      RI_RACES, RI_ENGINE_CAP, DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP, DUMP_L0_REFILLS, DUMP_L0_WINDOW_S, UNCOVERED_LOG_S)
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
                       RISK_MAX_EXPOSURE, CASH_RESERVE, POSITION_BOTS, POSITION_MAX_ADD, MANUAL_MARKETS, MB_PM_MAX_SPREAD,
                       MB_FOCUS, MB_REFILL_S, MB_QUOTE_TTL_S, PAIR_ENABLED, PAIR_EDGE, PAIR_THIRD_PARTY, PAIR_MAX_QTY,
@@ -373,10 +374,15 @@ class Engine:
         self.release_why = {}                               # ex -> (t, branch) of the last release plan (fill labels)
         self.touch_now, self.touch_view, self.touch_block, self.touch_note = {}, {}, {}, {}   # day 6 §2
         self.in_use_hist, self.use_peak, self.rule0_log, self.rule0_blocked, self.lots_cache = collections.deque(maxlen=3000), 0.0, {}, collections.deque(maxlen=5000), (None, {})   # §9
+        self.uncovered_since, self.uncovered_log, self.uncovered_n, self.refreshed = {}, {}, collections.deque(maxlen=2000), {}   # day 7 §1.3
         try:
             self.load_vol24()
         except Exception as err:
             print(f"tape volume load: {err!r}")
+        try:
+            self.day7_migrations()
+        except Exception as err:
+            print(f"day 7 migrations: {err!r}")
         try:                                                # Oct 5 02:30: undo synthetic fills that duplicated a SIG fill
             fixed = self.ledger.dedup_synthetic()          # booked <= quantity per order + phantom netting (no time-window pairing)
             if fixed["removed"] or fixed["netted"]:
@@ -2070,6 +2076,36 @@ class Engine:
         return [(side, fs, rs) for side, fs, rs in (("yes", f, r), ("no", 1 - f, 1 - r))
                 if fs >= DUMP_MIN_FAIR and not (held <= -MIN_QTY if side == "yes" else held >= MIN_QTY)]
 
+    def race_room(self, ex, side, fs):
+        """Day 7 §2.2-2.3: the room under the race cap (20k at fair >= 0.95, 15k at 0.90-0.95, 12k below) for new levels on
+        (ex, side): the cap minus what every engine layer holds at cost on the race's markets and the dump levels resting
+        on the race's other sides. On the Rhode Island races the engine's tranches get their own 10k: the old inventory
+        (the Oct 2 RI Senate R NO book) and the manual position do not count."""
+        race = (self.meta.get(ex) or {}).get("race")
+        ri = race in RI_RACES
+        cap = RI_ENGINE_CAP if ri else next(c for lo, c in DUMP_CONC_CAPS if fs >= lo - 1e-9)
+        used = 0.0
+        for e, m in self.meta.items():
+            if m.get("race") != race:
+                continue
+            books = self.ledger.subbooks.get(e, {})
+            for sub, q in books.items():
+                if abs(q) < 1 or sub == "manual" or (ri and not sub.startswith(("dump:", "touch:", "scalp:", "sniper"))):
+                    continue
+                sd = "yes" if q > 0 else "no"
+                avg = (self.ledger.tranches.get(sub) or {}).get("avg") or ((self.book.get(e) or {}).get("row") or {}).get("avgCost") or self.sig_mark(e, sd) or 0.0
+                used += abs(q) * float(avg)
+            for o in self.open:
+                rec = self.ledger.orders.get(o["id"])
+                if o["ex"] == e and rec and rec.get("layer") == "dump" and not (e == ex and o["side"] == side):
+                    used += o["qty"] * o["price"]
+        return cap - used
+
+    def l0_refills(self, sub, now):
+        """Fills of an L0 level in the last 10 min (the sweep-follow limit)."""
+        ids = {i for i, o in self.ledger.orders.items() if o.get("sub") == sub and o.get("layer") == "dump"}
+        return sum(1 for f in self.fills_since(now - DUMP_L0_WINDOW_S) if f["order"] in ids and f["action"] == "buy")
+
     def side_cost(self, ex, side, bids=True):
         """Position held on `side` at cost (SIG avgCost), plus (bids=True) our resting dump bids on it."""
         b = self.book.get(ex) or {}
@@ -2082,13 +2118,18 @@ class Engine:
                 cost += o["qty"] * o["price"]
         return cost
 
-    def dump_levels(self, ex, side, fs, rs, cost):
+    def dump_levels(self, ex, side, fs, rs, cost, room=None):
         """[(i, price, shares)]: L1/L2/L3 = ref - 1 / 2 / 3.5c, each <= fair_side - 3c and <= best bid + 1 tick (join or
         improve, never cross the ask); shares by weight 40 / 35 / 25 of `cost`."""
         bid_s, ask_s = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)
         out, used = [], set()
         day = self.day_window(time.time())                  # day 6 §1.3: L4 (ref - 5c) and 45/25/15/15 in the day window
         offs, ws = (DUMP_V3_OFFSETS_DAY, DUMP_V3_WEIGHTS_DAY) if day else (DUMP_V3_OFFSETS, DUMP_V3_WEIGHTS)
+        if fs >= DUMP_L0_MIN_FAIR - 1e-9 and bid_s is not None and bid_s <= fs - DUMP_L0_GAP + 1e-9 and MB_MIN_PX <= bid_s <= MB_MAX_PX:
+            q0 = min(DUMP_L0_CLIP, int(room / bid_s)) if room is not None else DUMP_L0_CLIP   # day 7 §2.1: L0 joins the best bid
+            if q0 >= MIN_QTY:
+                out.append((4, bid_s, q0))
+                used.add(bid_s)
         for i, (off, w) in enumerate(zip(offs, ws)):
             px = min(rs - off, fs - DUMP_FAIR_GAP)
             if bid_s is not None:
@@ -2146,7 +2187,7 @@ class Engine:
             rec = self.ledger.orders.get(o["id"])
             if rec and rec.get("layer") == "dump":
                 tail = str(rec.get("sub", "")).rsplit(":", 1)[-1]
-                resting.setdefault((o["ex"], o["side"]), set()).add(int(tail) if tail.isdigit() else 0)
+                resting.setdefault((o["ex"], o["side"]), set()).add(4 if tail == "L0" else int(tail) if tail.isdigit() else 0)
                 rest_px[rec.get("sub")] = o["price"]
         plan, rows = {}, []
         for ex, side, fs, rs in cands:
@@ -2155,8 +2196,7 @@ class Engine:
                 continue
             if party.get(self.pol(ex, side), 0.0) >= DUMP_PARTY_CAP:
                 continue                                    # that party side is at its 40k exposure cap: no new levels
-            conc = next(cap for lo, cap in DUMP_CONC_CAPS if fs >= lo - 1e-9)   # day 6 §1.2: 20k / 15k / 12k by fair_side
-            room = conc - self.side_cost(ex, side, bids=False)               # position at cost (the levels are sized here)
+            room = self.race_room(ex, side, fs)                             # day 7 §2.2: cap per race, position + resting, all engine layers
             cost = min(per_side * (DUMP_ARENA_MULT if ex in arena else 1.0), DUMP_ARENA_MAX if ex in arena else DUMP_SIDE_HARD_MAX,
                        funded / 2) * half
             cost = min(cost, room)
@@ -2164,28 +2204,52 @@ class Engine:
                 continue
             sliding = self.dump_ref_v3(ex)[1]
             books = self.ledger.subbooks.get(ex, {})
-            for i, px, q in self.dump_levels(ex, side, fs, rs, cost):
-                sub = f"dump:{ex}:{side}:{i}"
+            for i, px, q in self.dump_levels(ex, side, fs, rs, cost, room=room):
+                sub = f"dump:{ex}:{side}:{'L0' if i == 4 else i}"
                 if abs(books.get(sub, 0)) >= MIN_QTY:
-                    continue                                # its tranche is being sold back: re-arms when that fills
+                    if i != 4 or self.l0_refills(sub, now) >= DUMP_L0_REFILLS + 1:   # the first fill + 3 refills per 10 min
+                        continue                            # its tranche is being sold back: re-arms when that fills (L0: 3 refills / 10 min)
                 if sliding and sub in rest_px and px < rest_px[sub] - 1e-9:
                     px = rest_px[sub]                       # a slide in progress: never lower a resting level
                     q = int(cost * DUMP_V3_WEIGHTS[i] / px)
-                rows.append((i, i in resting.get(key, set()), ex, dict(side=side, px=px, qty=q, sub=sub, level=i, edge=fs - px, arena=ex in arena)))
-        # day 6 §4.1: a resting level older than ~50 min (staggered) is cancelled now and re-placed next loop (dead-man TTL 60 min)
+                rows.append((i, i in resting.get(key, set()), ex, dict(side=side, px=px, qty=q, sub=sub, level=i, edge=fs - px, arena=ex in arena, l0=i == 4)))
+        # day 7 §1.3 make-before-break: a level due for its refresh is placed again first, then the old one is cancelled
+        # (resting orders lock no cash; the overlap is seconds). A side is never left without its level.
+        wanted = {w["sub"]: (ex, w) for _, _, ex, w in rows}
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
-            if rec and rec.get("layer") == "dump" and o["id"] not in self.ex.cancelling:
-                age = now - (rec.get("ts") or now)
-                jitter = (hash(rec.get("sub", "")) % (2 * DUMP_REFRESH_JITTER_S)) - DUMP_REFRESH_JITTER_S
-                if age >= DUMP_REFRESH_S + jitter and api.writes_left() >= DUMP_WRITES_IDLE:
-                    self.ex.cancel(o, reason="ttl refresh (50 min)")
+            if not rec or rec.get("layer") != "dump" or o["id"] in self.ex.cancelling or o["id"] in self.refreshed:
+                continue
+            age = now - (rec.get("ts") or now)
+            jitter = (hash(rec.get("sub", "")) % (2 * DUMP_REFRESH_JITTER_S)) - DUMP_REFRESH_JITTER_S
+            if age < DUMP_REFRESH_S + jitter or api.writes_left() < DUMP_WRITES_IDLE:
+                continue
+            w = wanted.get(rec.get("sub"))
+            if w is not None:
+                ex_, spec = w
+                self.ex.place([(self.owner[ex_].name, spec["sub"], "dump", (ex_, spec["side"], "buy", spec["px"], int(spec["qty"])))], ttl_s=DUMP_TTL_S)
+            self.refreshed[o["id"]] = now
+            self.ex.cancel(o, reason="refresh (make-before-break)")
+        if len(self.refreshed) > 3000:
+            self.refreshed = {k: v for k, v in self.refreshed.items() if v >= now - 7200}
+        # §1.3: an eligible side without a resting level for > 30 s is logged (and counted for the hourly line)
+        covered = set(resting) | {(p["ex"], p["side"]) for p in self.ex.pending() if p.get("layer") == "dump"}
+        for ex, side, fs, rs in cands:
+            key = (ex, side)
+            if key in covered or not any(r[2] == ex and r[3]["side"] == side for r in rows):
+                self.uncovered_since.pop(key, None)
+                continue
+            t0 = self.uncovered_since.setdefault(key, now)
+            if now - t0 > UNCOVERED_LOG_S and now - self.uncovered_log.get(key, 0) > 1800:
+                self.uncovered_log[key] = now
+                self.uncovered_n.append((now, ex, side, round(now - t0)))
+                self.event("DUMP", f"{self.name(ex)} {side.upper()}: no level resting for {now - t0:.0f} s (refresh / placement lag)")
         # L1 everywhere first: a new L2 goes out only when no side is missing L1, a new L3 only when none is missing L2
         n_lv = len(DUMP_V3_OFFSETS_DAY)
         missing = {lvl: any(r[0] == lvl and not r[1] for r in rows) for lvl in range(n_lv)}
         keep = []
         for lvl, is_resting, ex, w in rows:
-            if is_resting or lvl == 0 or all(not missing[k] for k in range(lvl)):
+            if is_resting or lvl in (0, 4) or all(not missing[k] for k in range(lvl)):   # L0 and L1 go out first, everywhere
                 keep.append((lvl, is_resting, ex, w))
         if self.constrained:                                # day 6 §1.4: cash short -> rest the best edge first; drop the lowest
             budget = 3.0 * funded                           # (fair - price) levels, then non-arena sides (resting levels stay)
@@ -2248,6 +2312,8 @@ class Engine:
             ref_side = None if r_now is None else (r_now if t["side"] == "yes" else 1 - r_now)
             if self.constrained and age > DUMP_RECYCLE_FAST_S:   # day 6 §1.5: cash binds -> a tranche > 30 min old goes at fill + 0.5c
                 target, floor_ = avg + DUMP_STEP2_MIN, avg + DUMP_STEP2_MIN
+            elif sub.endswith(":L0"):                        # day 7 §2.1: L0 tranches sell at entry + 1.5c, after 60 min entry + 0.5c
+                target = floor_ = avg + (DUMP_SELL_MIN if age <= DUMP_STEP2_S else DUMP_STEP2_MIN)
             elif age <= DUMP_STEP1_S:                        # day 5 §1.4: 0-20 min max(pre-dump ref, fill + 1.5c)
                 target, floor_ = max(avg + DUMP_SELL_MIN, pre or 0.0), avg + DUMP_STEP_MIN
             elif age <= DUMP_STEP2_S:                        # 20-60 min: max(fill + 1c, ref - 0.5c)
@@ -2557,8 +2623,8 @@ class Engine:
             return
         since = r.get("since", now - every)
         if layer == "dump":
-            g = self.dump_gate(since, now)
             need = RATCHET_MIN_FILLS_DAY if self.day_window(now) else RATCHET_MIN_FILLS_NIGHT
+            g = self.dump_gate(since, now, min_fills=need)   # the hourly gate judges on the hour's fills (not the pilot's 20)
             if g["stats"]["fills"] < need:                  # day 6 §1.1: too few fills to judge -> hold the level (not a fail)
                 with c.lock:
                     r["since"] = now
@@ -2794,6 +2860,75 @@ class Engine:
                f"mark-out >= 0, >= {SCALP_GATE_TRADES} trades, >= {SCALP_GATE_PACE:.0f}x/day, no trims)")
         return dict(ok=ok, why=why, stats=s)
 
+    def day7_migrations(self):
+        """Once (flags in overrides): the touch book becomes dump L0 tranches under rule 0 (same entry, the dump sell-back
+        ladder), the touch layer goes off; the cash target restarts at 25k on the bounded rule; the dump ratchet replays
+        today's hourly history with the >= 10 / >= 5 fills rule and restores the level it gives."""
+        c = self.controls
+        d7 = c.d.setdefault("day7", {})
+        now = time.time()
+        if not d7.get("touch_to_l0"):
+            moved = []
+            for ex, books in list(self.ledger.subbooks.items()):
+                for sub, q in list(books.items()):
+                    if sub.startswith("touch:") and abs(q) >= MIN_QTY:
+                        side = sub.split(":")[2]
+                        dsub = f"dump:{ex}:{side}:L0"
+                        t = self.ledger.tranches.get(sub) or {}
+                        self.ledger.move_sub(ex, sub, dsub)
+                        self.ledger.tranches[dsub] = dict(ex=ex, side=side, kind="dump", pre_ref_side=None, t=t.get("t") or stamp(),
+                                                          ts=t.get("ts") or now, state="open", avg=t.get("avg"), from_="touch")
+                        if t:
+                            t["state"] = "handed"
+                        moved.append((self.name(ex), side, abs(q), t.get("avg")))
+            with c.lock:
+                d7["touch_to_l0"] = stamp()
+                if c.d["layers"].get("touch", {}).get("state") != "off":
+                    c.d["layers"].setdefault("touch", dict(state="off", caps={}, killed=None))["state"] = "off"
+                c.save()
+            if moved:
+                msg = "DAY 7: the touch book became dump L0 tranches (same entry, the dump sell-back ladder, rule 0): " + "; ".join(
+                    f"{n} {sd.upper()} {q:,.0f} at {a if a is None else round(a, 3)}" for n, sd, q, a in moved) + "; touch layer off"
+                self.event("DUMP", msg)
+                self.night.line(msg)
+            self.ledger.save()
+        if not d7.get("cash_target_v2"):
+            with c.lock:
+                c.d["cash_target"] = dict(T=float(CASH_T_START), hour=int(now // 3600), idle=0, hist=[])
+                d7["cash_target_v2"] = stamp()
+                c.save()
+            self.event("CASH", "DAY 7: cash target reset to 25,000; rises only after >= 15 constrained min or bounded peak use >= 70%")
+        if not d7.get("ratchet_reeval"):
+            r = (c.d.get("ratchet") or {}).get("dump") or {}
+            hist = r.get("history") or []
+            if hist:
+                t0 = time.mktime(time.strptime(hist[0]["t"], "%Y-%m-%d %H:%M:%S"))
+                level, hold_until, t, rows = 0, 0.0, t0, []
+                while t <= now:
+                    if t >= hold_until:
+                        need = RATCHET_MIN_FILLS_DAY if self.day_window(t) else RATCHET_MIN_FILLS_NIGHT
+                        g = self.dump_gate(t - RATCHET_EVERY_S, t, min_fills=need)
+                        if g["stats"]["fills"] < need:
+                            rows.append((time.strftime("%H:%M", time.localtime(t)), level, None))
+                        elif g["ok"]:
+                            level += 1
+                            rows.append((time.strftime("%H:%M", time.localtime(t)), level, True))
+                        else:
+                            level = max(0, level - 1)
+                            hold_until = t + RATCHET_EVERY_S
+                            rows.append((time.strftime("%H:%M", time.localtime(t)), level, False))
+                    t += RATCHET_EVERY_S
+                with c.lock:
+                    rr = c.d.setdefault("ratchet", {})
+                    rr["dump"] = dict(level=level, since=now, hold_until=0.0,
+                                      history=(hist[-20:] + [dict(t=stamp(), level=level, ok=None, note="day 7 re-evaluation")]))
+                    d7["ratchet_reeval"] = stamp()
+                    c.save()
+                msg = (f"DAY 7: dump ratchet re-evaluated over today's hours with the >= 10 (day) / >= 5 (night) rule: level {level} "
+                       f"(x{RATCHET_STEP ** level:.2f}); hourly: " + " ".join(f"{h}:{'hold' if ok is None else 'up' if ok else 'back'}" for h, lv, ok in rows[-12:]))
+                self.event("RATCHET", msg)
+                self.night.line(msg)
+
     # ------------------------------------------------------------------------------------------------ touch layer (day 6 §2)
     def touch_budget(self):
         """The layer's budget at cost: the cap (pilot half, full 15k; a failed scalper gate adds its slice) x the ratchet, <= 30k."""
@@ -3023,14 +3158,16 @@ class Engine:
                     median_hold_min=statistics.median(holds) if holds else None,
                     markout30=round(sum(mo) / len(mo), 4) if mo else None, n_mo=len(mo))
 
-    def dump_gate(self, since, now):
+    def dump_gate(self, since, now, min_fills=20):
+        """The pilot gate (4 h, >= 20 fills) and, with min_fills, the hourly ratchet gate (day 6 §1.1: >= 10 fills in the day
+        window, >= 5 at night; fewer is a hold, decided by the caller)."""
         s = self.dump_stats(since)
         trims = self.ex.trims.get("dump", 0)
         short = self.cash_short is not None and self.cash_short["t"] >= since
-        ok = (s["fills"] >= 20 and s["median_hold_min"] is not None and s["median_hold_min"] <= 60 and s["realized"] > 0
+        ok = (s["fills"] >= min_fills and s["median_hold_min"] is not None and s["median_hold_min"] <= 60 and s["realized"] > 0
               and (s["markout30"] is None or s["markout30"] >= 0) and trims == 0 and not short)
         why = (f"{s['fills']} fills, {s['round_trips']} round trips, median hold {s['median_hold_min']} min, realized {s['realized']:+,.0f}, "
-               f"mark-out 30m {s['markout30']}, {trims} I2 trims, cash short {short} (gate: >= 20 fills, hold <= 60, realized > 0, "
+               f"mark-out 30m {s['markout30']}, {trims} I2 trims, cash short {short} (gate: >= {min_fills} fills, hold <= 60, realized > 0, "
                f"mark-out >= 0, no trims, no CASH SHORT)")
         return dict(ok=ok, why=why, stats=s)
 
@@ -3376,7 +3513,8 @@ class Engine:
             if minutes >= CASH_T_CONSTRAINED_MIN or peak >= CASH_T_PEAK_UP:
                 T2 = min(float(CASH_T_MAX), T + CASH_T_STEP)
                 idle = 0
-                msg = f"CASH TARGET {T:,.0f} -> {T2:,.0f}: last hour constrained {minutes} min, peak use {peak:.0%}"
+                if T2 != T:                                  # at the 55k cap nothing changes: no line
+                    msg = f"CASH TARGET {T:,.0f} -> {T2:,.0f}: last hour constrained {minutes} min, peak use {peak:.0%}"
                 T = T2
             elif peak < CASH_T_PEAK_DOWN:
                 idle += 1
@@ -4092,7 +4230,8 @@ class Engine:
                 f"cost {cost:,.0f}, edge vs fair {edge:+,.0f} · capture {100 * edge / ev_value if ev_value else 0:.1f}% · round trips {trips}, realized {realized:+,.0f} · "
                 f"cash-constrained {self.constrained_minutes(t0)} min · free cash at the hour start {'n/a' if start_cash is None else f'{start_cash:,.0f}'} · T {T:,.0f} · "
                 f"release sold {dict(tiers) or 'none'} (EV given up {ev_up:,.0f}) · rule 0 held back {self.rule0_blocked_value(t0):,} · "
-                f"ratchet dump L{r.get('level', 0)} · writes/min now {wr}, 429s last hour {h.get('throttled', 0)}")
+                f"ratchet dump L{r.get('level', 0)} · sides uncovered > 30 s: {sum(1 for t_, *_ in self.uncovered_n if t_ >= t0)} · "
+                f"party D {dash4.party_exposure(self)['D']:,.0f} / R {dash4.party_exposure(self)['R']:,.0f} · writes/min now {wr}, 429s last hour {h.get('throttled', 0)}")
         self.night.line(line)
 
     # ------------------------------------------------------------------------------------------------ F5 state

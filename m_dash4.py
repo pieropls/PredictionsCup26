@@ -246,8 +246,8 @@ def capital_v4(eng, now, capital, holdings=()):
     in_use = tr + scalp + takes
     use = in_use / (in_use + max(0.0, free)) if in_use + max(0.0, free) > 0 else None   # share of deployable cash in use (0-100%)
     eng.in_use_hist.append((round(now), round(in_use, 2)))
-    if free > 0:
-        eng.use_peak = max(eng.use_peak, in_use / free)      # §9.2: "peaked at >= 70% of free cash" within the hour
+    if use is not None:
+        eng.use_peak = max(eng.use_peak, use)                # day 7 §1.2: the bounded capital use (the same number as the page)
     eng.cap_use_hist.append((round(now), None if use is None else round(use, 4)))
     hist = [(t, u) for t, u in eng.cap_use_hist if t >= now - 86400]
     party = party_exposure(eng)
