@@ -124,6 +124,10 @@ ALL_ON = {l: dict(state="full") for l in ("position", "mm", "ladder", "pairs", "
 RECYCLER_ON = dict(position=dict(state="full"), recycler=dict(state="full"))
 
 
+def stamp_():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def fresh_data(layers=ALL_ON):
     shutil.rmtree(TMP, ignore_errors=True)
     os.makedirs(TMP)
@@ -2965,6 +2969,66 @@ class TravelTests(EngineCase):
         f_engine.EngineControls(eng).apply("travel", {"on": False})
         self.assertFalse(eng.controls.paused, "./travel.sh off resumes by hand")
         self.assertTrue(any(e["kind"] == "TRAVEL" for e in eng.events))
+
+
+class DoubleBookingTests(EngineCase):
+    """Oct 5 02:30: SIG's fills page and its positions lag each other by seconds either way. A synthetic order-shrink fill
+    must never exceed the order's own arithmetic (shares gone from the book minus shares already booked), and the ledger
+    can undo the duplicates it already holds."""
+
+    def test_order_truth_never_books_what_the_projection_already_booked(self):
+        fresh_data(layers=dict(position=dict(state="full"), dump=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        eng.controls.d["truth_mode"] = "book"
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS)
+        oid = "4242"
+        eng.ledger.orders[oid] = dict(bot=eng.owner[ex].name, layer="dump", ex=ex, side="no", action="buy", price=0.815, qty=389, filled=389.0,
+                                      cost=389 * 0.815, left=0, placed=stamp_(), ts=time.time() - 30, closed=None, status="open", sub=f"dump:{ex}:no:0", note="")
+        now = time.time()
+        eng.truth_prev = {oid: 389.0}                       # the last snapshot still showed the order resting (stale by a few seconds)
+        eng.truth_filled = {}
+        eng.truth_read_t = now - 10
+        eng.truth_live_t = now - 100
+        eng.open = [o for o in eng.open if o["id"] != oid]
+        prev = {ex: (0, {})}
+        booked = eng.order_truth({ex: -389}, prev, collections.Counter(), now, True)   # the position moved by the fill SIG already reported
+        self.assertEqual(booked, [], "the shrink is fully explained by the fill already booked: no synthetic fill")
+        eng.ledger.orders[oid]["filled"] = 0.0                # the other way round: nothing booked yet -> the synthetic fill is right
+        eng.truth_prev = {oid: 389.0}
+        eng.truth_read_t = now - 10
+        booked = eng.order_truth({ex: -389}, prev, collections.Counter(), now + 1, False)
+        self.assertEqual(len(booked), 1)
+        self.assertEqual(booked[0]["qty"], 389)
+
+    def test_dedup_removes_duplicates_and_nets_phantom_pairs(self):
+        fresh_data()
+        fake = new_fake()
+        eng = engine(fake)
+        L = eng.ledger
+        ex = "1043"
+        L.orders["9001"] = dict(bot="MKT x", layer="dump", ex=ex, side="no", action="buy", price=0.815, qty=389, filled=778.0, cost=0.0, left=0,
+                                placed="x", ts=time.time(), closed=None, status="done", sub=f"dump:{ex}:no:0", note="", truth_q=389.0)
+        base = dict(order="9001", ex=ex, side="no", qty=389.0, price=0.815, action="buy", realized=0.0, bot="MKT x", layer="dump", before_engine=False,
+                    fair=0.9, sig_mid=0.82, edge=0.085, sig_edge=0.005)
+        L.fills.append(dict(base, key="49074377:9001", t="2026-10-05 01:01:24"))
+        L.fills.append(dict(base, key="order_shrink:9001:52", t="2026-10-05 01:01:27", source="order_shrink"))
+        L.fills.append(dict(base, key="order_shrink:9001:99", t="2026-10-05 01:40:00", source="order_shrink"))   # no SIG fill near it: stays
+        L.subbooks[ex] = {"inventory": 389.0, f"dump:{ex}:no:0": -389.0}
+        L.tranches[f"dump:{ex}:no:0"] = dict(ex=ex, side="no", kind="dump", state="open", ts=time.time(), t="x", avg=0.815)
+        L.subbooks["975"] = {"inventory": 1450.0, "pairset:Oklahoma:1": -1396.0}
+        dry = L.dedup_synthetic(dry_run=True)
+        self.assertEqual(dry["removed"], ["order_shrink:9001:52"])
+        self.assertEqual(len(L.fills), 3, "dry run changes nothing")
+        r = L.dedup_synthetic(dry_run=False)
+        self.assertEqual(r["removed"], ["order_shrink:9001:52"])
+        self.assertEqual([f["key"] for f in L.fills if f["order"] == "9001"], ["49074377:9001", "order_shrink:9001:99"])
+        self.assertEqual(L.orders["9001"]["filled"], 389.0)
+        self.assertEqual(L.subbooks.get(ex), {}, "the phantom tranche and the audit's inventory offset cancel")
+        self.assertEqual(L.tranches[f"dump:{ex}:no:0"]["state"], "voided")
+        self.assertEqual(L.subbooks["975"], {"inventory": 1450.0, "pairset:Oklahoma:1": -1396.0}, "pair-set legs are never netted")
+        self.assertEqual(L.dedup_synthetic(dry_run=False), dict(removed=[], netted=[]), "idempotent")
 
 
 class ControlTests(EngineCase):

@@ -377,6 +377,18 @@ class Engine:
             self.load_vol24()
         except Exception as err:
             print(f"tape volume load: {err!r}")
+        try:                                                # Oct 5 02:30: undo synthetic fills that duplicated a SIG fill
+            fixed = self.ledger.dedup_synthetic()
+            if fixed["removed"] or fixed["netted"]:
+                msg = (f"DEDUP: {len(fixed['removed'])} synthetic (order_shrink) fills that duplicated SIG's own fill removed; "
+                       f"{len(fixed['netted'])} phantom sub-book pairs netted against inventory: "
+                       + "; ".join(f"{self.name(ex)} {sub.split(':')[0]} {old:+,.0f} -> {new:+,.0f}" for ex, sub, old, new in fixed["netted"][:12])
+                       + (" …" if len(fixed["netted"]) > 12 else ""))
+                self.event("AUDIT", msg)
+                self.night.line(msg)
+                self.ledger.save()
+        except Exception as err:
+            print(f"dedup: {err!r}")
         self.dump_frozen, self.dump_arena_t, self.dump_arena_set = {}, 0.0, set()   # v3 (day 4 §2)
         self.dump_quota, self.cross_log = 0, {}
         self.dump_track = read_json(os.path.join(DATA, "intel", "dump_track.json"), {}) or {}
@@ -1782,9 +1794,10 @@ class Engine:
             if not rec or rec.get("action") not in ("buy", "sell"):
                 continue
             d = self.vanished_fill(oid, rec, q0, now)
-            # Oct 3 (13:24 840 double count): SIG's own fill for this order may have been booked by this loop's sync already
-            # (its trade fell between our orders and positions reads); count only what isn't booked yet
-            d -= max(0.0, (rec.get("filled") or 0) - filled_prev.get(oid, 0.0 if oid not in (before or {}) else (rec.get("filled") or 0)))
+            # Oct 5 02:30 (143 double bookings since Oct 3): SIG's fills page and its positions lag each other by a few
+            # seconds either way, so the only safe bound is the order's own arithmetic: shares that left the book minus
+            # shares already booked for it from any source. Never book a synthetic fill beyond that.
+            d = min(d, max(0.0, rec["qty"] - cur.get(oid, 0.0) - (rec.get("filled") or 0)))
             if d > 0.5:
                 self.order_moved_t[rec["ex"]] = now           # night §1.2: the audit waits up to 2 min for its late fill
                 sgn = (1 if rec["side"] == "yes" else -1) * (1 if rec["action"] == "buy" else -1)
@@ -3321,7 +3334,11 @@ class Engine:
         return out
 
     def rule0_blocked_value(self, since):
-        return round(sum(q * p for t, _, _, q, p in self.rule0_blocked if t >= since))
+        best = {}
+        for t, ex, side, q, p in self.rule0_blocked:
+            if t >= since:
+                best[(ex, side)] = max(best.get((ex, side), 0.0), q * p)
+        return round(sum(best.values()))
 
     def trading_return_24h(self, now):
         """The trading layers' (dump + touch + scalper) realized return per day on their average capital at cost over 24 h."""
@@ -4963,6 +4980,14 @@ class EngineControls:
             return f"gates free to promote: {layers or 'none'}"
         if action == "travel":                             # day 6 §4.2: ./travel.sh [off]
             return self.eng.travel(bool(args.get("on", True)))
+        if action == "dedup_fills":                        # Oct 5: undo synthetic fills that duplicated SIG's fill (dry_run lists them)
+            dry = bool(args.get("dry_run", True))
+            fixed = self.eng.ledger.dedup_synthetic(dry_run=dry)
+            if (fixed["removed"] or fixed["netted"]) and not dry:
+                self.eng.ledger.save()
+                self.eng.event("AUDIT", f"DEDUP by control: {len(fixed['removed'])} synthetic fills removed, {len(fixed['netted'])} phantom pairs netted")
+            return (f"{'would remove' if dry else 'removed'} {len(fixed['removed'])} duplicated synthetic fills; {'would net' if dry else 'netted'} "
+                    + "; ".join(f"{ex} {sub} {old:+,.0f} -> {new:+,.0f}" for ex, sub, old, new in fixed["netted"][:20]))
         if action == "hold_gates":                         # evening §1.5: no pilot promotes while set
             on = bool(args.get("on", True))
             with c.lock:

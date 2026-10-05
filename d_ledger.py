@@ -297,6 +297,68 @@ class Ledger:
             self.fills.append(rec)
             return rec
 
+    PHANTOM_SUBS = ("dump:", "touch:", "scalp:", "sniper", "mm")
+
+    def dedup_synthetic(self, dry_run=False, window_s=180):
+        """Oct 5 02:30: a synthetic (order_shrink) fill that duplicates one of SIG's own fills for the same order (same
+        quantity, within 3 min) is removed from the fill history (stats, lots and the order's filled count follow). The
+        sub-books are repaired conservatively: a market cannot hold a long tranche and a short inventory at once (SIG
+        nets positions), so an engine sub-book (dump / touch / scalp tranche, sniper, mm) with the sign opposite to the
+        market's inventory is the audit's compensation for a double booking: the overlap is netted out of both (the sum
+        of the sub-books, which the audit keeps equal to the position, does not change). Pair-set legs are left alone.
+        -> dict(removed=[fill keys], netted=[(ex, sub, from, to)])."""
+        with self.lock:
+            proj = {}
+            for f in self.fills:
+                if f.get("source") != "order_shrink" and f.get("order"):
+                    proj.setdefault(str(f["order"]), []).append(f)
+            def ts(x):
+                return time.mktime(time.strptime(x, "%Y-%m-%d %H:%M:%S"))
+            drop, used = [], set()
+            for f in self.fills:
+                if f.get("source") != "order_shrink":
+                    continue
+                for p in proj.get(str(f.get("order")), []):
+                    if id(p) in used or abs(p["qty"] - f["qty"]) >= 1 or abs(ts(p["t"]) - ts(f["t"])) > window_s:
+                        continue
+                    used.add(id(p))
+                    drop.append(f)
+                    break
+            netted = []
+            for ex, books in self.subbooks.items():
+                inv = books.get("inventory", 0)
+                if abs(inv) < 1:
+                    continue
+                for sub in sorted(books):
+                    q = books.get(sub, 0)
+                    if sub == "inventory" or not sub.startswith(self.PHANTOM_SUBS) or q * inv >= 0 or abs(q) < 1:
+                        continue
+                    take = min(abs(q), abs(inv))
+                    netted.append((ex, sub, q, q - take * (1 if q > 0 else -1)))
+                    if not dry_run:
+                        books[sub] = q - take * (1 if q > 0 else -1)
+                        inv = inv - take * (1 if inv > 0 else -1)
+                        books["inventory"] = inv
+                        if abs(books[sub]) < 1:
+                            books.pop(sub, None)
+                            t = self.tranches.get(sub)
+                            if t and t.get("state") == "open":
+                                t["state"] = "voided"      # a phantom tranche: no round trip, no sell-back
+                    if abs(inv) < 1:
+                        break
+                if not dry_run and abs(books.get("inventory", 0)) < 1:
+                    books.pop("inventory", None)
+            if not dry_run:
+                keys = {f["key"] for f in drop}
+                for f in drop:
+                    order = self.orders.get(str(f.get("order")))
+                    if order:
+                        order["filled"] = max(0.0, (order.get("filled") or 0) - f["qty"])
+                        order["cost"] = max(0.0, (order.get("cost") or 0) - f["qty"] * f["price"])
+                        order["truth_q"] = max(0.0, (order.get("truth_q") or 0) - f["qty"])
+                self.fills = [f for f in self.fills if f.get("key") not in keys]
+            return dict(removed=[f["key"] for f in drop], netted=netted)
+
     def markouts(self, side_mid, horizons=((5, "mo5"), (30, "mo30"))):
         """Mark-out of each engine fill 5 and 30 minutes later: (SIG mid of its side then - fill price), + for buys that
         went our way. Negative across many fills = we're being picked off (adverse selection)."""
