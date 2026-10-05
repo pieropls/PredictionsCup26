@@ -2207,6 +2207,12 @@ class Day4Tests(EngineCase):
         self.assertNotIn(ex, eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage()), "an engine lot under entry + 0.5c never sells")
         self.assertEqual(eng.rule0_allowed(ex, "yes", "inventory", bid, 2000), 0)
         self.assertEqual(eng.rule0_allowed(ex, "yes", "inventory", round(bid + 0.01, 3), 2000), 2000, "it sells once the bid clears entry + 0.5c")
+        hsub = f"dump:{ex}:yes:scalp"                          # a hand-over tranche with no lot history of its own: its entry is the tranche's avg
+        eng.ledger.subbooks[ex][hsub] = 500.0
+        eng.ledger.tranches[hsub] = dict(ex=ex, side="yes", kind="dump", state="open", ts=time.time(), t="x", avg=0.805, from_="scalp")
+        self.assertEqual(eng.rule0_allowed(ex, "yes", hsub, 0.81, 500), 500, "entry 0.805 + 0.5c = 0.81: allowed")
+        self.assertEqual(eng.rule0_allowed(ex, "yes", hsub, 0.805, 500), 0)
+        eng.ledger.subbooks[ex].pop(hsub); eng.ledger.tranches.pop(hsub)
         loop(eng, fake)
         sells = [o for o in fake.open_orders() if o["ex"] == ex and jx.reduces(o["side"], o["action"], fake.pos.get(ex, 0))]
         self.assertEqual(sells, [], "no layer (release, recycler) placed a sale of the engine lot under entry")
@@ -3035,10 +3041,10 @@ class DoubleBookingTests(EngineCase):
         L.subbooks[ex] = {"inventory": 389.0, f"dump:{ex}:no:0": -389.0}
         L.tranches[f"dump:{ex}:no:0"] = dict(ex=ex, side="no", kind="dump", state="open", ts=time.time(), t="x", avg=0.815)
         L.subbooks["975"] = {"inventory": 1450.0, "pairset:Oklahoma:1": -1396.0}
-        dry = L.dedup_synthetic(dry_run=True)
+        dry = L.dedup_synthetic(dry_run=True, window_s=180)
         self.assertEqual(dry["removed"], ["order_shrink:9001:52"])
         self.assertEqual(len(L.fills), 3, "dry run changes nothing")
-        r = L.dedup_synthetic(dry_run=False)
+        r = L.dedup_synthetic(dry_run=False, window_s=180)
         self.assertEqual(r["removed"], ["order_shrink:9001:52"])
         self.assertEqual([f["key"] for f in L.fills if f["order"] in ("9001", "9004")], ["49074377:9001", "order_shrink:9004:99"])
         self.assertEqual(L.orders["9001"]["filled"], 389.0)

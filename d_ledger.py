@@ -336,7 +336,7 @@ class Ledger:
                     books.pop("inventory", None)
             return netted
 
-    def dedup_synthetic(self, dry_run=False, window_s=180):
+    def dedup_synthetic(self, dry_run=False, window_s=0):
         """Oct 5 02:30: a synthetic (order_shrink) fill that duplicates one of SIG's own fills for the same order (same
         quantity, within 3 min) is removed from the fill history (stats, lots and the order's filled count follow). The
         sub-books are repaired conservatively: a market cannot hold a long tranche and a short inventory at once (SIG
@@ -352,9 +352,9 @@ class Ledger:
             def ts(x):
                 return time.mktime(time.strptime(x, "%Y-%m-%d %H:%M:%S"))
             drop, used = [], set()
-            for f in self.fills:
-                if f.get("source") != "order_shrink":
-                    continue
+            for f in (self.fills if window_s else []):    # the time-window pairing (window_s > 0) was the one-off repair of Oct 5
+                if f.get("source") != "order_shrink":     # 02:30; with truth_q and booked <= quantity it can only hit a genuine partial
+                    continue                                  # fill of the same size, so it is off by default
                 for p in proj.get(str(f.get("order")), []):
                     if id(p) in used or abs(p["qty"] - f["qty"]) >= 1 or abs(ts(p["t"]) - ts(f["t"])) > window_s:
                         continue

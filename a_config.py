@@ -193,7 +193,7 @@ CASH_T_CONSTRAINED_MIN, CASH_T_PEAK_UP, CASH_T_PEAK_DOWN, CASH_T_IDLE_H = 15, 0.
 RELEASE_TIER0, RELEASE_TIER1, RELEASE_TIER2 = 0.02, 0.05, 0.07   # gap to fair: tier 0 always (rule 0), tier 1 for T, tier 2 for T if trading >= 10%/day
 RELEASE_TIER2_RETURN = 0.10     # the trading layers' realized return per day on their average capital over 24 h
 SCALP_DAY_OFF = None            # day 6 §10.3 (01:20 addendum): the scalper runs all day; it yields to the catcher and keeps its 2-h hand-off
-DUMP_REFRESH_S, DUMP_REFRESH_JITTER_S = 50 * 60, 300   # §4.1: a 60-min level is re-placed at ~50 min, staggered +-5 min
+DUMP_REFRESH_S, DUMP_REFRESH_JITTER_S = 45 * 60, 900   # §4.1: a 60-min level is re-placed at 30-60 min, staggered +-15 min (a deploy re-places them all at once)
 # touch layer (day 6 §2): be the bid the big sellers hit, on favourites SIG prices far under fair
 TOUCH_MIN_FAIR, TOUCH_GAP = 0.93, 0.06   # fair_side >= 0.93 and the SIG best bid <= fair_side - 6c
 TOUCH_CLIP, TOUCH_RACE_CAP = 2_000, 8_000   # shares per bid; per race at cost including what we hold on the race

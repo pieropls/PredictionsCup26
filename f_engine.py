@@ -378,7 +378,7 @@ class Engine:
         except Exception as err:
             print(f"tape volume load: {err!r}")
         try:                                                # Oct 5 02:30: undo synthetic fills that duplicated a SIG fill
-            fixed = self.ledger.dedup_synthetic()
+            fixed = self.ledger.dedup_synthetic()          # booked <= quantity per order + phantom netting (no time-window pairing)
             if fixed["removed"] or fixed["netted"]:
                 msg = (f"DEDUP: {len(fixed['removed'])} synthetic (order_shrink) fills that duplicated SIG's own fill removed; "
                        f"{len(fixed['netted'])} phantom sub-book pairs netted against inventory: "
@@ -3300,8 +3300,10 @@ class Engine:
         lots = self.lots(ex, side, sub)
         known = sum(l[0] for l in lots)
         ok = sum(l[0] for l in lots if l[2] == "day1" or l[1] + RULE0_MARGIN <= sale_px + 1e-9)
-        if qty > known:
-            avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
+        if qty > known:                                     # shares the lot history can't place: the tranche's own entry (the
+            t = self.ledger.tranches.get(sub) or {}          # engine's record, e.g. a hand-over sub), else SIG's average cost
+            avg = float(t.get("avg") or 0) if sub.startswith(("dump:", "touch:", "scalp:")) and t.get("avg") else \
+                float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
             if avg and avg + RULE0_MARGIN <= sale_px + 1e-9:
                 ok += qty - known
         return int(max(0, min(qty, ok)))
@@ -3330,8 +3332,10 @@ class Engine:
                     self.rule0_log[k] = time.time()
                     lots = self.lots(b.ex, held_side, sub)
                     ent = [l[1] for l in lots if l[2] == "engine" and l[1] + RULE0_MARGIN > sale_px + 1e-9]
+                    t_avg = (self.ledger.tranches.get(sub) or {}).get("avg")
                     self.event("RULE0", f"{self.name(b.ex)} {held_side.upper()}: {w['layer']} sale of {blocked:,} at {sale_px:.3f} held back: engine lots at "
-                                        f"{min(ent):.3f}-{max(ent):.3f}" if ent else f"{self.name(b.ex)} {held_side.upper()}: {w['layer']} sale of {blocked:,} at {sale_px:.3f} held back (unknown lots at SIG cost)")
+                                        f"{min(ent):.3f}-{max(ent):.3f}" if ent else f"{self.name(b.ex)} {held_side.upper()}: {w['layer']} sale of {blocked:,} at {sale_px:.3f} held back "
+                                        f"(unknown lots at {'tranche entry ' + format(t_avg, '.3f') if t_avg else 'SIG average cost'})")
                 if allowed < MIN_QTY:
                     continue
                 w = dict(w, qty=allowed, qmax=min(w.get("qmax") or allowed, allowed))
@@ -4994,7 +4998,7 @@ class EngineControls:
             return self.eng.travel(bool(args.get("on", True)))
         if action == "dedup_fills":                        # Oct 5: undo synthetic fills that duplicated SIG's fill (dry_run lists them)
             dry = bool(args.get("dry_run", True))
-            fixed = self.eng.ledger.dedup_synthetic(dry_run=dry)
+            fixed = self.eng.ledger.dedup_synthetic(dry_run=dry, window_s=int(args.get("window_s") or 0))
             if (fixed["removed"] or fixed["netted"]) and not dry:
                 self.eng.ledger.save()
                 self.eng.event("AUDIT", f"DEDUP by control: {len(fixed['removed'])} synthetic fills removed, {len(fixed['netted'])} phantom pairs netted")
