@@ -27,7 +27,7 @@ import uuid
 from datetime import datetime, timedelta
 
 PRIORITY = {"cancel": 0, "position": 1, "trim": 1, "take": 2, "rebound": 3, "recycle": 3, "repair": 3, "unwind": 3,
-            "set": 4, "mm": 5, "exit": 3, "touch": 5, "ladder": 6, "add": 1, "release": 3, "fatfinger": 7, "dump": 6, "dumpexit": 3, "longshot": 7, "longexit": 3, "scalp": 5, "scalpexit": 3}
+            "set": 4, "mm": 5, "exit": 3, "touch": 5, "ladder": 6, "add": 1, "release": 3, "fatfinger": 7, "dump": 6, "dumpexit": 3, "longshot": 7, "longexit": 3, "scalp": 5, "scalpexit": 3, "touch": 5, "touchexit": 3}
 
 
 def reduces(side, action, pos):

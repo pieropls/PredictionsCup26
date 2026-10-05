@@ -149,6 +149,7 @@ LAYER_CAPS = {
     "dump": {"resting": (400_000, 800_000, 900_000)},          # resting cost (policy; fills bounded by the per-side reserve fit)
     "longshot": {"resting": (20_000, 20_000, 25_000)},        # day 3 §2: total resting cost (worst case 200 per side)
     "scalp": {"inventory": (10_000, 10_000, 20_000)},         # day 5 §2: the slice at cost (3k per market); ratchet / idle rule up to 20k
+    "touch": {"budget": (7_500, 15_000, 30_000)},             # day 6 §2: the layer budget at cost (pilot half); ratchet up to 30k
 }
 # fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
 FAT_LEVELS = [0.12]             # Oct 3 (Piero): only the 0.12 level on each side (0.08 / 0.05: 0 fills since day 1)
@@ -176,14 +177,29 @@ DUMP_SLIDE = 0.02                         # 30-min median < 6-h median - 2c: a s
 DUMP_SIDE_DIV, DUMP_SIDE_MIN, DUMP_SIDE_MAX = 4, 2_000, 10_000  # day 5 §1.2: per side = funded reserve / 4, clipped; arena x 1.5
 DUMP_ARENA_MAX, DUMP_SIDE_HARD_MAX = 15_000, 15_000   # arena sides <= 15k; the ratchet never takes a side above 15k or reserve / 2
 DUMP_PARTY_CAP = 40_000                   # day 5 §1.5: held dump inventory at cost per party side (D favourites / R favourites)
-RATCHET_STEP, RATCHET_EVERY_S = 1.25, 2 * 3600   # day 5 §1.7: +25% per passing 2-h gate; one notch back + 2 h hold on a failure
+RATCHET_STEP, RATCHET_EVERY_S = 1.25, 3600       # day 6 §1.1: +25% per passing 1-h gate (was 2 h); one notch back + 1 h hold on a failure
+RATCHET_MIN_FILLS_DAY, RATCHET_MIN_FILLS_NIGHT = 10, 5   # fewer fills in the hour: hold the level (not a fail)
+DAY_WINDOW = (6, 15)            # PT hours of the day window (06:00-15:00): 10x the dumps of the night
+DUMP_CONC_CAPS = [(0.95, 20_000), (0.90, 15_000), (0.0, 12_000)]   # day 6 §1.2: concentration cap by fair_side (position at cost)
+DUMP_V3_OFFSETS_DAY, DUMP_V3_WEIGHTS_DAY = [0.01, 0.02, 0.035, 0.05], [0.45, 0.25, 0.15, 0.15]   # §1.3: L4 in the day window (replay: 5c)
+DUMP_RECYCLE_FAST_S = 1800      # §1.5: cash-constrained -> a tranche older than 30 min sells back at fill + 0.5c
+CONSTRAINED_FREE, CONSTRAINED_FILLS_30M = 10_000, 3_000   # §3.3: constrained = free cash < 10k AND dump fills >= 3k cost in 30 min
+RELEASE_FUND_PER_H, RELEASE_MIN_AGE_S = 10_000, 24 * 3600  # §3.3 funding branch: <= 10k per hour, never a holding bought < 24 h ago
+SCALP_DAY_OFF = (4.5, 5.75, 6.0, 17.0)   # §3.1: no new buys from 04:30, asks to entry, 05:45 the rest to the tranche rules, off 06:00-17:00
+DUMP_REFRESH_S, DUMP_REFRESH_JITTER_S = 50 * 60, 300   # §4.1: a 60-min level is re-placed at ~50 min, staggered +-5 min
+# touch layer (day 6 §2): be the bid the big sellers hit, on favourites SIG prices far under fair
+TOUCH_MIN_FAIR, TOUCH_GAP = 0.93, 0.06   # fair_side >= 0.93 and the SIG best bid <= fair_side - 6c
+TOUCH_CLIP, TOUCH_RACE_CAP = 2_000, 8_000   # shares per bid; per race at cost including what we hold on the race
+TOUCH_TTL_S, TOUCH_SELL_MIN = 1800, 0.015   # 30-min dead-man TTL; exit at max(entry + 1.5c, best ask - 1 tick)
+TOUCH_NEWS_FAIR, TOUCH_NEWS_SIG, TOUCH_NEWS_HOLD_S = 0.02, 0.03, 1800   # fair -2c in 10 min, or SIG -3c while PM moves against us: 30 min off
+TOUCH_YIELD_RESERVE, TOUCH_PILOT_S, TOUCH_GATE_FILLS, TOUCH_RATCHET_MAX = 15_000, 4 * 3600, 10, 30_000
 DUMP_ARENA_MULT, DUMP_ARENA_N = 1.5, 10   # arena = the markets with the most big events in the last 48 h (intel events + dumps)
 DUMP_CONC_CAP = 12_000                    # position (at cost) + resting dump bids on a side <= this
 DUMP_SELL_MIN, DUMP_SELL_FAIR_GAP = 0.015, 0.005   # sell-back at max(pre-dump ref, fill + 1.5c), <= fair_side - 0.5c
 DUMP_STEP1_S, DUMP_STEP2_S = 1200, 3600   # day 5 §1.4: after 20 min -> max(fill + 1c, ref - 0.5c); after 60 min -> fill + 0.5c
 DUMP_STEP_MIN, DUMP_STEP2_MIN = 0.01, 0.005
 DUMP_HOLD_S = 6 * 3600                    # unfilled after 6 h: the tranche goes to inventory (held to settlement)
-DUMP_TTL_S, DUMP_QUEUE_S, DUMP_BOOK_READS = 6 * 3600, 1800, 2
+DUMP_TTL_S, DUMP_QUEUE_S, DUMP_BOOK_READS = 3600, 1800, 2   # day 6 §4.1: dead-man TTL 60 min (was 6 h)
 DUMP_NEWS_DROP = 0.03                     # fair_side -3c in 10 min -> that side's levels pulled 30 min
 DUMP_BREAKER_SIDES, DUMP_BREAKER_FAIR = 4, 0.01   # >= 4 sides of one party filled in 10 min AND PM >= 1c against -> 30 min
 DUMP_WRITE_SHARE, DUMP_WRITES_IDLE = 0.30, 15   # placement <= 30% of SIG write capacity, only while writes_left >= 15
@@ -217,6 +233,7 @@ PNL_READ_S = 60                 # /portfolio/pnl every 60 s (was every loop)
 ORDERS_READ_S = 30              # open orders: after our own writes or fills, else a full read every 30 s
 PRICE_ROTATE = 100              # prices: markets with our orders/holdings every loop; the rest rotate, one read (100) a loop
 LEADERS_EVERY_S = 900           # leaders logger every 15 min (was 10)
+LEADERS_DAY_EVERY_S, JUMP_MIN = 300, 1_000   # day 6 §6: the daily board every 5 min; a gain >= 1k between reads is a jump
 TAPE_MIN_PER_MIN = 6            # tape collector: guaranteed 6 reads/min
 BACKOFF_429_S, BACKOFF_LOOP_S = 120, 20.0   # after a 429: 20 s loops for 2 min
 

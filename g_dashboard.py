@@ -30,8 +30,8 @@ from urllib.parse import urlsplit
 LOCALHOST = {"127.0.0.1", "localhost", "::1"}
 SSE_PERIOD_S = 0.5              # at most 2 updates a second
 SSE_KEEPALIVE_S = 15
-ACTIONS = {"pause", "resume", "pull_quotes", "layer_state", "layer_caps", "market", "kappa", "read_only", "hold_gates", "backfill", "truth_mode", "subbook_fix", "clear_decisions", "gate_free"}
-DESTRUCTIVE = {"pull_quotes", "layer_state", "layer_caps", "market", "kappa", "hold_gates", "backfill", "truth_mode", "subbook_fix", "clear_decisions", "gate_free"}
+ACTIONS = {"pause", "resume", "pull_quotes", "layer_state", "layer_caps", "market", "kappa", "read_only", "hold_gates", "backfill", "truth_mode", "subbook_fix", "clear_decisions", "gate_free", "travel"}
+DESTRUCTIVE = {"pull_quotes", "layer_state", "layer_caps", "market", "kappa", "hold_gates", "backfill", "truth_mode", "subbook_fix", "clear_decisions", "gate_free", "travel"}
 
 
 def _finite(x):
@@ -335,24 +335,26 @@ svg .ln{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}svg 
 #tip{position:fixed;z-index:20;pointer-events:none;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:12.5px;
 box-shadow:0 6px 18px var(--shadow);display:none;max-width:300px;line-height:1.5}#tip .sw{vertical-align:-1px}
 .ro .ctl{display:none!important}
+#overlay{position:fixed;inset:0;z-index:25;background:var(--bg);padding:12px 16px;overflow:auto}#overlay .ovl-head{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px}#overlay h3{margin:0}
+.zoom-btn{padding:1px 7px;font-size:13px;line-height:1.4}.chead .zoom-btn{margin-left:auto}
 @media (max-width:760px){.tiles.t8,.tiles.t4{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:640px){main{padding:10px}.hero .v{font-size:38px}.v2{font-size:25px}header{padding:8px 10px}h2 .q{display:block;margin:2px 0 0}.card{padding:12px}}
 </style></head><body>
 <header><h1>SIG engine</h1><nav id="tabs"></nav><span class="spacer"></span><span id="live"><span class="dot"></span>…</span>
 <button class="btn" id="themeBtn" title="Light / dark theme">Theme</button></header>
-<main id="main"></main><div class="msg" id="msg"></div><div id="tip"></div>
+<main id="main"></main><div id="overlay" style="display:none"></div><div class="msg" id="msg"></div><div id="tip"></div>
 <script id="data" type="application/json">__DATA__</script>
 <script>
 const LIVE = __LIVE__, TOKEN = "__TOKEN__";
 let S = {};
 try { S = JSON.parse(document.getElementById("data").textContent || "{}") || {}; } catch (e) { S = {error: "could not read the page data: " + e}; }
-const ui = {tab: "live", shown: null, cache: {}, basis: "sig", hsort: {k: "value_sig", dir: -1}, hq: "", hl: "", hr: false, hall: false, al: "", aq: "", aall: false, feed: "", hf: "", sopen: null,
+const ui = {tab: "live", shown: null, cache: {}, basis: "sig", hsort: {k: "value_sig", dir: -1}, hq: "", hl: "", hr: false, hall: false, al: "", aq: "", aall: false, feed: "", hf: "", sopen: null, zoomId: null, zoomWin: null, range: 0, dropped: 0,
   page: 0, q: "", layer: "", haspos: false, mis: "", ev: "", evq: "", open: null, detail: null, updated: Date.now(), connected: false, errors: [], theme: "auto"};
 const TABS = {live: "Live", strategies: "Strategies", capital: "Capital", holdings: "Holdings", leaders: "Leaders", admin: "Admin"};   // dashboard_v4.md
-const LAYERS = ["recycler", "release", "mm", "scalp", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "position", "leaders"];   // controls
-const ORDER = ["position", "mm", "scalp", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "recycler", "release"];  // colour slots, fixed per layer
-const SLOT = {position: 1, manual: 1, mm: 2, scalp: 2, ladder: 3, pairs: 4, sniper: 5, fatfinger: 6, recycler: 7, inventory: 7, release: 8, dump: 9, longshot: 6};
-const NAMES = {position: "Position exits (AK, RI)", manual: "AK / RI manual positions", scalp: "Scalper", recycler: "Recycler", inventory: "Older inventory (recycler)",
+const LAYERS = ["recycler", "release", "mm", "scalp", "touch", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "position", "leaders"];   // controls
+const ORDER = ["position", "mm", "scalp", "touch", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "recycler", "release"];  // colour slots, fixed per layer
+const SLOT = {position: 1, manual: 1, mm: 2, scalp: 2, touch: 9, ladder: 3, pairs: 4, sniper: 5, fatfinger: 6, recycler: 7, inventory: 7, release: 8, dump: 9, longshot: 6};
+const NAMES = {position: "Position exits (AK, RI)", manual: "AK / RI manual positions", scalp: "Scalper", touch: "Touch (big sellers)", recycler: "Recycler", inventory: "Older inventory (recycler)",
   release: "Capital release", mm: "Market maker", ladder: "Deep ladders", pairs: "Pair sets", sniper: "Sniper", fatfinger: "Fat-finger catcher", dump: "Dump catcher", longshot: "Longshot catcher",
   leaders: "Leaderboard logger", cash: "Cash", "old engine": "Old engine"};
 const FILTERS = new Set(["hq", "b-hlopts", "hr", "b-alopts", "aq", "b-evkinds", "evq", "q", "lf", "hp", "mis"]);
@@ -490,14 +492,23 @@ function basis() {
     `<button data-basis="${k}" class="${ui.basis === k ? "on" : ""}">${t}</button>`).join("")}</div>`;
 }
 
-function accountChart() {
+function accountChart(wid) {
   const s = obj(S.series), t = arr(s.t), sg = arr(s.account_sig), fr = arr(s.account_fair), rt = arr(s.rank_t), rk = arr(s.rank);
-  const A = t.map((x, i) => [val(x), val(sg[i]), val(fr[i])]).filter(p => p[0] != null && (p[1] != null || p[2] != null));
-  const K = rt.map((x, i) => [val(x), val(rk[i])]).filter(p => p[0] != null && p[1] != null);
+  let A = t.map((x, i) => [val(x), val(sg[i]), val(fr[i])]).filter(p => p[0] != null && (p[1] != null || p[2] != null));
+  ui.dropped = 0;                                         // day 6 §5.2: a sample that jumps > 5% against both neighbours is a glitch
+  A = A.filter((p, i) => { if (i === 0 || i === A.length - 1) return true; const a = A[i - 1], b = A[i + 1];
+    for (const j of [1, 2]) { if (p[j] == null || a[j] == null || b[j] == null) continue;
+      if (Math.abs(p[j] - a[j]) > 0.05 * Math.abs(a[j]) && Math.abs(p[j] - b[j]) > 0.05 * Math.abs(b[j])) { ui.dropped++; return false; } }
+    return true; });
+  if (ui.zoomWin) A = A.filter(p => p[0] >= ui.zoomWin[0] && p[0] <= ui.zoomWin[1]);
+  else if (ui.range) A = A.filter(p => p[0] >= Date.now() / 1000 - ui.range);
+  let K = rt.map((x, i) => [val(x), val(rk[i])]).filter(p => p[0] != null && p[1] != null);
+  if (ui.zoomWin) K = K.filter(p => p[0] >= ui.zoomWin[0] && p[0] <= ui.zoomWin[1]);
+  else if (ui.range) K = K.filter(p => p[0] >= Date.now() / 1000 - ui.range);
   if (A.length < 2 && K.length < 2) return na("Account history is not available yet (sampled every 2 minutes).");
   const start = val(obj(S.money).start) ?? 100000, ts = [...A.map(p => p[0]), ...K.map(p => p[0])];
   const t0 = Math.min(...ts), t1 = Math.max(...ts, t0 + 60);
-  const W = width("account"), L = 56, R = 104, T = 12, H1 = A.length >= 2 ? 210 : 0, G = K.length >= 2 ? (H1 ? 34 : 18) : 0, H2 = K.length >= 2 ? 84 : 0, B = 26, H = T + H1 + G + H2 + B;
+  const W = width(wid || "account"), L = 56, R = 104, T = 12, H1 = A.length >= 2 ? 210 : 0, G = K.length >= 2 ? (H1 ? 34 : 18) : 0, H2 = K.length >= 2 ? 84 : 0, B = 26, H = T + H1 + G + H2 + B;
   const X = v => L + (v - t0) / (t1 - t0) * (W - L - R);
   let g = "";
   const tt = timeTicks(t0, t1, W - L - R);
@@ -538,7 +549,7 @@ function accountChart() {
   const yb = T + H1 + G + H2;
   g += `<line x1="${L}" x2="${W - R}" y1="${yb}" y2="${yb}" class="zl"/>` + tt.ticks.map(v => `<text x="${f1(X(v))}" y="${yb + 17}" text-anchor="middle">${esc(tt.label(v))}</text>`).join("");
   g += `<line id="xh-account" class="xh" x1="0" x2="0" y1="${T}" y2="${yb}" display="none"/>` + series.map((s, i) => `<circle id="xh-account-${i}" r="4" fill="${s.color}" class="ring" display="none"/>`).join("");
-  g += `<rect data-chart="account" x="${L}" y="${T}" width="${W - L - R}" height="${yb - T}" fill="transparent"/>`;
+  g += `<rect data-chart="account" data-drag="1" x="${L}" y="${T}" width="${W - L - R}" height="${yb - T}" fill="transparent"/>`;
   CH.account = {id: "account", L, R, W, t0, t1, X, series};
   const leg = [];
   if (H1) leg.push([`<i class="lk" style="background:var(--s1)"></i>`, "SIG marks (leaderboard)"], [`<i class="lk" style="background:var(--s2)"></i>`, "Polymarket fair"]);
@@ -925,10 +936,12 @@ function strat4() {
 }
 
 // ---- Capital
-function spark(hist) {
-  const pts = arr(hist).map(p => [val(p[0]), val(p[1])]).filter(p => p[0] != null && p[1] != null);
+function spark(hist, big) {
+  let pts = arr(hist).map(p => [val(p[0]), val(p[1])]).filter(p => p[0] != null && p[1] != null);
+  if (big && ui.zoomWin) pts = pts.filter(p => p[0] >= ui.zoomWin[0] && p[0] <= ui.zoomWin[1]);
+  else if (big && ui.range) pts = pts.filter(p => p[0] >= Date.now() / 1000 - ui.range);
   if (pts.length < 2) return `<div class="mute" style="font-size:12px">24 h sparkline: not enough samples yet</div>`;
-  const W = 260, H = 40, t0 = pts[0][0], span = Math.max(1, pts[pts.length - 1][0] - t0), hi = Math.max(1, ...pts.map(p => p[1]));
+  const W = big ? width("ovl") : 260, H = big ? 320 : 40, t0 = pts[0][0], span = Math.max(1, pts[pts.length - 1][0] - t0), hi = Math.max(1, ...pts.map(p => p[1]));
   const X = t => (t - t0) / span * (W - 2) + 1, Y = v => H - 2 - v / hi * (H - 4);
   return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="capital use, 24 h"><line x1="1" x2="${W - 1}" y1="${f1(Y(0.4))}" y2="${f1(Y(0.4))}" class="gl"/><path d="${linePath(pts, X, Y)}" class="ln" stroke="var(--s1)"/></svg><div class="mute" style="font-size:11px">24 h · the line is the 40% floor of day 5 §3</div>`;
 }
@@ -939,16 +952,17 @@ function cap4() {
   const tiles = `<div class="tiles t4">
     ${tile("Free cash <span class='mute' style='font-weight:400'>(above the 5k floor)</span>", num(c.free_cash), `cash ${num(c.cash)} · reserve ${num(obj(S.capital).reserve)}`)}
     ${tile("In use", num(c.in_use), `dump tranches ${num(c.tranches)} · scalper ${num(c.scalper)}${val(c.scalp_slice) ? ` of ${num(c.scalp_slice)}` : ""} · takes ${num(c.takes)}${obj(c.idle_rule).scalp_bonus ? ` · idle rule +${num(obj(c.idle_rule).scalp_bonus)}` : ""}${val(obj(c.idle_rule).roc_until) > Date.now() / 1000 ? " · takes at ROC ≥ 8%" : ""}`)}
-    ${tile("Capital use", use == null ? "–" : pct(use, 0), spark(c.use_hist), use != null && use < 0.4 ? "warn" : "")}
+    ${tile("Capital use", use == null ? "–" : pct(use, 0), spark(c.use_hist) + `<button class="btn zoom-btn" data-zoom="spark" title="Expand" style="margin-top:4px">⤢</button>`, use != null && use < 0.4 ? "warn" : "")}
     ${tile("Party exposure", `<span style="font-size:22px">D ${num(p.D)} · R ${num(p.R)}</span>`, `held dump inventory at cost, caps ${num(capP)} each${(p.D >= capP || p.R >= capP) ? ' · <b class="bad">at cap</b>' : ""}`)}</div>`;
   const bk = arr(c.bar).filter(b => b && val(b.sig) > 0), tot = bk.reduce((a, b) => a + val(b.sig), 0) || 1;
   const col = {floor: "var(--neutral)", reserve: "var(--s4)", free: "var(--s3)", tranches: "var(--s9)", settle: "var(--s7)"};
   const bar = bk.length ? `<div class="sbar" role="img" aria-label="capital, to scale">${bk.map(b => `<i style="flex:${(val(b.sig) / tot * 100).toFixed(3)} 1 0;background:${col[b.key] || "var(--neutral)"}"${tipAttr(`<b>${esc(b.label)}</b><div>${num(b.sig)} (${pct(val(b.sig) / tot)})</div>`)}></i>`).join("")}</div>
     ${legend(bk.map(b => [sw(col[b.key] || "var(--neutral)"), `${esc(b.label)} ${num(b.sig)}`]))}` : na("Not available yet.");
   const r = obj(c.released);
-  const rel = val(r.sig) == null ? na("No release today.") : `<div class="sub">${num(r.fills)} fills · freed <b>${num(r.sig)}</b> · realized <b class="${cls(r.realized)}">${sgn(r.realized)}</b> vs entry · <b class="${cls(r.vs_fair)}">${sgn(r.vs_fair)}</b> vs fair (${pct(r.avg_cost)} average cost)
+  const br = obj(r.by_branch), brs = Object.keys(br).length ? " · " + Object.entries(br).map(([k, v]) => `${esc(k)} ${num(v)}`).join(", ") : "";
+  const rel = val(r.sig) == null ? na("No release this SIG day.") : `<div class="sub">${num(r.fills)} fills · freed <b>${num(r.sig)}</b>${brs} · realized <b class="${cls(r.realized)}">${sgn(r.realized)}</b> vs entry · <b class="${cls(r.vs_fair)}">${sgn(r.vs_fair)}</b> vs fair (${pct(r.avg_cost)} average cost)
     ${obj(r.demand).constrained != null ? ` · dump catcher ${obj(r.demand).constrained ? `<b class="warn">cash-constrained</b> (needs ${num(obj(r.demand).need)}, funded ${num(obj(r.demand).funded)})` : "funded"}` : ""}</div>`;
-  return `${tiles}<div class="card"><h3>Where the money is, to scale</h3>${bar}</div><div class="card"><h3>Release today <span class="mute" style="font-weight:400">(sold only at a profit, or to fund the dump catcher)</span></h3>${rel}</div>`;
+  return `${tiles}<div class="card"><h3>Where the money is, to scale</h3>${bar}</div><div class="card"><h3>Release today <span class="mute" style="font-weight:400">(SIG day, since 17:00 PT; sold only at a profit, or to fund the dump catcher)</span></h3>${rel}</div>`;
 }
 
 // ---- Holdings
@@ -989,6 +1003,11 @@ function lead4() {
   const mineD = day.my_rank == null ? "" : `<tr style="font-weight:700;background:var(--chip)"><td class="n">${num(day.my_rank)}</td><td>us</td><td class="n">${sgn(SD().today)}</td><td class="n">of ${num(day.total)}</td></tr>`;
   return `<div class="grid2"><div class="card"><h3>Overall</h3><div class="wrap"><table><thead><tr><th class="n">#</th><th>Account</th><th class="n">P&L</th><th class="n">Trades</th></tr></thead><tbody>${rowsO || '<tr><td colspan="4" class="mute">no sample yet</td></tr>'}${lines}${mine}</tbody></table></div></div>
     <div class="card"><h3>Today (SIG day, ${since17()})</h3><div class="wrap"><table><thead><tr><th class="n">#</th><th>Account</th><th class="n">P&L today</th><th class="n">Trades</th></tr></thead><tbody>${rowsD || '<tr><td colspan="4" class="mute">daily board not read yet</td></tr>'}${mineD}</tbody></table></div>${day.t ? `<div class="mute" style="font-size:12px">read ${esc(when(day.t))}</div>` : ""}</div></div>
+    <div class="card" style="margin-top:12px"><h3>Who made money today, and on what <span class="mute" style="font-weight:400">(daily board every 5 min; a gain ≥ 1k between reads matched to the tape ±5 min)</span></h3>
+      ${arr(L.jumps).length ? `<div class="wrap"><table><thead><tr><th>When</th><th>Account</th><th class="n">Daily #</th><th class="n">Gain</th><th class="n">Trades</th><th>Likely trade</th><th class="n">We caught</th><th>Why not</th></tr></thead><tbody>
+      ${arr(L.jumps).map(j => (arr(j.likely).length ? arr(j.likely) : [null]).map(lk => `<tr><td class="mute">${esc(String(j.t || "").slice(11, 16))}</td><td>${esc(j.name)}</td><td class="n">${num(j.rank)}</td><td class="n good">${sgn(j.gain)}</td><td class="n">${num(j.trades)}</td>
+        <td class="txt">${lk ? `${esc(lk.market)} · ${esc(lk.who || "")} · ${num(lk.shares)} sh at ${esc(lk.px)} · value ${num(lk.value)}` : '<span class="mute">no big tape event in the window (marks moving on a held book?)</span>'}</td>
+        <td class="n">${lk ? num(lk.caught) : ""}</td><td class="txt">${lk ? esc(lk.why_not || "") : ""}</td></tr>`).join("")).join("")}</tbody></table></div>` : na("No jump ≥ 1k yet on today's board.")}</div>
     <div class="card" style="margin-top:12px"><h3>Last hour: who gained most</h3>${mv.length ? `<div class="wrap"><table><tbody>${mv.map(m => `<tr><td>#${num(m.rank)} ${esc(m.name)}</td><td class="n ${cls(m.d_pnl)}">${sgn(m.d_pnl)}</td><td class="mute">see the market events of the last hour in the Live feed</td></tr>`).join("")}</tbody></table></div>` : na("Not enough samples yet (needs two leaderboard reads an hour apart).")}</div>`;
 }
 
@@ -1001,7 +1020,7 @@ function admin4() {
   return `<div class="grid">
     <div class="card"><h3>Health</h3><div>reads <b>${num(sig.reads_last_min)}</b>/${num(sig.read_limit)} · writes <b>${num(sig.writes_last_min)}</b>/${num(sig.write_limit)} per min</div>
       <div>429s (10 min) <b class="${val(sig.throttled) > 5 ? "bad" : ""}">${num(sig.throttled)}</b> · reads failing ${pct(obj(sig.read).bad_rate, 0)} · writes failing ${pct(obj(sig.write).bad_rate, 0)}</div>
-      <div>loop <b>${num(h.loop_s, 1)} s</b> · errors last hour <b class="${h.errors ? "bad" : ""}">${num(h.errors)}</b></div><div class="mute" style="font-size:12px">feeds: ${feeds}</div></div>
+      <div>loop <b>${num(h.loop_s, 1)} s</b> · errors last hour <b class="${h.errors ? "bad" : ""}">${num(h.errors)}</b> · chart samples dropped as glitches <b>${num(ui.dropped || 0)}</b></div><div class="mute" style="font-size:12px">feeds: ${feeds}</div></div>
     <div class="card"><h3>Audits</h3><div>I2 trims <b>${esc(JSON.stringify(a.trims || {}))}</b></div><div>foreign orders <b class="${a.foreign ? "bad" : ""}">${num(a.foreign)}</b> · duplicates <b class="${a.duplicates ? "bad" : ""}">${num(a.duplicates)}</b> · UNKNOWN writes <b class="${a.unknown ? "bad" : ""}">${num(a.unknown)}</b></div>
       <div class="${rc.ok === false ? "nok" : "ok"}">${rc.ok === false ? "⚠" : "✓"} today ${sgn(rc.today)} = Σ strategies ${sgn(rc.sum)} + drift ${sgn(rc.drift)}${rc.check == null ? "" : ` · drift from the 17:00 snapshot ${sgn(rc.estimate)} (off by ${sgn(rc.check)})`}</div>
       ${rc.note ? `<div class="mute" style="font-size:12px">${esc(rc.note)}</div>` : ""}</div>
@@ -1012,12 +1031,13 @@ function admin4() {
     <div class="card"><h3>Release and intel</h3><div>running <b>${esc(a.release || ST().release || "–")}</b></div><div class="mute" style="font-size:12px">deploy log: docs/RUN_LOG.md · intel: data/intel/report.md · impact: docs/impact_P1_P2.md</div></div></div>`;
 }
 
+const zb = id => `<span class="spacer"></span><button class="btn zoom-btn" data-zoom="${id}" title="Expand">⤢</button>`;
 const SKEL = {
   live: () => `<section><div id="b-liveTiles"></div></section>
-    <section><div class="grid2"><div class="card chart"><div class="chead"><h3>Daily P&L by SIG day</h3></div><div id="b-daily4"></div></div>
-      <div class="card chart"><div class="chead"><h3>Account value over time</h3></div><div id="b-account"></div></div></div></section>
+    <section><div class="grid2"><div class="card chart"><div class="chead"><h3>Daily P&L by SIG day</h3>${zb("daily4")}</div><div id="b-daily4"></div></div>
+      <div class="card chart"><div class="chead"><h3>Account value over time</h3>${zb("account")}</div><div id="b-account"></div></div></div></section>
     <section><div class="chead"><h3>Activity</h3><span class="spacer"></span><span id="b-feedopts"></span></div><div id="b-feed"></div></section>`,
-  strategies: () => `<section><div id="b-strat4"></div><div class="card chart" style="margin-top:12px"><div class="chead"><h3>P&L by strategy per SIG day</h3></div><div id="b-daily4b"></div></div>
+  strategies: () => `<section><div id="b-strat4"></div><div class="card chart" style="margin-top:12px"><div class="chead"><h3>P&L by strategy per SIG day</h3>${zb("daily4b")}</div><div id="b-daily4b"></div></div>
     <details class="card more"><summary>Pair sets</summary><div id="b-pairs"></div></details><details class="card more"><summary>AK / RI exit ladders</summary><div id="b-ladders"></div></details></section>`,
   capital: () => `<section><div id="b-cap4"></div></section>`,
   holdings: () => `<section><div id="b-hold4"></div></section>`,
@@ -1070,6 +1090,21 @@ function draw() {
   setHTML("themeBtn", {auto: "Theme: auto", light: "Theme: light", dark: "Theme: dark"}[ui.theme] || "Theme");
   if (ui.shown !== ui.tab) { document.getElementById("main").innerHTML = SKEL[ui.tab](); ui.shown = ui.tab; ui.cache = {}; }
   for (const [id, fn] of Object.entries(BLOCKS[ui.tab])) put(id, block(id, fn));
+  drawOverlay();
+}
+const ZOOM = {daily4: ["Daily P&L by SIG day", () => daily4("ovl"), false], daily4b: ["P&L by strategy per SIG day", () => daily4("ovl"), false],
+              account: ["Account value over time", () => accountChart("ovl"), true], spark: ["Capital use, 24 h", () => spark(obj(S.capital4).use_hist, true), true]};
+const RANGES = [["6h", 6 * 3600], ["24h", 86400], ["3d", 3 * 86400], ["all", 0]];
+function drawOverlay() {
+  const ov = document.getElementById("overlay"); if (!ov) return;
+  if (!ui.zoomId || !ZOOM[ui.zoomId]) { ov.style.display = "none"; ov.innerHTML = ""; ui.cache.ovl = null; return; }
+  const [title, fn, timed] = ZOOM[ui.zoomId];
+  ov.style.display = "block";
+  const head = `<div class="ovl-head"><h3>${esc(title)}</h3>${timed ? `<div class="seg">${RANGES.map(([k, s]) => `<button data-range="${s}" class="${(ui.range || 0) === s && !ui.zoomWin ? "on" : ""}">${k}</button>`).join("")}</div>` : ""}
+    <span class="mute" style="font-size:12px">${timed ? "drag to zoom · double-click resets · " : ""}Esc closes</span><span class="spacer"></span><button class="btn" data-zoomclose="1">✕</button></div>`;
+  const html = head + `<div id="b-ovl" class="chart"></div>`;
+  if (ov._h !== html) { ov._h = html; ov.innerHTML = html; }
+  put("ovl", block("ovl", fn));
 }
 
 function apply(msg, kind) {
@@ -1159,6 +1194,9 @@ document.addEventListener("click", e => {
   const t = e.target; if (!t || !t.closest) return;
   const th = t.closest("th[data-sort]");
   if (th) { const k = th.dataset.sort, c = (ui.tab === "holdings" ? H4 : HCOLS).find(c => c.k === k) || {}; ui.hsort = {k, dir: ui.hsort.k === k ? -ui.hsort.dir : c.n ? -1 : 1}; draw(); return; }
+  const zm = t.closest("[data-zoom]"); if (zm) { ui.zoomId = zm.dataset.zoom; ui.zoomWin = null; draw(); return; }
+  const zc = t.closest("[data-zoomclose]"); if (zc) { ui.zoomId = null; ui.zoomWin = null; draw(); return; }
+  const rg = t.closest("[data-range]"); if (rg) { ui.range = +rg.dataset.range || 0; ui.zoomWin = null; draw(); return; }
   const fd = t.closest("[data-feed]"); if (fd) { ui.feed = fd.dataset.feed; draw(); return; }
   const hf = t.closest("[data-hf]"); if (hf) { ui.hf = hf.dataset.hf; ui.hall = false; draw(); return; }
   const sk = t.closest("tr.click[data-skey]"); if (sk) { if (!t.closest(".drawer")) { ui.sopen = ui.sopen === sk.dataset.skey ? null : sk.dataset.skey; draw(); } return; }
@@ -1201,6 +1239,12 @@ document.addEventListener("change", e => {
 });
 if (typeof window !== "undefined" && window.addEventListener) {
   let rz = 0; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(draw, 150); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && ui.zoomId) { ui.zoomId = null; ui.zoomWin = null; draw(); } });
+  let drag = null;
+  const tAt = (el, x) => { const C = CH[el.getAttribute("data-chart")], r = el.ownerSVGElement.getBoundingClientRect(); return C ? C.t0 + (x - r.left - C.L) / (C.W - C.L - C.R) * (C.t1 - C.t0) : null; };
+  document.addEventListener("mousedown", e => { const el = e.target.closest && e.target.closest("[data-drag]"); if (el && ui.zoomId) drag = {el, x0: e.clientX, t0: tAt(el, e.clientX)}; });
+  document.addEventListener("mouseup", e => { if (!drag) return; const t1 = tAt(drag.el, e.clientX); if (t1 != null && Math.abs(e.clientX - drag.x0) > 8) { ui.zoomWin = [Math.min(drag.t0, t1), Math.max(drag.t0, t1)]; draw(); } drag = null; });
+  document.addEventListener("dblclick", e => { if (e.target.closest && e.target.closest("[data-drag]")) { ui.zoomWin = null; ui.range = 0; draw(); } });
 }
 
 draw();

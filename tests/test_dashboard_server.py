@@ -307,6 +307,10 @@ ui.hf = "noexit"; draw(); if (rowsOf(out("hold4")).length !== {n_noexit}) fail("
 ui.hf = ""; ui.hall = false; draw();
 if (rowsOf(out("hold4")).length !== Math.min(HOLD_FIRST, {len(h)})) fail("holdings: first rows");
 ui.tab = "leaders"; draw(); if (!out("lead4").includes("Overall") || !out("lead4").includes("SIG day")) fail("leaders: two halves");
+for (const z of Object.keys(ZOOM)) {{ ui.tab = z === "spark" ? "capital" : "live"; ui.zoomId = z; draw(); if (!out("ovl").length) fail("zoom overlay empty: " + z); for (const [k, sec] of RANGES) {{ ui.range = sec; draw(); }} ui.range = 0; ui.zoomWin = [0, 4e9]; draw(); ui.zoomWin = null; }}
+ui.zoomId = null; draw(); check("zoom overlay");
+ui.tab = "leaders"; S.leaders4.jumps = [{{t: "2026-10-05 09:12:00", name: "clever-otter", rank: 3, gain: 2400, trades: 2, likely: [{{market: "RI Senate D", who: "YES seller", px: "0.84-0.87", shares: 112000, value: 14000, caught: 956, why_not: "levels below the sweep"}}]}}]; draw();
+if (!out("lead4").includes("clever-otter") || !out("lead4").includes("levels below the sweep")) fail("leaders: jump table");
 ui.tab = "admin"; draw();
 if (!out("admin4").includes("✓")) fail("admin: reconciliation check not shown as ok");
 if (out("admin4").includes("nok")) fail("admin: red check although ok");

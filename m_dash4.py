@@ -25,8 +25,8 @@ def sig_day_start(now=None):
 
 
 def sig_day_label(start):
-    """'Oct 4 (SIG day)': the PT date on which the SIG day started at 17:00."""
-    return time.strftime("%b %-d", time.localtime(start))
+    """Day 6 §5.3: a SIG day is labelled by its UTC date: the day that starts Oct 4 17:00 PT (= Oct 5 00:00 UTC) is 'Oct 5'."""
+    return time.strftime("%b %-d", time.gmtime(start + 60))
 
 
 def pnl_at(pts, t):
@@ -205,15 +205,16 @@ def strategies_v4(eng, now, sigday, since_oct1_fills):
             last[l].append(dict(t=f["t"], text=eng.fill_sentence(f)))
     hold = bool(c.d.get("hold_gates"))
     rows = []
-    for key in ["dump", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"]:
+    for key in ["dump", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"]:
         st = c.state(key)
         v = c.layer(key)
-        status = "PAUSED" if c.paused and key not in ("recycler", "release", "position") else "HELD" if (st == "pilot" and hold and key not in (c.d.get("gate_free") or [])) \
-            or (key == "mm" and (v.get("caps") or {}).get("inventory") == 0) else {"full": "LIVE", "pilot": "PILOT", "off": "OFF"}.get(st, st.upper())
-        why = v.get("killed", {}).get("reason") if v.get("killed") else ("gate held" if status == "HELD" else "")
+        status = "PAUSED" if c.paused and key not in ("recycler", "release", "position") else "HELD" if (key == "mm" and (v.get("caps") or {}).get("inventory") == 0) \
+            else {"full": "LIVE", "pilot": "PILOT", "off": "OFF"}.get(st, st.upper())
+        why = v.get("killed", {}).get("reason") if v.get("killed") else ("gate held (hold_gates)" if st == "pilot" and hold and key not in (c.d.get("gate_free") or [])
+                                                                        else "inventory cap 0" if status == "HELD" else "")
         t_ = sigday["strategies"].get(key, {})
         rows.append(dict(key=key, label=eng.LABELS.get(key, (key,))[0], what=eng.LABELS.get(key, ("", ""))[1], status=status, why=why,
-                         resting=resting.get(key, 0), cash_in_use=round(eng.scalp_cost() if key == "scalp" else cap.get("manual" if key == "position" else key, 0.0), 2),
+                         resting=resting.get(key, 0), cash_in_use=round(eng.scalp_cost() if key == "scalp" else eng.touch_cost() if key == "touch" else cap.get("manual" if key == "position" else key, 0.0), 2),
                          trades_today=t_.get("trades", 0), pnl_today=t_.get("pnl", 0.0),
                          pnl_since=round(all_strat.get(key, {}).get("pnl", 0.0), 2), last=last.get(key, [])))
     return rows
@@ -224,8 +225,8 @@ def party_exposure(eng):
     out = {"D": 0.0, "R": 0.0, "other": 0.0}
     for ex, books in eng.ledger.subbooks.items():
         for sub, q in books.items():
-            if not sub.startswith("dump:") or abs(q) < 1:
-                continue
+            if not (sub.startswith("dump:") or sub.startswith("touch:")) or abs(q) < 1:
+                continue                                    # day 6 §2: the touch book shares the 40k party cap
             side = "yes" if q > 0 else "no"
             t = eng.ledger.tranches.get(sub) or {}
             avg = t.get("avg") or eng.sig_mark(ex, side) or 0.5
@@ -318,7 +319,8 @@ def leaders_v4(eng):
                         movers.append(dict(name=r["name"], d_pnl=round(float(r["value"]) - prev[r["name"]], 2), rank=int(r["rank"] or 0)))
                 movers.sort(key=lambda m: -m["d_pnl"])
     day = eng.read_json(os.path.join(eng.DATA, "leaders_day.json"), {}) or {}
-    return dict(overall=sorted(overall, key=lambda r: r["rank"]), ours=ours, lines=lines, daily=day, movers=movers[:5])
+    jumps = eng.read_json(os.path.join(eng.DATA, "leaders_jumps.json"), []) or []
+    return dict(overall=sorted(overall, key=lambda r: r["rank"]), ours=ours, lines=lines, daily=day, movers=movers[:5], jumps=jumps[-40:][::-1])
 
 
 def admin_v4(eng, now, sigday):

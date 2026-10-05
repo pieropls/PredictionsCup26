@@ -1632,10 +1632,12 @@ class DumpV3Tests(EngineCase):
     def test_concentration_cap_counts_the_position_and_is_stable(self):
         fake, eng, favs = self.rig()
         ex = favs[0]
-        fake.pos[ex] = 13_000
-        fake.avg_cost[ex] = 0.95                          # 12.35k at cost: no room under the 12k cap
+        cap = next(c for lo, c in a_config.DUMP_CONC_CAPS if eng.fair[ex] >= lo - 1e-9)   # day 6 §1.2: 20k / 15k / 12k by fair
+        fake.pos[ex] = int(cap / 0.95) + 500
+        fake.avg_cost[ex] = 0.95                          # above the cap at cost: no room
         self.settle(eng, fake, favs, 4)
         self.assertFalse(self.dump_orders(eng, fake, ex))
+        self.assertIn(cap, (12_000, 15_000, 20_000))
         self.assertTrue(self.dump_orders(eng, fake, favs[1]))
         seen = []
         for _ in range(4):
@@ -1708,21 +1710,23 @@ class DumpV3Tests(EngineCase):
         fake, eng, favs = self.rig(state="full")
         now = time.time()
         c = eng.controls
-        c.d["ratchet"] = {"dump": dict(level=0, since=now - 2 * 3600 - 10, hold_until=0.0, history=[])}
-        eng.ratchet("dump", now)                          # no fills: the gate fails -> stays 0, holds 2 h
+        c.d["ratchet"] = {"dump": dict(level=0, since=now - 3600 - 10, hold_until=0.0, history=[])}
+        eng.ratchet("dump", now)                          # day 6 §1.1: too few fills in the hour -> the level is held, not failed
         self.assertEqual(c.d["ratchet"]["dump"]["level"], 0)
-        self.assertGreater(c.d["ratchet"]["dump"]["hold_until"], now)
+        self.assertEqual(c.d["ratchet"]["dump"]["hold_until"], 0.0)
+        self.assertIsNone(c.d["ratchet"]["dump"]["history"][-1]["ok"])
+        self.assertTrue(any("ratchet held" in e["text"] for e in eng.events))
         from unittest import mock
-        c.d["ratchet"]["dump"].update(since=now - 2 * 3600 - 10, hold_until=0.0)
-        with mock.patch.object(eng, "dump_gate", return_value=dict(ok=True, why="test pass", stats={})):
+        c.d["ratchet"]["dump"].update(since=now - 3600 - 10, hold_until=0.0)
+        with mock.patch.object(eng, "dump_gate", return_value=dict(ok=True, why="test pass", stats=dict(fills=20))):
             eng.ratchet("dump", now)
         self.assertEqual(c.d["ratchet"]["dump"]["level"], 1)
         self.assertAlmostEqual(eng.ratchet_mult("dump"), 1.25)
-        self.assertTrue(any(e["kind"] == "RATCHET" for e in eng.events))
-        c.d["ratchet"]["dump"].update(since=now - 2 * 3600 - 10)
-        with mock.patch.object(eng, "dump_gate", return_value=dict(ok=False, why="test fail", stats={})):
+        c.d["ratchet"]["dump"].update(since=now - 3600 - 10)
+        with mock.patch.object(eng, "dump_gate", return_value=dict(ok=False, why="test fail", stats=dict(fills=20))):
             eng.ratchet("dump", now)
         self.assertEqual(c.d["ratchet"]["dump"]["level"], 0, "one notch back on the first failure")
+        self.assertGreater(c.d["ratchet"]["dump"]["hold_until"], now, "and a 1 h hold")
         # sizes follow the level but never pass 15k / funded / 2
         c.d["ratchet"]["dump"]["level"] = 10
         self.settle(eng, fake, favs, 3)
@@ -2186,13 +2190,25 @@ class Day4Tests(EngineCase):
         loop(eng, fake)
         eng.release_t, eng.dump_now = 0, {}
         self.assertNotIn(ex, eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage()), "no target, no profit: not sold")
-        eng.dump_now = {ex: [dict(side="yes", px=0.5, qty=200_000, sub="x", level=0)]}   # live levels need 100k: constrained
-        eng.ledger.fills.append(dict(key="d1", order="d1", ex=ex, side="yes", qty=1000.0, price=0.80, action="buy", realized=0.0,
+        eng.dump_now = {ex: [dict(side="yes", px=0.5, qty=200_000, sub="x", level=0)]}
+        ex_d = next(b.ex for b in eng.bots if b.kind == "market" and b.ex != ex)   # the dump fills are on another market
+        eng.ledger.fills.append(dict(key="d1", order="d1", ex=ex_d, side="yes", qty=5000.0, price=0.80, action="buy", realized=0.0,
                                      t=time.strftime("%Y-%m-%d %H:%M:%S"), bot="b", layer="dump", before_engine=False, fair=0.95,
-                                     edge=0.15, sig_edge=0.0, sig_mid=0.82))          # the dump catcher earned 18.75%/day
+                                     edge=0.15, sig_edge=0.0, sig_mid=0.82))          # 4k of dump fills in 30 min, 18.75%/day
         eng.release_t = 0
         plan = eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage())
+        self.assertNotIn(ex, plan, "day 6 §3.3: free cash is not below 10k: not constrained, nothing sold for funding")
+        eng.release_t = 0
+        plan = eng.release_plan(a_config.CASH_RESERVE + 8_000, time.time(), eng.bucket_usage())   # free 8k < 10k and >= 3k of fills
         self.assertEqual(plan.get(ex, {}).get("why"), "demand", plan)
+        self.assertTrue(eng.constrained)
+        self.assertLessEqual(sum(plan[ex]["subs"].values()) * plan[ex]["px"], 2_000 + 1, "only the shortfall up to 10k free")
+        eng.ledger.fills.append(dict(key="d2", order="d2", ex=ex, side="no", qty=2000.0, price=0.40, action="buy", realized=0.0,
+                                     t=time.strftime("%Y-%m-%d %H:%M:%S"), bot="b", layer="sniper", before_engine=False, fair=0.5,
+                                     edge=0.0, sig_edge=0.0, sig_mid=0.5))            # the holding was opened just now (< 24 h)
+        eng.release_t = 0
+        self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 8_000, time.time(), eng.bucket_usage()), "never a holding bought < 24 h ago")
+        eng.ledger.fills.pop()
         eng.controls.set_paused(True, "t")               # never while new risk is paused
         eng.release_t = 0
         self.assertEqual(eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage()), {})
@@ -2465,7 +2481,7 @@ class DashV4PayloadTests(EngineCase):
         sd = s["sigday"]
         self.assertTrue(sd["ok"])
         rows = s["strategies4"]
-        self.assertEqual([r["key"] for r in rows], ["dump", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])
+        self.assertEqual([r["key"] for r in rows], ["dump", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])
         self.assertEqual(next(r for r in rows if r["key"] == "mm")["trades_today"], 1)
         self.assertAlmostEqual(sum(r["pnl_today"] for r in rows) + sd["drift"], sd["today"], delta=25, msg="Strategies total = Live today")
         self.assertAlmostEqual(sum(h["value_sig"] for h in s["holdings4"]), s["capital4"]["holdings"], places=2, msg="Holdings total = Capital in holdings")
@@ -2674,7 +2690,7 @@ class ScalperTests(EngineCase):
         self.assertEqual(eng.controls.state("scalp"), "full")
         self.assertEqual(eng.scalp_slice(), a_config.LAYER_CAPS["scalp"]["inventory"][1])
         with eng.controls.lock:                           # the ratchet: a passing gate 2 h later raises the slice x1.25
-            eng.controls.d["ratchet"] = {"scalp": dict(level=0, since=time.time() - a_config.RATCHET_EVERY_S - 1, hold_until=0.0, history=[])}
+            eng.controls.d["ratchet"] = {"scalp": dict(level=0, since=time.time() - 2 * 3600 - 1, hold_until=0.0, history=[])}   # 2-h cadence
         loop(eng, fake)
         self.assertEqual(eng.controls.d["ratchet"]["scalp"]["level"], 1)
         self.assertAlmostEqual(eng.scalp_slice(), 12_500.0)
@@ -2710,6 +2726,188 @@ class ScalperTests(EngineCase):
         eng.pause_t = now - 600
         eng.idle_rule(now)
         self.assertEqual(eng.controls.d["idle"]["scalp_bonus"], 0)
+
+
+class LiveDataGuardTests(EngineCase):
+    def test_an_engine_on_the_live_data_dir_refuses_without_live(self):
+        """Day 6 §5.2: the 19:52 incident can't repeat: Engine() on the repo's data/ raises unless started with --live."""
+        self.addCleanup(setattr, f_engine, "DATA", f_engine.DATA)
+        f_engine.DATA = f_engine.Engine.LIVE_DATA
+        self.assertNotIn("--live", sys.argv)
+        with self.assertRaises(RuntimeError):
+            engine(new_fake())
+        self.assertNotEqual(os.path.realpath(os.environ.get("SIG_DATA", "")), os.path.realpath(f_engine.Engine.LIVE_DATA))
+
+
+class TouchTests(EngineCase):
+    """Day 6 §2: join the SIG best bid on >= 93% favourites whose bid sits >= 6c under fair (never improve, never cross),
+    2,000 shares, one per side; <= 8k per race incl. holdings, the layer budget (pilot 7.5k), the 40k party cap; exits at
+    max(entry + 1.5c, ask - 1 tick); news guard; yields to the dump catcher; the 4-h gate; a failed scalper gate hands its
+    slice to touch."""
+
+    def rig(self, state="pilot", cash_above_floor=60_000, gap=0.08):
+        fresh_data(layers=dict(position=dict(state="full"), touch=dict(state=state)))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + cash_above_floor)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None
+                and eng.fair[b.ex] >= a_config.TOUCH_MIN_FAIR + 0.01]
+        self.assertGreaterEqual(len(favs), 3)
+        for ex in favs:                                   # SIG trades far under Polymarket on these favourites
+            bid = bots.tick_down(round(eng.fair[ex] - gap, 3))
+            fake.px[ex] = (bid, round(bid + a_config.TICK, 3), bid)
+        return fake, eng, favs
+
+    def touch_orders(self, eng, fake, ex=None, layer="touch"):
+        return [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == layer
+                and (ex is None or o["ex"] == ex)]
+
+    def test_joins_the_bid_on_eligible_sides_within_the_budget(self):
+        fake, eng, favs = self.rig()
+        loop(eng, fake)
+        mine = self.touch_orders(eng, fake)
+        self.assertTrue(mine)
+        for o in mine:
+            self.assertIn(o["ex"], favs)
+            self.assertEqual(o["side"], "yes")
+            self.assertAlmostEqual(o["price"], fake.px[o["ex"]][0], places=3, msg="joins the best bid, never improves")
+            self.assertLessEqual(o["price"], eng.fair[o["ex"]] - a_config.TOUCH_GAP + 1e-9)
+            self.assertLessEqual(o["qty"], a_config.TOUCH_CLIP)
+            self.assertEqual(eng.ledger.orders[o["id"]]["sub"], f"touch:{o['ex']}:yes")
+        self.assertEqual(max(o["qty"] for o in mine), a_config.TOUCH_CLIP, "2,000-share clips (the last one takes the budget's remainder)")
+        self.assertEqual(len(mine), len({o["ex"] for o in mine}), "one bid per side")
+        self.assertLessEqual(sum(o["qty"] * o["price"] for o in mine), a_config.LAYER_CAPS["touch"]["budget"][0] + 1e-6, "pilot budget 7.5k")
+        self.assertEqual(engine_order_problems(fake, eng.ledger), [])
+        ex = mine[0]["ex"]
+        bid = bots.tick_down(round(eng.fair[ex] - 0.05, 3))           # only 5c under fair: not a touch side
+        fake.px[ex] = (bid, round(bid + a_config.TICK, 3), bid)
+        loop(eng, fake)
+        loop(eng, fake)
+        self.assertEqual(self.touch_orders(eng, fake, ex), [])
+
+    def test_fill_exit_round_trip_and_gate(self):
+        fake, eng, favs = self.rig()
+        loop(eng, fake)
+        o = self.touch_orders(eng, fake)[0]
+        ex, px = o["ex"], o["price"]
+        fake.fill(o["id"], o["qty"])
+        loop(eng, fake)
+        sub = f"touch:{ex}:yes"
+        self.assertEqual(eng.ledger.subbooks[ex].get(sub), o["qty"])
+        xs = self.touch_orders(eng, fake, ex, layer="touchexit")
+        self.assertEqual(len(xs), 1, xs)
+        ask_y = fake.px[ex][1]
+        want_px = bots.tick_up(round(max(ask_y - a_config.TICK, px + a_config.TOUCH_SELL_MIN), 6))
+        self.assertAlmostEqual(1 - xs[0]["price"], want_px, places=3, msg="max(entry + 1.5c, ask - 1 tick)")
+        self.assertEqual(eng.ledger.tranches[sub]["kind"], "touch")
+        self.assertTrue(any("TOUCH FILL" in e["text"] for e in eng.events))
+        fake.fill(xs[0]["id"], xs[0]["qty"])
+        loop(eng, fake)
+        self.assertEqual(eng.ledger.tranches[sub]["state"], "closed")
+        s = eng.touch_stats(time.time() - 3600)
+        self.assertEqual((s["fills"], s["round_trips"]), (1, 1))
+        self.assertGreater(s["realized"], 0)
+        self.assertGreaterEqual(s["avg_gap"], a_config.TOUCH_GAP - 1e-9)
+        self.assertFalse(eng.touch_gate(time.time() - 3600, time.time())["ok"], "1 fill < 10")
+        eng.touch_stats = lambda since: dict(fills=12, shares=24_000, cost=20_000, avg_gap=0.07, markout_fair=0.065, round_trips=3, realized=90.0, held_cost=9_000, ev_settle=600)
+        self.assertTrue(eng.touch_gate(time.time() - 3600, time.time())["ok"])
+
+    def test_news_guard_yield_and_race_cap(self):
+        fake, eng, favs = self.rig()
+        loop(eng, fake)
+        ex = max((o["ex"] for o in self.touch_orders(eng, fake)), key=lambda e_: eng.fair[e_])
+        self.assertGreaterEqual(eng.fair[ex], a_config.TOUCH_MIN_FAIR + 0.022)
+        FAIR[ex] = eng.fair[ex] - 0.022                   # Polymarket down 2.2c in 10 min on that favourite (still >= 93%)
+        try:
+            for _ in range(3):
+                loop(eng, fake)
+            self.assertGreater(eng.touch_block.get((ex, "yes"), 0), time.time())
+            self.assertEqual(self.touch_orders(eng, fake, ex), [], "the news guard pulls the bid for 30 min")
+        finally:
+            FAIR.pop(ex, None)
+        fake, eng, favs = self.rig(cash_above_floor=12_000)       # the dump catcher's funded reserve 12k < 15k
+        loop(eng, fake)
+        self.assertEqual(self.touch_orders(eng, fake), [])
+        self.assertTrue(any("yields to the dump catcher" in e["text"] for e in eng.events))
+        fake, eng, favs = self.rig()
+        loop(eng, fake)
+        ex = self.touch_orders(eng, fake)[0]["ex"]
+        other = next((e_ for e_, m in eng.meta.items() if m.get("race") == eng.meta[ex]["race"] and e_ != ex), None)
+        if other:
+            fake.pos[other] = -9000                       # 9k NO at 0.95 on the other market of the race: the race is full
+            fake.avg_cost[other] = 0.95
+        else:
+            fake.pos[ex] = 9000
+            fake.avg_cost[ex] = 0.95
+        loop(eng, fake)
+        loop(eng, fake)
+        self.assertEqual(self.touch_orders(eng, fake, ex), [], "8k per race including what we hold")
+
+    def test_failed_scalper_gate_hands_its_slice_to_touch(self):
+        fresh_data(layers=dict(position=dict(state="full"), scalp=dict(state="pilot"), touch=dict(state="pilot")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)
+        eng.scalp_stats = lambda since: dict(trades=10, buys=5, sells=5, volume=1000.0, realized=-5.0, markout30=None, n_mo=0, avg_inv=1000, pace=0.5)
+        with eng.controls.lock:
+            eng.controls.d["layers"]["scalp"]["since"] = time.time() - a_config.SCALP_PILOT_S - 10
+            eng.controls.save()
+        loop(eng, fake)
+        self.assertEqual(eng.controls.state("scalp"), "off")
+        self.assertAlmostEqual(eng.touch_budget(), a_config.LAYER_CAPS["touch"]["budget"][0] + a_config.LAYER_CAPS["scalp"]["inventory"][0])
+
+
+class TravelTests(EngineCase):
+    def test_travel_pulls_entries_keeps_exits_and_longshots_and_resumes_after_a_healthy_wake(self):
+        """Day 6 §4.2: ./travel.sh pauses new risk and pulls engine entries (not position exits, not longshot bids, not
+        sell-backs); the pause lifts by itself 2 min after a wake (loop gap > 5 min) once SIG and Polymarket answer."""
+        fresh_data(layers=dict(position=dict(state="full"), dump=dict(state="full"), longshot=dict(state="pilot")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] >= 0.90]
+        for _ in range(4):                                # like DumpV3Tests.settle: SIG trades 6c under fair on the favourites
+            eng.ex.capacity = 6000.0
+            for ex in favs:
+                seed_ref(eng, ex, mid=eng.fair[ex] - 0.06)
+            loop(eng, fake)
+        layers = lambda: collections.Counter(eng.ledger.orders[o["id"]]["layer"] for o in fake.open_orders() if o["id"] in eng.ledger.orders)
+        before = layers()
+        self.assertTrue(before.get("dump") and before.get("longshot"), before)
+        pos_exits = lambda: sum(1 for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["bot"] in eng.position_names
+                                and jx.reduces(o["side"], o["action"], fake.pos.get(o["ex"], 0)))
+        n_pos = pos_exits()
+        self.assertGreaterEqual(n_pos, 4)
+        msg = eng.controls_api.apply("travel", {"on": True}) if hasattr(eng, "controls_api") else f_engine.EngineControls(eng).apply("travel", {"on": True})
+        self.assertIn("TRAVEL on", msg)
+        self.assertTrue(eng.controls.paused)
+        loop(eng, fake)
+        loop(eng, fake)
+        after = layers()
+        self.assertEqual(after.get("dump", 0), 0, after)
+        self.assertEqual(after.get("longshot"), before.get("longshot"), "longshot bids stay")
+        self.assertEqual(pos_exits(), n_pos, "position exits stay")
+        self.assertTrue(all(int(o["id"]) in set(fake.manual.values()) or o["id"] in eng.ledger.orders for o in fake.open_orders()), "manual orders untouched")
+        now = time.time()
+        self.assertFalse(eng.travel_ok(now), "no wake yet: stays paused")
+        eng.wake_t = now - 60
+        self.assertFalse(eng.travel_ok(now), "a wake 1 min ago: not yet")
+        eng.wake_t = now - 130
+        self.assertTrue(eng.travel_ok(now), "2 healthy minutes after the wake")
+        with eng.controls.lock:                           # the auto-resume lifts it on the next loop (5 min after the pause)
+            eng.controls.d["auto_pause"]["t"] = now - 400
+            eng.controls.save()
+        loop(eng, fake)
+        self.assertFalse(eng.controls.paused)
+        f_engine.EngineControls(eng).apply("travel", {"on": True})
+        self.assertTrue(eng.controls.paused)
+        f_engine.EngineControls(eng).apply("travel", {"on": False})
+        self.assertFalse(eng.controls.paused, "./travel.sh off resumes by hand")
+        self.assertTrue(any(e["kind"] == "TRAVEL" for e in eng.events))
 
 
 class ControlTests(EngineCase):
