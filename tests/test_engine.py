@@ -2176,47 +2176,97 @@ class Day4Tests(EngineCase):
         loop(eng, fake)
         self.assertFalse([c for c in fake.calls if c[0] == "cancel"], "a 1-tick move doesn't re-price the AK slices")
 
-    def test_release_on_demand_rules(self):
+    def test_release_tiers_under_rule_0(self):
+        """Day 6 §9: tier 0 (bid >= fair - 2c) sells any day-1 lot and engine lots above entry + 0.5c; tiers 1-2 only fund
+        the cash target T (<= 10k/h, >= 24 h old, tier 2 needs the trading layers at >= 10%/day); never > 7c under fair;
+        never while paused; not in the quiet hour."""
         fake, eng = self.rig()
         ex = mid_market(eng)
         fake.pos[ex] = 2000
-        fake.avg_cost[ex] = 0.30                          # bought at 0.30, SIG bid ~0.48: a realized profit -> released
+        fake.avg_cost[ex] = 0.30
         loop(eng, fake)
+        bid = fake.px[ex][0]
+        fair = eng.fair[ex]
+        self.assertLessEqual(fair - bid, 0.02 + 1e-9, "the fixture's mid market sits within 2c of fair at the bid")
+        # a day-1 lot (Oct 1) bought above the bid: tier 0 sells it anyway (rule 0 lets day-1 lots go below entry)
+        eng.ledger.fills.append(dict(key="d0", order="x0", ex=ex, side="yes", qty=2000.0, price=0.60, action="buy", realized=0.0,
+                                     t="2026-10-01 12:00:00", bot="b", layer="", before_engine=False, fair=None, edge=None, sig_edge=None, sig_mid=None))
         eng.release_t = 0
         plan = eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage())
         self.assertIn(ex, plan)
-        self.assertEqual(plan[ex]["why"], "profit")
-        fake.avg_cost[ex] = 0.60                          # bought above the bid: no profit; demand branch needs a constrained dump
+        self.assertEqual(plan[ex]["why"], "tier0")
+        self.assertEqual(sum(plan[ex]["subs"].values()), min(2000, eng.bid_depth(ex, "yes", time.time())), "sized to the visible bid depth")
+        # the same lot bought by the engine (Oct 2+) 1 tick above the bid: rule 0 blocks the sale in every layer
+        eng.ledger.fills[-1].update(t="2026-10-03 12:00:00", price=round(bid + 0.005, 3))
+        eng.lots_cache = (None, {})
+        eng.release_t = 0
+        self.assertNotIn(ex, eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage()), "an engine lot under entry + 0.5c never sells")
+        self.assertEqual(eng.rule0_allowed(ex, "yes", "inventory", bid, 2000), 0)
+        self.assertEqual(eng.rule0_allowed(ex, "yes", "inventory", round(bid + 0.01, 3), 2000), 2000, "it sells once the bid clears entry + 0.5c")
         loop(eng, fake)
-        eng.release_t, eng.dump_now = 0, {}
-        self.assertNotIn(ex, eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage()), "no target, no profit: not sold")
-        eng.dump_now = {ex: [dict(side="yes", px=0.5, qty=200_000, sub="x", level=0)]}
-        ex_d = next(b.ex for b in eng.bots if b.kind == "market" and b.ex != ex)   # the dump fills are on another market
-        eng.ledger.fills.append(dict(key="d1", order="d1", ex=ex_d, side="yes", qty=5000.0, price=0.80, action="buy", realized=0.0,
-                                     t=time.strftime("%Y-%m-%d %H:%M:%S"), bot="b", layer="dump", before_engine=False, fair=0.95,
-                                     edge=0.15, sig_edge=0.0, sig_mid=0.82))          # 4k of dump fills in 30 min, 18.75%/day
-        eng.release_t = 0
-        plan = eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage())
-        self.assertNotIn(ex, plan, "day 6 §3.3: free cash is not below 10k: not constrained, nothing sold for funding")
-        eng.release_t = 0
-        plan = eng.release_plan(a_config.CASH_RESERVE + 8_000, time.time(), eng.bucket_usage())   # free 8k < 10k and >= 3k of fills
-        self.assertEqual(plan.get(ex, {}).get("why"), "demand", plan)
-        self.assertTrue(eng.constrained)
-        self.assertLessEqual(sum(plan[ex]["subs"].values()) * plan[ex]["px"], 2_000 + 1, "only the shortfall up to 10k free")
-        eng.ledger.fills.append(dict(key="d2", order="d2", ex=ex, side="no", qty=2000.0, price=0.40, action="buy", realized=0.0,
-                                     t=time.strftime("%Y-%m-%d %H:%M:%S"), bot="b", layer="sniper", before_engine=False, fair=0.5,
-                                     edge=0.0, sig_edge=0.0, sig_mid=0.5))            # the holding was opened just now (< 24 h)
-        eng.release_t = 0
-        self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 8_000, time.time(), eng.bucket_usage()), "never a holding bought < 24 h ago")
-        eng.ledger.fills.pop()
-        eng.controls.set_paused(True, "t")               # never while new risk is paused
+        sells = [o for o in fake.open_orders() if o["ex"] == ex and jx.reduces(o["side"], o["action"], fake.pos.get(ex, 0))]
+        self.assertEqual(sells, [], "no layer (release, recycler) placed a sale of the engine lot under entry")
+        # tiers 1-2: a holding 4c under fair is sold only while free cash is below T, from holdings >= 24 h old
+        eng.ledger.fills[-1].update(t="2026-10-01 12:00:00", price=0.60)
+        eng.lots_cache = (None, {})
+        FAIR[ex] = bid + 0.04
+        try:
+            loop(eng, fake)
+            eng.release_t = 0
+            self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 60_000, time.time(), eng.bucket_usage()), "free cash above T: tier 1 not needed")
+            eng.release_t = 0
+            plan = eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage())   # free 20k < T 25k
+            self.assertEqual(plan.get(ex, {}).get("why"), "tier1", plan)
+            self.assertLessEqual(sum(plan[ex]["subs"].values()) * plan[ex]["px"], 5_000 + 1, "only up to T")
+            FAIR[ex] = bid + 0.06                              # tier 2: only with the trading layers earning >= 10%/day
+            loop(eng, fake)
+            eng.release_t = 0
+            self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage()))
+            eng.trading_return_24h = lambda now: 0.25
+            eng.release_t = 0
+            self.assertEqual(eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage()).get(ex, {}).get("why"), "tier2")
+            FAIR[ex] = bid + 0.08                              # > 7c under fair: never for funding
+            loop(eng, fake)
+            eng.release_t = 0
+            self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage()))
+        finally:
+            FAIR.pop(ex, None)
+        eng.controls.set_paused(True, "t")
         eng.release_t = 0
         self.assertEqual(eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage()), {})
         eng.controls.set_paused(False, "t")
         from unittest import mock
         eng.release_t = 0
-        with mock.patch.object(f_engine, "RELEASE_QUIET_HOURS", (0, 24)):   # Piero's review hour
+        with mock.patch.object(f_engine, "RELEASE_QUIET_HOURS", (0, 24)):
             self.assertEqual(eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage()), {})
+
+    def test_cash_target_ratchet(self):
+        fake, eng = self.rig()
+        loop(eng, fake)
+        now = time.time()
+        c = eng.controls
+        c.d["cash_target"] = dict(T=25_000, hour=int(now // 3600) - 1, idle=0, hist=[])
+        eng.use_peak = 0.75                                   # the trading layers peaked at 75% of free cash last hour
+        self.assertEqual(eng.cash_target(now), 35_000)
+        c.d["cash_target"]["hour"] -= 1
+        for i in range(20):
+            eng.constrained_min.append(now - 60 * i)          # 20 constrained minutes
+        self.assertEqual(eng.cash_target(now), 45_000)
+        eng.constrained_min.clear()
+        for _ in range(4):                                    # 3 idle hours -> -10k, min 25k
+            c.d["cash_target"]["hour"] -= 1
+            eng.use_peak = 0.1
+            eng.cash_target(now)
+        self.assertEqual(c.d["cash_target"]["T"], 35_000)
+        for _ in range(6):
+            c.d["cash_target"]["hour"] -= 1
+            eng.use_peak = 0.1
+            eng.cash_target(now)
+        self.assertEqual(c.d["cash_target"]["T"], 25_000, "never below 25k")
+        c.d["cash_target"].update(T=55_000, hour=c.d["cash_target"]["hour"] - 1)
+        eng.use_peak = 0.9
+        self.assertEqual(eng.cash_target(now), 55_000, "never above 55k")
+        self.assertTrue(any(e["kind"] == "CASH" and "CASH TARGET" in e["text"] for e in eng.events))
 
     def test_reads_pnl_60s_orders_30s_prices_rotated(self):
         f_engine.PNL_READ_S, f_engine.ORDERS_READ_S = 60, 30
@@ -2598,18 +2648,13 @@ class ScalperTests(EngineCase):
         t = eng.ledger.tranches[sub]
         self.assertEqual((t["kind"], t["state"]), ("scalp", "open"))
         self.assertAlmostEqual(t["avg"], px, places=4)
-        t["ts"] -= a_config.SCALP_STEP1_S + 60                 # 30 min later: entry + 0 only if that is >= fair - 4c
+        t["ts"] -= a_config.SCALP_STEP1_S + 60                 # 30 min later: still entry + 0.5c (day 6 rule 0: never at a loss, never at entry + 0)
         loop(eng, fake)
-        ex_orders = self.scalp_orders(eng, fake, ex, layer="scalpexit")
-        self.assertLess(px, eng.fair[ex] - a_config.SCALP_STEP1_GAP, "the rig buys 4.5c under fair")
-        self.assertAlmostEqual(1 - ex_orders[0]["price"], want_px, places=3, msg="entry + 0 would be under fair - 4c: keep entry + 0.5c")
-        self.addCleanup(setattr, f_engine, "SCALP_STEP1_GAP", f_engine.SCALP_STEP1_GAP)
-        f_engine.SCALP_STEP1_GAP = 0.05
         loop(eng, fake)
-        loop(eng, fake)                                        # the requote: cancel first (I6), then the new exit
         ex_orders = self.scalp_orders(eng, fake, ex, layer="scalpexit")
         self.assertEqual(len(ex_orders), 1, [e["text"] for e in eng.events[-5:]])
-        self.assertAlmostEqual(1 - ex_orders[0]["price"], bots.tick_up(round(max(ask_y - a_config.TICK, px), 6)), places=3, msg="entry + 0")
+        self.assertAlmostEqual(1 - ex_orders[0]["price"], want_px, places=3, msg="entry + 0.5c holds after 30 min")
+        self.assertFalse(any(e["kind"] == "RULE0" for e in eng.events), "the scalper's exits never trip rule 0")
         t["ts"] -= a_config.SCALP_HAND_S                       # 2 h later: the dump catcher's tranche rules
         loop(eng, fake)
         self.assertNotIn(sub, {k for k, v in eng.ledger.subbooks[ex].items() if abs(v) >= 1})
@@ -2637,6 +2682,18 @@ class ScalperTests(EngineCase):
         self.assertEqual((s["buys"], s["sells"], s["trades"]), (1, 1, 2))
         self.assertGreater(s["realized"], 0)
         self.assertGreater(s["volume"], 0)
+
+    def test_runs_all_day(self):
+        """Day 6 §10.3: no 04:30 / 05:45 / 06:00-17:00 schedule; the scalper only yields to the catcher and hands off after 2 h."""
+        self.assertIsNone(a_config.SCALP_DAY_OFF)
+        fake, eng, mids = self.rig()
+        loop(eng, fake)                                       # the engine reads the rig's books
+        noon = time.mktime(time.strptime(time.strftime("%Y-%m-%d") + " 12:00:00", "%Y-%m-%d %H:%M:%S"))
+        for o in eng.ledger.orders.values():                  # the write budget counts placements within 60 s of `now`
+            if o.get("layer") == "scalp":
+                o["ts"] = noon - 120
+        plan = eng.scalp_plan(noon, 60_000 + a_config.CASH_RESERVE, {})
+        self.assertTrue(plan, "bids at noon too")
 
     def test_yields_to_the_dump_catcher_and_pauses(self):
         fake, eng, mids = self.rig(cash_above_floor=12_000)        # funded reserve 12k < 15k

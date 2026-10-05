@@ -185,7 +185,14 @@ DUMP_V3_OFFSETS_DAY, DUMP_V3_WEIGHTS_DAY = [0.01, 0.02, 0.035, 0.05], [0.45, 0.2
 DUMP_RECYCLE_FAST_S = 1800      # §1.5: cash-constrained -> a tranche older than 30 min sells back at fill + 0.5c
 CONSTRAINED_FREE, CONSTRAINED_FILLS_30M = 10_000, 3_000   # §3.3: constrained = free cash < 10k AND dump fills >= 3k cost in 30 min
 RELEASE_FUND_PER_H, RELEASE_MIN_AGE_S = 10_000, 24 * 3600  # §3.3 funding branch: <= 10k per hour, never a holding bought < 24 h ago
-SCALP_DAY_OFF = (4.5, 5.75, 6.0, 17.0)   # §3.1: no new buys from 04:30, asks to entry, 05:45 the rest to the tranche rules, off 06:00-17:00
+# capital policy v2 (day 6 §9): rule 0 + the cash ratchet + release tiers
+RULE0_MARGIN = 0.005            # an engine lot sells only at >= its entry + 0.5c, in any layer; day-1 lots (Oct 1 PT) may go below entry
+DAY1_CUTOFF = "2026-10-02 00:00:00"   # fills before this (PT) or before the engine are day-1 lots
+CASH_T_START, CASH_T_STEP, CASH_T_MIN, CASH_T_MAX = 25_000, 10_000, 25_000, 55_000
+CASH_T_CONSTRAINED_MIN, CASH_T_PEAK_UP, CASH_T_PEAK_DOWN, CASH_T_IDLE_H = 15, 0.70, 0.40, 3
+RELEASE_TIER0, RELEASE_TIER1, RELEASE_TIER2 = 0.02, 0.05, 0.07   # gap to fair: tier 0 always (rule 0), tier 1 for T, tier 2 for T if trading >= 10%/day
+RELEASE_TIER2_RETURN = 0.10     # the trading layers' realized return per day on their average capital over 24 h
+SCALP_DAY_OFF = None            # day 6 §10.3 (01:20 addendum): the scalper runs all day; it yields to the catcher and keeps its 2-h hand-off
 DUMP_REFRESH_S, DUMP_REFRESH_JITTER_S = 50 * 60, 300   # §4.1: a 60-min level is re-placed at ~50 min, staggered +-5 min
 # touch layer (day 6 §2): be the bid the big sellers hit, on favourites SIG prices far under fair
 TOUCH_MIN_FAIR, TOUCH_GAP = 0.93, 0.06   # fair_side >= 0.93 and the SIG best bid <= fair_side - 6c

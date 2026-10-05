@@ -5,6 +5,7 @@ import math
 import os
 import threading
 import time
+import time
 from datetime import datetime
 
 from a_config import LEDGER_FILE
@@ -32,6 +33,7 @@ class Ledger:
         self.baskets = d.get("baskets", [])     # pair-bot sets: {race, side, legs, orders[], margin, repaired}
         self.subbooks = d.get("subbooks", {})   # I3: ex -> {"manual" | "inventory" | "pairset:<id>" | "tranche:<id>": signed YES shares}
         self.tranches = d.get("tranches", {})   # A1/A5: tranche sub-book id -> {ex, side, level, ref_side, off, fair_side, t, state}
+        self.moves = d.get("moves", [])         # day 6 §9 rule 0: sub-book moves (ex, src, dst, qty, t) so lots keep their entry across a move
         self.ladder_seq = d.get("ladder_seq", {})  # (ex|side|level) -> current tranche number
         for i, b in enumerate(self.baskets):    # sets recorded before ids existed
             b.setdefault("id", f"{b.get('race', 'set')}:{int(b.get('ts', 0)) or i}")
@@ -103,6 +105,7 @@ class Ledger:
             q = books.pop(src, 0)
             if q:
                 books[dst] = books.get(dst, 0) + q
+                self.moves.append((ex, src, dst, q, time.time()))
             return q
 
     def split_sub(self, ex, src, dst, qty):
@@ -340,5 +343,5 @@ class Ledger:
         if self.persist:
             with self.lock:
                 text = json.dumps(dict(orders=self.orders, fills=self.fills, baskets=self.baskets[-1000:], subbooks=self.subbooks,
-                                       tranches=self.tranches, ladder_seq=self.ladder_seq))
+                                       tranches=self.tranches, ladder_seq=self.ladder_seq, moves=self.moves[-2000:]))
             write_atomic(LEDGER_FILE, text)
