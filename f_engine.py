@@ -2465,8 +2465,9 @@ class Engine:
         if not getattr(self, "wake_t", None):
             return False
         h = api.health(120)
-        return (now - self.wake_t >= 120 and (h.get("read") or {}).get("bad_rate", 1.0) == 0 and api.reads_last_min() >= 1
-                and self.fills_health(now)[0] and (self.fair and time.time() - max(self.ft.t.values(), default=0) < 120 if hasattr(self.ft, "t") else bool(self.fair)))
+        bad = (h.get("read") or {}).get("bad_rate")
+        return (now - self.wake_t >= 120 and (bad is None or bad == 0) and self.fills_health(now)[0] and bool(self.fair)
+                and (not self.pm_feed or self.pm_feed.last_msg_t is None or now - self.pm_feed.last_msg_t < 120))
 
     def auto_pause(self, kind, reason, now):
         """Day 4 §1.3: a safety pause the engine lifts itself once its condition is gone (manual pauses wait for Piero).
