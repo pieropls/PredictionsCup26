@@ -103,6 +103,17 @@ def spare_reads(keep=30):
     return reads_last_min() <= 100 - keep
 
 
+def order(oid):
+    """One order record (day 4 §1: evidence before any cash-short pause): {id, exchangeId, side, action, quantity, open, ...}."""
+    return _req("GET", f"/orders/{oid}")
+
+
+def recent_writes_ok(n=20):
+    """Share of the last n writes that SIG answered with < 500 (day 4 §1.3: an automatic STOP AND PULL lifts at >= 80%)."""
+    ws = [c for c in list(_calls) if c[1] == "write"][-n:]
+    return 1.0 if not ws else sum(1 for c in ws if 0 < c[3] < 500) / len(ws)
+
+
 def writes_left():
     with _wlock:
         while _writes and _writes[0] < time.time() - 60:

@@ -30,8 +30,8 @@ from urllib.parse import urlsplit
 LOCALHOST = {"127.0.0.1", "localhost", "::1"}
 SSE_PERIOD_S = 0.5              # at most 2 updates a second
 SSE_KEEPALIVE_S = 15
-ACTIONS = {"pause", "resume", "pull_quotes", "layer_state", "layer_caps", "market", "kappa", "read_only", "hold_gates", "backfill", "truth_mode", "subbook_fix"}
-DESTRUCTIVE = {"pull_quotes", "layer_state", "layer_caps", "market", "kappa", "hold_gates", "backfill", "truth_mode", "subbook_fix"}
+ACTIONS = {"pause", "resume", "pull_quotes", "layer_state", "layer_caps", "market", "kappa", "read_only", "hold_gates", "backfill", "truth_mode", "subbook_fix", "clear_decisions"}
+DESTRUCTIVE = {"pull_quotes", "layer_state", "layer_caps", "market", "kappa", "hold_gates", "backfill", "truth_mode", "subbook_fix", "clear_decisions"}
 
 
 def _finite(x):
@@ -434,6 +434,8 @@ function banner() {
   const out = [], t = obj(obj(S.money).total), start = val(obj(S.money).start) ?? 100000;
   if (S.error) out.push(`<div class="alert">${esc(S.error)}</div>`);
   if (S.stopped) out.push(`<div class="alert">The engine is stopped: nothing is trading.</div>`);
+  const p = obj(obj(S.overview).pause);
+  if (p.kind) out.push(`<div class="alert"><b>New risk paused ${num(p.minutes, 0)} min</b> (${esc(p.kind)}, since ${esc(p.since)}): ${esc(p.reason)}${p.auto && !p.stuck ? " · lifts itself when the condition clears" : p.stuck ? " · <b>needs Piero</b> (3 pauses in 2 h)" : " · manual: resume from Controls"}</div>`);
   if (Object.keys(t).length && (t.ok === false || Math.abs(val(t.diff) || 0) > 50)) {
     out.push(`<div class="alert recon" id="recon-warn"><b>Warning: the P&L split does not add up.</b> Realized ${sgn(t.realized)} + unrealized ${sgn(t.unrealized)} = ${sgn(t.sum)},
       but account − ${num(start)} = ${sgn(t.account_minus_start)} (off by ${sgn(t.diff)}). Trust the account value; treat the split as unreliable until this clears.</div>`);

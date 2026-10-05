@@ -146,6 +146,16 @@ class FakeSIG:
         with self.lock:
             return list(reversed(self.fill_log))[:100 * max_pages]
 
+    writes_ok = 1.0                                       # tests: share of the last 20 writes SIG accepted
+
+    def recent_writes_ok(self, n=20):
+        return self.writes_ok
+
+    def order(self, oid):
+        with self.lock:
+            o = self.book.get(int(oid))
+            return dict(id=int(oid), open=o is not None, quantity=o["qty"] if o else 0, exchangeId=o["ex"] if o else None)
+
     def health(self, window_s=600):
         return dict(read=dict(n=0, p50=None, p90=None, bad_rate=0.0), write=dict(n=len(self.timeline), p50=None, p90=None, bad_rate=0.0),
                     reads_last_min=0, writes_last_min=self.WRITES_PER_MIN - self.writes_left(), read_limit=100, write_limit=30,

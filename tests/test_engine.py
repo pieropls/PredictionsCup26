@@ -1390,18 +1390,49 @@ class FatFingerTests(EngineCase):
         self.assertIsNotNone(eng.cash_short)
         self.assertEqual(len(eng.cash_short["why"]), 1)
 
-    def test_cash_short_on_partial_fill_whose_rest_vanished(self):
+    def test_vanished_remainder_never_pauses_on_its_own(self):
+        # day 4 §1.1: Montana Senate R 08:52: the bid expired at its 6 h TTL ("vanished after 360 min") and paused the engine
         fake, eng = self.rig()
         self.settle(eng, fake, 3)
         o = self.fat_orders(eng, fake)[0]
-        eng.ledger.orders[o["id"]]["ts"] -= 600           # resting for 10 min
-        fake.fill(o["id"], 100)                           # part of it fills ...
+        rec = eng.ledger.orders[o["id"]]
+        rec["ts"] -= rec["ttl"] - 60                      # one minute from its TTL
+        fake.fill(o["id"], 100)
         with fake.lock:
-            fake.book.pop(next(k for k in fake.book if str(k) == o["id"]))   # ... and SIG drops the rest (not our cancel)
+            fake.book.pop(next(k for k in fake.book if str(k) == o["id"]))   # expired
         for _ in range(3):
             loop(eng, fake)
-        self.assertIsNotNone(eng.cash_short, [e["text"] for e in eng.events if e["kind"] == "ERR"][-3:])
-        self.assertIn("vanished", eng.cash_short["why"][0])
+        self.assertIsNone(eng.cash_short, "expiry at the TTL is not a cash short")
+        self.assertFalse(eng.controls.paused)
+        self.assertFalse(any(e["kind"] == "CASHCHECK" for e in eng.events), "an expiry needs no order read")
+        # a remainder gone well before its TTL: one order read, logged as evidence; balance fine -> still no pause
+        o2 = self.fat_orders(eng, fake)[0]
+        eng.ledger.orders[o2["id"]]["ts"] -= 600
+        fake.fill(o2["id"], 100)
+        with fake.lock:
+            fake.book.pop(next(k for k in fake.book if str(k) == o2["id"]))
+        for _ in range(3):
+            loop(eng, fake)
+        self.assertTrue(any(e["kind"] == "CASHCHECK" and "no pause" in e["text"] for e in eng.events))
+        self.assertIsNone(eng.cash_short)
+        self.assertFalse(eng.controls.paused)
+
+    def test_cash_short_auto_resumes_when_cash_is_back(self):
+        fake, eng = self.rig()
+        self.settle(eng, fake, 2)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] - 500)
+        loop(eng, fake)
+        loop(eng, fake)
+        self.assertTrue(eng.controls.paused)
+        self.assertEqual(eng.controls.d["auto_pause"]["kind"], "cash_short")
+        self.assertEqual(eng.controls.d.get("decisions"), [], "safety stops don't queue decisions")
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 6_000)
+        eng.controls.d["auto_pause"]["t"] -= 400         # 5 min after the pause
+        for _ in range(3):
+            loop(eng, fake)
+        self.assertFalse(eng.controls.paused, "cash >= floor + 5k for 2 loops: resumed by itself")
+        self.assertTrue(any(e["kind"] == "PAUSE" and "AUTO-RESUME" in e["text"] for e in eng.events))
 
     def test_gates_hold_on_flag_or_blind_fills(self):
         fake, eng = self.rig()
@@ -1856,17 +1887,34 @@ class OrderTruthTests(EngineCase):
         loop(eng, fake)
         self.assertAlmostEqual(eng.ledger.sub(ex, "inventory") - inv1, 400)
 
-    def test_stop_and_pull_on_repeated_sig_write_faults(self):
+    def test_stop_and_pull_needs_10_writes_at_50_percent_and_resumes(self):
+        # day 4 §1.2: 15:44 paused on 5 writes at 60%; now >= 10 writes in 10 min and >= 50% failed
         fake, eng, favs = self.rig()
-        eng.ex.note_fault(RuntimeError("POST /orders/batch -> 503 {}"))
-        eng.ex.note_fault(RuntimeError("DELETE /orders/1 -> 409 {conflict}"))   # not a SIG fault
+        from unittest import mock
+        with mock.patch.object(fake, "health", return_value=dict(read=dict(n=50, bad_rate=0.0), write=dict(n=5, bad_rate=0.6), throttled=0), create=True):
+            eng.controller(time.time())
+        self.assertFalse(eng.controls.paused, "5 failed writes don't trip it")
+        with mock.patch.object(fake, "health", return_value=dict(read=dict(n=50, bad_rate=0.0), write=dict(n=12, bad_rate=0.5), throttled=0), create=True):
+            eng.controller(time.time())
+        self.assertTrue(eng.controls.paused)
+        self.assertEqual(eng.controls.d["auto_pause"]["kind"], "stop_pull")
+        self.assertTrue(any(e["kind"] == "STOP" for e in eng.events))
+        self.assertEqual(eng.controls.d.get("decisions"), [])
+        fake.writes_ok = 0.9                              # SIG writes 90% OK over the last 20 -> lifts itself
+        eng.controls.d["auto_pause"]["t"] -= 400
         eng.controller(time.time())
         self.assertFalse(eng.controls.paused)
-        eng.ex.note_fault(RuntimeError("timed out"))
-        eng.ex.note_fault(RuntimeError("GET -> 502"))
+        # the same kind 3x in 2 h stays paused
+        for _ in range(2):
+            eng.faults_pulled = None
+            eng.auto_pause("stop_pull", "again", time.time())
+            eng.controls.set_paused(False, "t")
+        eng.faults_pulled = None
+        eng.auto_pause("stop_pull", "third", time.time())
+        self.assertTrue(eng.controls.d["auto_pause"]["stuck"])
+        eng.controls.d["auto_pause"]["t"] -= 400
         eng.controller(time.time())
-        self.assertTrue(eng.controls.paused)
-        self.assertTrue(any(e["kind"] == "STOP" for e in eng.events))
+        self.assertTrue(eng.controls.paused, "3 in 2 h: waits for Piero")
 
 
 class ArenaTests(EngineCase):

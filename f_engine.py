@@ -317,6 +317,7 @@ class Engine:
         self.ex = jx.Executor(api, self.ledger, self.journal, batch_size=BATCH_SIZE, min_qty=MIN_QTY,
                               log=lambda s: self.event(*s.strip().split(" ", 1)) if s.strip() else None)
         self.cash_msgs, self.neg_cash_n, self.through, self.cash_short = [], 0, {}, None   # afternoon D-B
+        self.vanish_seen, self.cash_ok_n, self.resume_check_t = set(), 0, 0.0   # day 4 §1
         self.ex.on_cash_reject = self.cash_msgs.append
         self.manual_ex = {b.ex for b in self.bots if b.kind == "position"} | manual
         self.last_state = None
@@ -1293,9 +1294,9 @@ class Engine:
                 c.set_layer(l, "full", f"pilot gate passed: {why}")
         # Piero's unattended rule: writes/cancels failing with 5xx / UNKNOWN repeatedly -> stop and pull at-risk orders
         hw = api.health(600).get("write") or {}
-        unk = sum(1 for t in getattr(self.ex, "unknown_t", []) if t >= now - 600)
-        if (hw.get("n", 0) >= 5 and hw.get("bad_rate", 0) >= 0.3) or unk >= 3:
-            self.stop_and_pull(f"SIG writes failing: {hw.get('bad_rate', 0):.0%} 5xx/timeouts of {hw.get('n', 0)} in 10 min, {unk} UNKNOWN")
+        if hw.get("n", 0) >= 10 and hw.get("bad_rate", 0) >= 0.5:   # day 4 §1.2: >= 10 writes in 10 min and >= 50% failed
+            self.stop_and_pull(f"SIG writes failing: {hw.get('bad_rate', 0):.0%} 5xx/timeouts of {hw.get('n', 0)} in 10 min")
+        self.auto_resume(now)
         # D5 loss stop and the SIG 5xx pause
         bot_24h = sum(self.fill_pnl_fair(f) for f in self.fills_since(now - 86400)
                       if self.strategy_of(f["bot"], f["layer"]) not in ("position", "old engine"))
@@ -1705,6 +1706,7 @@ class Engine:
         recent = [t for t in self.blind_t if t >= now - 300]
         if book and len(recent) >= 2 and now - self.last_booked_t >= 300 and not self.fills_blind:
             self.fills_blind = now
+            self.auto_pause("fills_blind", "FILLS BLIND: no fill booked while positions move", now)
             msg = "FILLS BLIND: position moves in >= 2 loops within 5 min and no fill booked: gates held, no new dump levels, release paused, no new MM entries"
             self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
             self.event("BLIND", msg)
@@ -2303,7 +2305,7 @@ class Engine:
         if self.faults_pulled and time.time() - self.faults_pulled < 1800:
             return
         self.faults_pulled = time.time()
-        self.controls.set_paused(True, f"STOP AND PULL: {reason}")
+        self.auto_pause("stop_pull", f"STOP AND PULL: {reason}", time.time())
         try:
             n, dropped = self.pull_quotes()
         except Exception as err:
@@ -2313,7 +2315,64 @@ class Engine:
         self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
         self.event("STOP", msg)
         self.night.line(msg)
-        self.controls.decide(f"STOP AND PULL at {time.strftime('%H:%M')} ({reason[:80]}): resume when SIG is healthy?")
+
+    AUTO_KINDS = ("cash_short", "stop_pull", "fills_blind")
+
+    def auto_pause(self, kind, reason, now):
+        """Day 4 §1.3: a safety pause the engine lifts itself once its condition is gone (manual pauses wait for Piero).
+        The same kind 3x in 2 h stays paused and raises an alert."""
+        c = self.controls
+        with c.lock:
+            ap = c.d.setdefault("auto_pause", {})
+            hist = [t for t in ap.get("history", {}).get(kind, []) if t >= now - 7200] + [now]
+            ap.setdefault("history", {})[kind] = hist
+            ap.update(kind=kind, reason=reason[:200], t=now, stuck=len(hist) >= 3)
+            c.save()
+        c.set_paused(True, reason)
+        if len(hist) >= 3:
+            msg = f"{kind} paused 3x within 2 h: staying paused until Piero resumes"
+            self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+            self.event("PAUSE", msg)
+            self.night.line(msg)
+
+    def auto_resume(self, now):
+        """Every 5 min: lift an automatic pause whose condition is gone (cash >= floor + 5k for 2 loops; SIG writes >= 80%
+        OK over the last 20; fills healthy). Also logs any pause > 10 min at the top of RUN_LOG (hourly status)."""
+        c = self.controls
+        ap = c.d.get("auto_pause") or {}
+        if not c.paused or not ap.get("kind"):
+            return
+        a = self.acct or {}
+        cash = (a.get("totalAccountValue") or 0) - (a.get("totalHoldingsValue") or 0)
+        self.cash_ok_n = self.cash_ok_n + 1 if cash >= CASH_RESERVE + 5_000 else 0
+        if ap.get("stuck") or now - (ap.get("t") or now) < 300:   # re-checked every loop (local data) from 5 min after the pause
+            return
+        kind = ap["kind"]
+        ok = {"cash_short": self.cash_ok_n >= 2,
+              "stop_pull": api.recent_writes_ok(20) >= 0.8,
+              "fills_blind": not self.fills_blind and self.fills_health(now)[0]}.get(kind, False)
+        if not ok:
+            return
+        with c.lock:
+            c.d["auto_pause"] = dict(history=ap.get("history", {}))
+            c.d["decisions"] = [d for d in c.d.get("decisions", []) if not d.startswith(("CASH SHORT", "STOP AND PULL"))]
+            c.save()
+        if kind == "cash_short":
+            self.cash_short = None
+        c.set_paused(False, f"auto-resume: {kind} condition gone after {(now - ap['t']) / 60:.0f} min")
+        msg = f"AUTO-RESUME after {kind}: paused {(now - ap['t']) / 60:.0f} min ({ap.get('reason', '')[:100]})"
+        self.event("PAUSE", msg)
+        self.night.line(msg)
+
+    def pause_view(self):
+        """{kind, reason, since, minutes, auto} while new risk is paused (dashboard banner; status block)."""
+        c = self.controls
+        if not c.paused:
+            return None
+        ap = c.d.get("auto_pause") or {}
+        t0 = ap.get("t") or c.d.get("paused_t") or time.time()
+        return dict(kind=ap.get("kind") or "manual", reason=ap.get("reason") or "paused from the dashboard", auto=bool(ap.get("kind")),
+                    since=time.strftime("%H:%M", time.localtime(t0)), minutes=round((time.time() - t0) / 60, 1), stuck=bool(ap.get("stuck")))
 
     CATCHERS = ("fatfinger", "dump", "longshot")           # resting catch levels whose fills are paid from the reserve
 
@@ -2328,25 +2387,27 @@ class Engine:
             why.append(f"balance {raw:,.0f} below 0 on {self.neg_cash_n} reads")
         msgs, self.cash_msgs[:] = list(self.cash_msgs), []
         why += [f"write refused: {m[:140]}" for m in msgs]
+        # Day 4 §1.1: a vanished remainder is never evidence on its own. At its TTL (- 120 s) it expired. Otherwise one
+        # GET /orders/{id} is logged as evidence, and only the balance (the hard triggers above) can pause.
         for oid in catch_open:
             o = self.ledger.orders.get(oid) or {}
             age = now - (o.get("ts") or now)
-            if o.get("status") == "done" and 0 < (o.get("filled") or 0) < o["qty"] - MIN_QTY and age < FAT_TTL_S - 300:
-                why.append(f"{self.name(o['ex'])} {o['side'].upper()} {o['layer']} bid at {o['price']:.3f}: filled "
-                           f"{o['filled']:,.0f} of {o['qty']:,.0f}, the rest vanished after {age / 60:.0f} min (not cancelled by us)")
-        seen = {}
-        for o in self.open:
-            rec = self.ledger.orders.get(o["id"])
-            if not rec or rec.get("layer") not in self.CATCHERS or o["action"] != "buy" or (rec.get("filled") or 0) <= 0:
+            if not (o.get("status") == "done" and 0 < (o.get("filled") or 0) < o["qty"] - MIN_QTY) or oid in self.vanish_seen:
                 continue
-            bid = bots.side_book(*self.px.get(o["ex"], (None, None, None))[:2], o["side"])[0]
-            if bid is not None and bid < o["price"] - TICK - 1e-9:
-                k = (o["id"], round(o["qty"]))
-                seen[k] = self.through.get(k, 0) + 1
-                if seen[k] >= 2:
-                    why.append(f"{self.name(o['ex'])} {o['side'].upper()} bid at {o['price']:.3f} partly filled, {o['qty']:,.0f} "
-                               f"still resting, best bid {bid:.3f}: the price traded through it")
-        self.through = seen
+            self.vanish_seen.add(oid)
+            ttl = o.get("ttl") or self.LAYER_TTL.get(o.get("layer"), RECYCLE_REST_TTL_S)
+            if ttl and age >= ttl - 120:
+                continue                                    # expired at its TTL
+            try:
+                so = api.order(oid)
+                ev = f"SIG: open={so.get('open')} quantity={so.get('quantity')}"
+            except Exception as err:
+                ev = f"order read failed: {str(err)[:80]}"
+            self.event("CASHCHECK", f"{self.name(o['ex'])} {o['side'].upper()} {o['layer']} bid at {o['price']:.3f}: filled "
+                                    f"{o['filled']:,.0f} of {o['qty']:,.0f}, the rest gone after {age / 60:.0f} min (TTL {ttl / 60:.0f}); "
+                                    f"{ev}; balance {raw:,.0f}: {'SHORT' if raw < 0 else 'fine, no pause'}")
+        if len(self.vanish_seen) > 2000:
+            self.vanish_seen = set(list(self.vanish_seen)[-1000:])
         if why:
             self.cash_short_trip(why, raw, now)
 
@@ -2363,8 +2424,7 @@ class Engine:
                     and not jx.reduces(o["side"], "buy", self.book.get(o["ex"], {}).get("pos", 0)):
                 n += bool(self.ex.cancel(o, reason="CASH SHORT", front=True))
         if not self.controls.paused:
-            self.controls.set_paused(True, f"CASH SHORT: {why[0][:120]}")
-            self.controls.decide(f"CASH SHORT at {time.strftime('%H:%M')} ({why[0][:80]}): resume new risk once cash is back?")
+            self.auto_pause("cash_short", f"CASH SHORT: {why[0][:120]}", now)
         msg = f"CASH SHORT: {'; '.join(why)[:300]} -> {n} entry orders cancelled, {dropped} queued dropped, new risk paused"
         self.event("CASHSHORT", msg)
         self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
@@ -3002,6 +3062,9 @@ class Engine:
              if (mv or {}).get("today") and mv["today"].get("pnl") is not None
              else f"**Realized P&L today:** {self.realized_today():+,.0f} · **free cash** {cash:,.0f}")(self.money_view()),
             f"**Kills / rollbacks:** {'; '.join(kills) or 'none'}",
+            (lambda p: f"**PAUSED {p['minutes']:.0f} min** ({p['kind']}, since {p['since']}): {p['reason']}; blocked: every new entry "
+                       f"(dump, fat-finger, longshot, MM, pairs, ladders); exits and sell-backs keep running"
+             if p and p["minutes"] >= 10 else "**Pauses > 10 min:** none")(self.pause_view()),
             f"**For Piero to decide (engine):** {'; '.join(c.d.get('decisions') or []) or 'nothing from the engine'}"
             " · Claude Code's items are in the summary below"])
 
@@ -3324,7 +3387,7 @@ class Engine:
             v3 = {}
         out = dict(
             t=stamp(), loop=self.n, live=not api.DRY_RUN, stopped=stopped,
-            overview=dict(account_fair=None if fair_now is None else round(fair_now), free_cash=None if cash is None else round(cash),
+            overview=dict(pause=self.pause_view(), account_fair=None if fair_now is None else round(fair_now), free_cash=None if cash is None else round(cash),
                           change_today=None if fair_now is None or "day_fair" not in night else round(fair_now - night["day_fair"]),
                           change_start=None if fair_now is None or "start_fair" not in night else round(fair_now - night["start_fair"]),
                           realized_today=round(self.realized_today(), 2), reserve=CASH_RESERVE, committed=round(self.committed()),
@@ -3819,10 +3882,23 @@ class EngineControls:
 
     def _apply(self, action, args):
         c = self.eng.controls
+        if action == "clear_decisions":
+            with c.lock:
+                c.d["decisions"] = []
+                c.save()
+            return "decisions cleared"
         if action == "pause":
+            with c.lock:
+                c.d["auto_pause"] = dict(history=(c.d.get("auto_pause") or {}).get("history", {}))
+                c.d["paused_t"] = time.time()
+                c.save()
             c.set_paused(True, "dashboard", by="dashboard")
             return "new risk paused (exits, rebounds, unwinds and repairs keep running)"
         if action == "resume":
+            with c.lock:
+                c.d["auto_pause"] = dict(history=(c.d.get("auto_pause") or {}).get("history", {}))
+                c.save()
+            self.eng.cash_short = None
             c.set_paused(False, "dashboard", by="dashboard")
             return "new risk resumed"
         if action == "pull_quotes":
