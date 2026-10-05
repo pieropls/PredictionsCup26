@@ -305,6 +305,37 @@ class Ledger:
 
     PHANTOM_SUBS = ("dump:", "touch:", "scalp:", "sniper", "mm")
 
+    def net_phantoms(self, dry_run=False):
+        """A market cannot hold a long engine tranche (dump / touch / scalp, sniper, mm) and a short inventory at once (SIG
+        nets positions): the overlap is the audit's compensation for a phantom booking and is netted out of both. The sum
+        of the sub-books does not change; pair-set legs are left alone. -> [(ex, sub, from, to)]."""
+        with self.lock:
+            netted = []
+            for ex, books in self.subbooks.items():
+                inv = books.get("inventory", 0)
+                if abs(inv) < 1:
+                    continue
+                for sub in sorted(books):
+                    q = books.get(sub, 0)
+                    if sub == "inventory" or not sub.startswith(self.PHANTOM_SUBS) or q * inv >= 0 or abs(q) < 1:
+                        continue
+                    take = min(abs(q), abs(inv))
+                    netted.append((ex, sub, q, q - take * (1 if q > 0 else -1)))
+                    if not dry_run:
+                        books[sub] = q - take * (1 if q > 0 else -1)
+                        inv = inv - take * (1 if inv > 0 else -1)
+                        books["inventory"] = inv
+                        if abs(books[sub]) < 1:
+                            books.pop(sub, None)
+                            t = self.tranches.get(sub)
+                            if t and t.get("state") == "open":
+                                t["state"] = "voided"      # a phantom tranche: no round trip, no sell-back
+                    if abs(inv) < 1:
+                        break
+                if not dry_run and abs(books.get("inventory", 0)) < 1:
+                    books.pop("inventory", None)
+            return netted
+
     def dedup_synthetic(self, dry_run=False, window_s=180):
         """Oct 5 02:30: a synthetic (order_shrink) fill that duplicates one of SIG's own fills for the same order (same
         quantity, within 3 min) is removed from the fill history (stats, lots and the order's filled count follow). The
@@ -330,30 +361,7 @@ class Ledger:
                     used.add(id(p))
                     drop.append(f)
                     break
-            netted = []
-            for ex, books in self.subbooks.items():
-                inv = books.get("inventory", 0)
-                if abs(inv) < 1:
-                    continue
-                for sub in sorted(books):
-                    q = books.get(sub, 0)
-                    if sub == "inventory" or not sub.startswith(self.PHANTOM_SUBS) or q * inv >= 0 or abs(q) < 1:
-                        continue
-                    take = min(abs(q), abs(inv))
-                    netted.append((ex, sub, q, q - take * (1 if q > 0 else -1)))
-                    if not dry_run:
-                        books[sub] = q - take * (1 if q > 0 else -1)
-                        inv = inv - take * (1 if inv > 0 else -1)
-                        books["inventory"] = inv
-                        if abs(books[sub]) < 1:
-                            books.pop(sub, None)
-                            t = self.tranches.get(sub)
-                            if t and t.get("state") == "open":
-                                t["state"] = "voided"      # a phantom tranche: no round trip, no sell-back
-                    if abs(inv) < 1:
-                        break
-                if not dry_run and abs(books.get("inventory", 0)) < 1:
-                    books.pop("inventory", None)
+            netted = self.net_phantoms(dry_run=dry_run)
             # an order booked beyond its quantity (older pairs further apart than the window): drop its synthetic fills,
             # newest first, until the booking fits the order
             booked = {}

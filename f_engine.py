@@ -1432,6 +1432,11 @@ class Engine:
             self.ratchet("touch", now)
             self.idle_rule(now)
             self.cash_target(now)
+            if now - getattr(self, "phantom_t", 0) >= 600:    # Oct 5: an impossible long-tranche / short-inventory pair is netted out
+                self.phantom_t = now
+                fixed = self.ledger.net_phantoms()
+                if fixed:
+                    self.event("AUDIT", "phantom sub-book pairs netted against inventory: " + "; ".join(f"{self.name(ex)} {sub.split(':')[0]} {old:+,.0f} -> {new:+,.0f}" for ex, sub, old, new in fixed))
         except Exception as err:
             self.event("ERR", f"ratchet: {err!r}")
         hw = api.health(600).get("write") or {}
@@ -1760,8 +1765,8 @@ class Engine:
         q1 = self.truth_prev_cur.get(oid)
         if q1 is not None:
             return q0 - q1
-        if rec.get("status") == "cancelled" or oid in self.ex.cancelling:
-            return 0.0
+        if rec.get("status") == "cancelled" or oid in self.ex.cancelling or now - self.ex.recent_cancels.get(oid, 0) < 600:
+            return 0.0                                     # Oct 5 03:55: an order we asked to cancel in the last 10 min that vanished is not a fill
         ttl = rec.get("ttl") or self.LAYER_TTL.get(rec.get("layer"), RECYCLE_REST_TTL_S)
         if ttl and now - rec.get("ts", now) >= ttl - 90:
             return 0.0                                     # expired at its TTL

@@ -3002,6 +3002,22 @@ class DoubleBookingTests(EngineCase):
         self.assertEqual(len(booked), 1)
         self.assertEqual(booked[0]["qty"], 389)
 
+    def test_an_order_we_cancelled_that_vanished_is_not_a_fill(self):
+        fresh_data(layers=dict(position=dict(state="full"), dump=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS)
+        now = time.time()
+        rec = dict(id="4343", bot=eng.owner[ex].name, layer="dump", ex=ex, side="yes", action="buy", price=0.84, qty=4763, filled=1891.0, cost=0.0,
+                   left=2872, placed=stamp_(), ts=now - 3000, closed=None, status="open", sub=f"dump:{ex}:yes:0", note="", ttl=3600)
+        eng.ledger.orders["4343"] = rec
+        self.assertEqual(eng.vanished_fill("4343", rec, 2872.0, now), 2872.0, "no cancel asked: a vanished order is a fill")
+        eng.ex.recent_cancels["4343"] = now - 5                 # we asked for its DELETE 5 s ago (the 50-min refresh); the ack lags
+        self.assertEqual(eng.vanished_fill("4343", rec, 2872.0, now), 0.0)
+        eng.ex.recent_cancels["4343"] = now - 700
+        self.assertEqual(eng.vanished_fill("4343", rec, 2872.0, now), 2872.0, "10 min later the memory has expired")
+
     def test_dedup_removes_duplicates_and_nets_phantom_pairs(self):
         fresh_data()
         fake = new_fake()

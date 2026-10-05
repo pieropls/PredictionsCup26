@@ -103,6 +103,7 @@ class Executor:
         self.on_cash_reject = None                          # afternoon D-B: a write refused for funds -> the engine's CASH SHORT
         self.unknown_t = []                                 # times of writes/cancels with an UNKNOWN outcome (stop-and-pull rule)
         self.cancelling = set()                             # ids with a DELETE sent or queued
+        self.recent_cancels = {}                            # id -> when we asked for its DELETE (10 min): a vanished order we cancelled is not a fill
         self.gone = set()                                   # ids SIG confirmed cancelled since the last snapshot
         self.frozen = {ex: e["key"] for e in journal.unknown() for it in e.get("items", []) for ex in [it["order"][0]]}
         self.recovered = self.recover_acked()               # acked after the last ledger save (process was killed)
@@ -158,6 +159,10 @@ class Executor:
             if oid in self.cancelling:
                 return False
             self.cancelling.add(oid)
+            self.recent_cancels[oid] = self.clock()
+            if len(self.recent_cancels) > 5000:
+                cut = self.clock() - 600
+                self.recent_cancels = {k: v for k, v in self.recent_cancels.items() if v >= cut}
             self.cancels.insert(0 if front else len(self.cancels), dict(oid=oid, ex=order.get("ex"), reason=reason,
                                                                         created=self.clock()))
             self.wake.notify_all()
