@@ -102,6 +102,19 @@ class PositionBot:
             self.status, self.ladder = f"held side flipped to {side}: no orders", []
             return []
         fair = s["fair"] if side == "yes" or s["fair"] is None else 1 - s["fair"]
+        liq = s.get("liquidate")
+        if liq and fair is not None:                             # day 4 §3 (Piero): sell this day-1 position now, in slices,
+            bid_s = side_book(s.get("bid"), s.get("ask"), side)[0]   # at max(fair_side + 1c, SIG bid): above fair, +EV
+            px = tick_up(max(fair + liq.get("over_fair", 0.01), bid_s or 0.0))
+            n, each = int(liq.get("slices", 3)), int(held // int(liq.get("slices", 3)))
+            qs = [each] * n
+            qs[-1] += held - sum(qs)
+            out = [want(side, "sell", px, q, px, px, 0.05, "exit", sub="manual") for q in qs if q >= MIN_QTY]
+            if s.get("recycle") and s.get("fair") is not None:
+                out += recycle_wants(s["recycle"], s["fair"], s.get("bid"), s.get("ask"), s.get("kappa", 0.0), s.get("own", ()))
+            self.ladder = [dict(px=px, yes_px=self._yes(px), qty=q, state="resting") for q in qs]
+            self.status = f"holding {side.upper()} {held:,}: selling at {px:.3f} (fair {fair:.3f} + 1c / SIG bid) in {n} slices"
+            return out
         skipped = {px for px, _ in self.exits if fair is not None and px < fair - EPS}
         left = held - sum(int(f * self.ref) for px, f in self.exits if px in skipped)
         alloc = {}

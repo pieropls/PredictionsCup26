@@ -183,8 +183,18 @@ OPPORTUNITY_RESERVE = 35_000    # day 3 §3 (25k afternoon, 10k day 2): on top o
 AK_RELEASE = 0.50               # D1 + D1b (day 2 §1): share of the original AK NO position released to the recycler
 RELEASE_EVERY_S, RELEASE_MARKETS = 30, 3   # release layer (day 2 §3.3): plan every 30 s, <= 3 markets (= order-book reads)
 RELEASE_PILOT_TARGET = 10_000   # pilot: free cash above the floor
-RELEASE_TARGET = 40_000         # day 3 §3: free cash above the floor, from Oct 3 to Nov 3 (was 25k by Oct 3, 40k by Oct 10)
-RELEASE_MAX_COST = 0.10         # Oct 3 (Piero): 5% -> 10%; holdings costing more (the 10-20% bucket) are never released
+RELEASE_MAX_COST = 0.05         # day 4 §3 (release on demand): a holding is released only if it sells >= its average entry
+                                # cost (a realized profit, price >= fair_side - 5%), or if the dump catcher is cash-constrained
+                                # now and the holding returns less per day to settlement than the dump catcher did over 24 h
+RELEASE_QUIET_HOURS = (7, 8)    # no release 07:00-08:00 PT (Piero's daily review sees the book untouched)
+LIQUIDATE = {"AK-GOV-D": dict(slices=3, over_fair=0.01)}   # day 4 §3 (Piero): the day-1 AK NO sold at max(fair + 1c, SIG bid)
+# day 4 §4 reads
+PNL_READ_S = 60                 # /portfolio/pnl every 60 s (was every loop)
+ORDERS_READ_S = 30              # open orders: after our own writes or fills, else a full read every 30 s
+PRICE_ROTATE = 100              # prices: markets with our orders/holdings every loop; the rest rotate, one read (100) a loop
+LEADERS_EVERY_S = 900           # leaders logger every 15 min (was 10)
+TAPE_MIN_PER_MIN = 6            # tape collector: guaranteed 6 reads/min
+BACKOFF_429_S, BACKOFF_LOOP_S = 120, 20.0   # after a 429: 20 s loops for 2 min
 
 # A7. files ---------------------------------------------------------------------------------------------------------
 DATA = os.environ.get("SIG_DATA") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")   # releases share it

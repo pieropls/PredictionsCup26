@@ -94,7 +94,15 @@ class FakeSIG:
 
     avg_cost = {}                                         # tests: a position's avgCost (default 0.5)
 
+    def reads_last_min(self):
+        return 0
+
+    def _count(self, k):
+        self.reads = getattr(self, "reads", None) or {}
+        self.reads[k] = self.reads.get(k, 0) + 1
+
     def positions_raw(self):
+        self._count("positions")
         return [dict(exchangeId=ex, settled=False, avgCost=self.avg_cost.get(ex, 0.5), unrealizedPnl=0.0, marketValue=abs(q) * 0.5,
                      currentPrice=0.5,
                      lots=[dict(side="YES" if q > 0 else "NO", quantity=abs(q))]) for ex, q in self.pos.items() if q]
@@ -104,12 +112,15 @@ class FakeSIG:
         return sum(l["quantity"] * (1 if l["side"].lower() == "yes" else -1) for l in p["lots"])
 
     def open_orders(self):
+        self._count("orders")
         with self.lock:
             self._expire()
             return [dict(id=str(i), ex=o["ex"], side=o["side"], action=o["action"], price=o["price"], qty=float(o["qty"]))
                     for i, o in self.book.items()]
 
     def prices(self, exs):
+        self._count("prices")
+        self.last_prices_n = len(exs)
         return {str(e): self.px.get(str(e), (None, None, None)) for e in exs}
 
     spare = True                                          # the read governor (b_sig.spare_reads): tests can tighten it
@@ -173,6 +184,7 @@ class FakeSIG:
         return list(reversed(self.markets))[:limit]
 
     def pnl(self):
+        self._count("pnl")
         return dict(period="all", totalAccountValue=93000.0, totalHoldingsValue=9000.0, unrealizedPnl=-6000.0, roi=-7.0)
 
     # ---------------------------------------------------------------------------------------- writes

@@ -47,7 +47,8 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       OPPORTUNITY_RESERVE, ROC_MIN, ROC_MIN_TIGHT, RELEASE_EVERY_S, RELEASE_MARKETS, RELEASE_PILOT_TARGET,
                       FAT_LEVELS, FAT_SIZES, FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP, FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S,
                       FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S, FAT_MOVE, FAT_CAPACITY_SHARE, FAT_BOOK_READS, QTY_TOL,
-                      FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, RELEASE_TARGET, TMM_TTL_S, LADDER_TTL_S, RECYCLE_TAKE_TTL_S, TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_TTL_S, DUMP_TTL_S, DUMP_MIN_FAIR, DUMP_V3_OFFSETS, DUMP_V3_WEIGHTS, DUMP_FAIR_GAP, DUMP_SLIDE, DUMP_SIDE_DIV, DUMP_SIDE_MIN,
+                      FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, RELEASE_QUIET_HOURS, LIQUIDATE, PNL_READ_S, ORDERS_READ_S, PRICE_ROTATE, LEADERS_EVERY_S, TAPE_MIN_PER_MIN,
+                      BACKOFF_429_S, BACKOFF_LOOP_S, TMM_TTL_S, LADDER_TTL_S, RECYCLE_TAKE_TTL_S, TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_TTL_S, DUMP_TTL_S, DUMP_MIN_FAIR, DUMP_V3_OFFSETS, DUMP_V3_WEIGHTS, DUMP_FAIR_GAP, DUMP_SLIDE, DUMP_SIDE_DIV, DUMP_SIDE_MIN,
                       DUMP_SIDE_MAX, DUMP_ARENA_MULT, DUMP_ARENA_N, DUMP_SELL_MIN, DUMP_SELL_FAIR_GAP, DUMP_STEP_S, DUMP_STEP_MIN,
                       DUMP_BREAKER_SIDES, DUMP_WRITE_SHARE, DUMP_WRITES_IDLE, DUMP_MIN_SIDE_COST, DUMP_QUEUE_S, DUMP_BOOK_READS, DUMP_HOLD_S,
                       DUMP_NEWS_DROP, DUMP_BREAKER_FAIR, DUMP_PILOT_S, DUMP_CONC_CAP, RELEASE_FALLBACK_QTY, FAT_BAND_EDGES, FAT_TIER_A_ONLY, FAT_NEW_LEVEL,
@@ -57,6 +58,15 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       TMM_MID_HALF_LIFE_S, TMM_KAPPA_MAX, TMM_SIZE, TMM_CAP_SIDE, TMM_SKEW_TICKS, TMM_OFFER_MID_S, TMM_RELEASE_S,
                       INTEL_READS, INTEL_REVISIT_S, INTEL_DAILY_HOUR, HEADLINE_RACES)
 from d_ledger import Ledger, stamp, write_atomic
+
+
+def loop_gap(reads, ours, now):
+    """Seconds between loops: 2 s on our own fills while reads are cheap, 6 s from 60 reads/min, 15 s from 75 (Oct 3 (a)),
+    and 20 s for 2 min after any 429 (day 4 §4)."""
+    gap = 15.0 if reads >= 75 else 6.0 if reads >= 60 or not ours else 2.0
+    if now - (getattr(api, "LAST_429", [0.0])[0]) < BACKOFF_429_S:
+        gap = max(gap, BACKOFF_LOOP_S)
+    return gap
 
 
 def read_json(path, default):
@@ -330,6 +340,8 @@ class Engine:
         self.breaker, self.bad_since, self.tranche_view, self.used, self.ladder_quota = {}, None, {}, {}, 0
         self.pilot_sets, self.sweep_rank = {}, {}
         self.release_now, self.release_t, self.depth_cache = {}, 0.0, {}
+        self.px_rot, self.open_read_t, self.open_wsig, self.pnl_read_t, self.last_fill_exs = 0, None, None, 0.0, set()   # day 4 §4
+        self.release_demand = None
         self.fat_book, self.fat_anchor, self.fat_block, self.fair_hist, self.fat_now = {}, {}, {}, {}, {}
         self.fat_sent = collections.deque(maxlen=5000)      # placement times (pilot gate: write usage)
         self.dump_now, self.dump_book, self.dump_block, self.dump_view, self.dump_ref = {}, {}, {}, {}, {}   # dump catcher
@@ -352,6 +364,7 @@ class Engine:
         self.wake, self.rt_lock, self.rt_pending = threading.Event(), threading.Lock(), []   # realtime -> planner
         self.fill_retry, self.uncov_since = {}, {}
         self.tape, self.intel_px, self.intel_t, self.fair_series, self.intel_s = None, {}, {}, {}, {}   # day 2 §5
+        self.tape_reads_t = collections.deque(maxlen=200)
         self.requotes = []                                  # times of MM/ladder requote cancels (A9 cap)
         self.sig_feed = self.pm_feed = None
         self.latency = {k: [] for k in ("fill_to_queued", "pm_to_defend", "plan_cycle")}
@@ -441,14 +454,31 @@ class Engine:
         now = time.time()
         self.t = {}
         # F1 read: Polymarket and every SIG read at the same time (each SIG read can take seconds under load)
-        watched = set(self.owner) | {ex for pb in self.pairs for ex in pb.legs}
         self.controls.reload_if_changed()
         events = self.take_rt()                             # P2: what woke us (fills, order updates, PM moves, resyncs)
+        # day 4 §4 read budget: prices for markets with our orders or holdings every loop, the rest rotated (one read of
+        # 100 a loop); open orders after our own writes / fills, else every 30 s; P&L every 60 s
+        all_ex = sorted(set(self.owner) | {ex for pb in self.pairs for ex in pb.legs})
+        core = {o["ex"] for o in self.open} | {ex for ex, b in self.book.items() if abs(b.get("pos", 0)) >= 1} | set(self.focus)
+        rest = [ex for ex in all_ex if ex not in core]
+        if rest:
+            k = self.px_rot % max(1, -(-len(rest) // PRICE_ROTATE))
+            self.px_rot += 1
+            core |= set(rest[k * PRICE_ROTATE:(k + 1) * PRICE_ROTATE])
+        watched = set(all_ex) if not self.px else (core or set(all_ex))   # first loop after a start: every market
+        wsig = (self.ex.sent_orders, len(self.ex.gone), len(self.ex.cancelling))
+        need_orders = (self.open_read_t is None or now - self.open_read_t >= ORDERS_READ_S or wsig != self.open_wsig
+                       or any(k in ("fills", "orders", "resync") for _, k, _ in events) or bool(self.last_fill_exs))
+        low = ((self.acct or {}).get("totalAccountValue") or 0) - ((self.acct or {}).get("totalHoldingsValue") or 0) < CASH_RESERVE + 5_000
+        need_pnl = not self.acct or low or now - self.pnl_read_t >= PNL_READ_S   # cash near the floor: read it every loop
         with ThreadPoolExecutor(max_workers=6) as pool:
             # open orders FIRST, then positions, in one worker: a fill between the two reads can then only make the
             # position look smaller than the orders imply (I2 capacity understated, never overstated)
-            jobs = dict(fair=pool.submit(pm.fairs, self.mp), book=pool.submit(lambda: (api.open_orders(), api.positions_raw())),
-                        px=pool.submit(api.prices, watched), fills=pool.submit(api.fills, set(self.ledger.seen)), pnl=pool.submit(api.pnl))
+            jobs = dict(fair=pool.submit(pm.fairs, self.mp),
+                        book=pool.submit(lambda: ((api.open_orders() if need_orders else list(self.open)), api.positions_raw())),
+                        px=pool.submit(api.prices, watched), fills=pool.submit(api.fills, set(self.ledger.seen)))
+            if need_pnl:
+                jobs["pnl"] = pool.submit(api.pnl)
         got = {}
         for k, j in jobs.items():
             try:
@@ -458,6 +488,11 @@ class Engine:
                     raise                                       # no positions/orders/prices: no trading this loop
                 self.event("ERR", f"{k}: {e!r}")
         got["open"], got["pos"] = got.pop("book")
+        if need_orders:
+            self.open_read_t, self.open_wsig = now, (self.ex.sent_orders, len(self.ex.gone), len(self.ex.cancelling))
+        if "pnl" in got:
+            self.pnl_read_t = now
+        got["px"] = {**{ex: v for ex, v in self.px.items() if ex not in got["px"]}, **got["px"]}   # rotated markets keep their last price
         self.t["read"] = time.time() - now
         if "fair" in got:
             self.pm = got["fair"]
@@ -517,6 +552,7 @@ class Engine:
             except Exception as err:
                 self.event("ERR", f"backfill: {err!r}")
         self.new_fill_orders = new_orders
+        self.last_fill_exs = set(fill_exs)                  # §4: a fill -> the next loop re-reads open orders
         # §6: SIG's fill notification can beat its REST fills page; a notification that found nothing re-polls in 2 s (x2)
         if not fill_exs:
             retry = [(t_ev, k, x) for t_ev, k, x in events if k == "fills" and self.fill_retry.get(t_ev, 0) < 2]
@@ -574,7 +610,7 @@ class Engine:
         kappa, _ = self.kappa()
         used = self.bucket_usage()
         try:
-            self.release_now = self.release_plan(cash, now)
+            self.release_now = self.release_plan(cash, now, used)
         except Exception as err:                            # never let it stop the loop
             self.release_now = {}
             self.event("ERR", f"release plan: {err!r}")
@@ -791,8 +827,12 @@ class Engine:
         changed = sorted((ex for ex in exs if last(ex) is not None and last(ex) != self.intel_px.get(ex)), key=lambda ex: self.intel_t.get(ex, 0))
         stale = sorted((ex for ex in exs if now - self.intel_t.get(ex, 0) >= INTEL_REVISIT_S), key=lambda ex: self.intel_t.get(ex, 0))
         for ex in list(dict.fromkeys(changed + stale))[:INTEL_READS]:
-            if not api.spare_reads(40):                     # §6: the loop's own reads first
+            tape_min = sum(1 for t_ in self.tape_reads_t if t_ >= now - 60)
+            if tape_min >= TAPE_MIN_PER_MIN and not api.spare_reads(40):   # §4: 6/min guaranteed, more only with spare reads
                 break
+            if tape_min < TAPE_MIN_PER_MIN and api.reads_last_min() >= 95:
+                break
+            self.tape_reads_t.append(now)
             new = self.tape.visit(ex)
             self.intel_t[ex], self.intel_px[ex] = now, last(ex)
             if not new:
@@ -999,6 +1039,7 @@ class Engine:
         bid, ask, last = self.px.get(b.ex, (None, None, None))
         if b.kind == "position":
             s = dict(pos=self.ledger.sub(b.ex, "manual"), fair=self.fair.get(b.ex), bid=bid, ask=ask, kappa=kappa,
+                     liquidate=LIQUIDATE.get(b.name),
                      recycle={k: v for k, v in self.ledger.subbooks.get(b.ex, {}).items() if k.startswith("recycle:")}
                      if self.controls.on("recycler") and self.controls.allows(b.ex, "recycler") else {})
             return s
@@ -2416,22 +2457,34 @@ class Engine:
             return bids[0][1] if bids else 0.0
         return asks[0][1] if asks else 0.0
 
-    def release_plan(self, cash, now):
-        """Day 2 §3.3: while free cash (above the floor) is below target, sell holdings into the SIG bid in order of cost to
-        free (fair - bid) / bid, cheapest first, while that cost <= RELEASE_MAX_COST; a limit at the bid, sized <= the top of
-        book. Planned every 30 s for at most 3 markets (3 order-book reads); the bots place it (layer 'release')."""
+    def dump_demand(self, cash, used):
+        """Day 4 §3: is the dump catcher cash-constrained now? (funded reserve < what its live levels need) and its measured
+        return per SIG per day over the last 24 h (realized + edge vs fair at fill, per SIG of catches)."""
+        funded = max(0.0, min(float(OPPORTUNITY_RESERVE), cash - CASH_RESERVE - used.get("committed", 0.0)))
+        need = sum(w["px"] * w["qty"] for ws in self.dump_now.values() for w in ws)
+        s = self.dump_stats(time.time() - 86400)
+        ret = (s["realized"] + s["edge_fair"]) / max(s["cost"], 1.0) if s["fills"] else 0.0
+        return dict(constrained=need > funded + 1e-6, need=round(need), funded=round(funded), return_per_day=ret, shortfall=max(0.0, need - funded))
+
+    def release_plan(self, cash, now, used=None):
+        """Day 4 §3 (Piero's rule), release on demand: a holding is sold into the SIG bid only if (1) the bid is >= its average
+        entry cost (a realized profit) with the price still >= fair_side - 5%, or (2) the dump catcher is cash-constrained now,
+        the holding returns less per day to settlement than the dump catcher made per day over 24 h, and the cost vs fair is
+        <= 5% (then only up to the shortfall). Never while new risk is paused; not 07:00-08:00 PT. Lowest return per day
+        first; a limit at the bid, sized to the top of book (or 500 without a spare read)."""
         st = self.controls.state("release")
-        if st == "off" or self.fills_blind:              # evening §1.4: no release while fills are blind
+        if st == "off" or self.fills_blind or self.controls.paused:
+            return {}
+        if RELEASE_QUIET_HOURS[0] <= time.localtime(now).tm_hour < RELEASE_QUIET_HOURS[1]:
             return {}
         if now - self.release_t < RELEASE_EVERY_S and self.release_now:
             return {ex: r for ex, r in self.release_now.items() if ex in self.book}
         self.release_t = now
-        target = self.release_target()[0] if st == "full" else min(RELEASE_PILOT_TARGET, self.release_target()[0])
+        dd = self.dump_demand(cash, used or {})
+        self.release_demand = dd
         pending = sum(o["qty"] * (1 - o["price"]) for o in self.open
                       if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "release")
-        need = target - (cash - CASH_RESERVE) - pending
-        if need <= 0:
-            return {}
+        budget = max(0.0, dd["shortfall"] - pending)         # branch (2) only up to the dump catcher's shortfall
         maxc, cands = self.release_max_cost(), []
         for ex, b in self.book.items():
             q = b["pos"]
@@ -2439,19 +2492,26 @@ class Engine:
                 continue
             side = "yes" if q > 0 else "no"
             ctf = self.cost_to_free(ex, side)
-            if ctf is None or ctf < 0 or ctf > maxc:        # a bid above fair is the recycler's job
+            if ctf is None or ctf < 0 or ctf > maxc:        # a bid above fair is the recycler's job; > 5% never
+                continue
+            bid = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
+            avg = float((b.get("row") or {}).get("avgCost") or 0)
+            profit = bid is not None and avg > 0 and bid >= avg - 1e-9
+            rpd = self.return_per_day(ctf)
+            demand = dd["constrained"] and budget > 0 and rpd < dd["return_per_day"]
+            if not (profit or demand):
                 continue
             subs = self.ledger.subbooks.get(ex, {})
             avail = sum(abs(v) for k, v in subs.items() if k in self.RELEASE_SUBS and v * q > 0)
             if avail >= MIN_QTY:
-                cands.append((self.return_per_day(ctf), ctf, ex, side, avail))
+                cands.append((rpd, ctf, ex, side, avail, "profit" if profit else "demand"))
         plan = {}
-        for _, ctf, ex, side, avail in sorted(cands):       # lowest expected return to settlement per SIG per day first
-            if need <= 0 or len(plan) >= RELEASE_MARKETS:
+        for rpd, ctf, ex, side, avail, why in sorted(cands):      # lowest return per day first
+            if len(plan) >= RELEASE_MARKETS:
                 break
             bid = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
             depth = self.bid_depth(ex, side, now)
-            qty = int(min(avail, depth, need / bid))
+            qty = int(min(avail, depth, (budget / bid) if why == "demand" else avail))
             if qty < MIN_QTY:
                 continue
             subs, left, split = self.ledger.subbooks.get(ex, {}), qty, {}
@@ -2463,11 +2523,12 @@ class Engine:
                         split[k] = take
                         left -= take
             if split:
-                plan[ex] = dict(side=side, px=bid, cost=round(ctf, 4), subs=split)
-                need -= sum(split.values()) * bid
+                plan[ex] = dict(side=side, px=bid, cost=round(ctf, 4), subs=split, why=why)
+                if why == "demand":
+                    budget -= sum(split.values()) * bid
         if plan:
             self.event("RELEASE", "; ".join(f"{self.name(ex)} {r['side'].upper()} {sum(r['subs'].values()):,} @ {r['px']:.3f} "
-                                             f"(cost {r['cost'] * 100:.1f}%)" for ex, r in plan.items()))
+                                             f"(cost {r['cost'] * 100:.1f}%, {r['why']})" for ex, r in plan.items()))
         return plan
 
     def return_per_day(self, ctf):
@@ -2486,7 +2547,10 @@ class Engine:
                 sig += sale * f["qty"]
                 if held_fair is not None and sale > 0:
                     w += (held_fair - sale) / sale * sale * f["qty"]
-        return dict(sig=round(sig, 2), avg_cost=round(w / sig, 4) if sig else None)
+        rel = [f for f in self.ledger.fills if f["layer"] == "release" and f["t"][:10] == today]
+        return dict(sig=round(sig, 2), avg_cost=round(w / sig, 4) if sig else None, fills=len(rel),
+                    realized=round(sum(f.get("realized") or 0 for f in rel), 2), vs_fair=round(-w, 2),
+                    demand=getattr(self, "release_demand", None))
 
     def cover_why(self, ex, side, why):
         if self.coverage is not None and f"{ex}|{side}" in self.coverage["reasons"]:
@@ -2529,7 +2593,7 @@ class Engine:
 
     def log_leaders(self, now):
         """Every 10 min (night plan §5.6): the top 20 and our own row -> data/leaders.csv (2 reads)."""
-        if now - self.leaders_t < 600 or not self.controls.on("leaders") or not api.spare_reads():
+        if now - self.leaders_t < LEADERS_EVERY_S or not self.controls.on("leaders") or not api.spare_reads():
             return
         self.leaders_t = now
         try:
@@ -3614,8 +3678,8 @@ class Engine:
         return dict(idle_3d=dict(n=idle3[0], sig=round(idle3[1], 2)), no_exit=dict(n=no_exit[0], sig=round(no_exit[1], 2)))
 
     def release_target(self):
-        """Free-cash target (excluding the floor), day 3 §3: RELEASE_TARGET (40k) now, through Nov 3."""
-        return RELEASE_TARGET, "2026-11-03"
+        """Day 4 §3: release is on demand (no free-cash target); the dashboard's target is the opportunity reserve."""
+        return OPPORTUNITY_RESERVE, "on demand"
 
     def cost_to_free(self, ex, side):
         bid = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
@@ -4012,8 +4076,7 @@ def main():
                 reads = api.health(60)["reads_last_min"]    # ~8 SIG reads a loop; SIG allows 100 a minute
                 with eng.rt_lock:
                     ours = any(k != "pm_move" for _, k, _ in eng.rt_pending)
-                gap = 15.0 if reads >= 75 else 6.0 if reads >= 60 or not ours else 2.0   # own fills: 2 s (A7) while cheap;
-                # Oct 3 (a): 15 s (was 10) when reads are high: SIG 429s at ~80+/min counted on our side
+                gap = loop_gap(reads, ours, time.time())
                 time.sleep(max(0.0, gap - (time.time() - t)))
     except KeyboardInterrupt:
         pass

@@ -196,6 +196,11 @@ def engine_order_problems(fake, ledger):
 class EngineCase(unittest.TestCase):
     def setUp(self):
         fresh_data()
+        self.addCleanup(setattr, f_engine, "LIQUIDATE", f_engine.LIQUIDATE)
+        f_engine.LIQUIDATE = {}                           # the AK sale (day 4 §3) has its own test
+        for k in ("PNL_READ_S", "ORDERS_READ_S"):         # day 4 §4 read caching has its own test; the rest read fresh each loop
+            self.addCleanup(setattr, f_engine, k, getattr(f_engine, k))
+            setattr(f_engine, k, 0)
         self.out = contextlib.redirect_stdout(io.StringIO())   # the engine narrates every order; keep test output short
         self.out.__enter__()
 
@@ -924,6 +929,7 @@ class ReleaseTests(EngineCase):
         fresh_data(layers=dict(position=dict(state="full"), recycler=dict(state="full"), release=dict(state="pilot")))
         fake = new_fake(writes_per_min=10_000)
         fake.pos[ex] = 2000
+        fake.avg_cost[ex] = 0.40                          # day 4 §3: released because the SIG bid is above its entry cost
         base = fake.pnl()
         fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 1000)
         eng = engine(fake)
@@ -1736,14 +1742,14 @@ class DumpV3Tests(EngineCase):
         self.assertEqual(led.tranches[f"dump:{ex}:yes:0"]["state"], "closed")
         self.assertTrue(any(e["kind"] == "FIX" for e in eng.events))
 
-    def test_release_cost_cap_is_10_percent(self):
+    def test_release_cost_cap_is_5_percent(self):
         fake, eng, favs = self.rig()
-        self.assertEqual(eng.release_max_cost(), 0.10)
+        self.assertEqual(eng.release_max_cost(), 0.05)    # day 4 §3: both branches of release on demand stay within 5%
         ex = favs[0]
         bid, f = eng.px[ex][0], eng.fair[ex]
-        eng.fair[ex] = bid * 1.12
-        self.assertFalse(eng.release_ok(ex, "yes", "inventory", eng.cost_to_free(ex, "yes")))
         eng.fair[ex] = bid * 1.08
+        self.assertFalse(eng.release_ok(ex, "yes", "inventory", eng.cost_to_free(ex, "yes")))
+        eng.fair[ex] = bid * 1.04
         self.assertTrue(eng.release_ok(ex, "yes", "inventory", eng.cost_to_free(ex, "yes")))
         eng.fair[ex] = f
 
@@ -2087,6 +2093,100 @@ class LongshotTests(EngineCase):
             fake2.fill(o["id"], 100)
         loop(eng2, fake2)
         self.assertGreater(eng2.breaker.get(("long", "all"), 0), time.time())
+
+
+class Day4Tests(EngineCase):
+    """Day 4 §3 (release on demand, the AK sale) and §4 (reads)."""
+
+    def rig(self, cash_above_floor=40_000):
+        fresh_data(layers=dict(position=dict(state="full"), release=dict(state="full"), dump=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + cash_above_floor)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        return fake, eng
+
+    def test_ak_sale_three_slices_above_fair_and_sig_bid(self):
+        f_engine.LIQUIDATE = {"AK-GOV-D": dict(slices=3, over_fair=0.01)}
+        fake, eng = self.rig()
+        loop(eng, fake)
+        sells = sorted((o["price"], o["qty"]) for o in fake.open_orders() if o["ex"] == AK and o["action"] == "sell"
+                       and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "exit")
+        self.assertEqual(len(sells), 3, sells)
+        held = abs(eng.ledger.sub(AK, "manual"))
+        self.assertEqual(sum(q for _, q in sells), held)
+        fair_no = 1 - eng.fair[AK]
+        bid_no = bots.side_book(*eng.px[AK][:2], "no")[0]
+        self.assertTrue(all(abs(p - bots.tick_up(max(fair_no + 0.01, bid_no))) < 1e-9 for p, _ in sells), (sells, fair_no, bid_no))
+        self.assertGreater(sells[0][0], fair_no, "sold above Polymarket fair: +EV")
+
+    def test_release_on_demand_rules(self):
+        fake, eng = self.rig()
+        ex = mid_market(eng)
+        fake.pos[ex] = 2000
+        fake.avg_cost[ex] = 0.30                          # bought at 0.30, SIG bid ~0.48: a realized profit -> released
+        loop(eng, fake)
+        eng.release_t = 0
+        plan = eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage())
+        self.assertIn(ex, plan)
+        self.assertEqual(plan[ex]["why"], "profit")
+        fake.avg_cost[ex] = 0.60                          # bought above the bid: no profit; demand branch needs a constrained dump
+        loop(eng, fake)
+        eng.release_t, eng.dump_now = 0, {}
+        self.assertNotIn(ex, eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage()), "no target, no profit: not sold")
+        eng.dump_now = {ex: [dict(side="yes", px=0.5, qty=200_000, sub="x", level=0)]}   # live levels need 100k: constrained
+        eng.ledger.fills.append(dict(key="d1", order="d1", ex=ex, side="yes", qty=1000.0, price=0.80, action="buy", realized=0.0,
+                                     t=time.strftime("%Y-%m-%d %H:%M:%S"), bot="b", layer="dump", before_engine=False, fair=0.95,
+                                     edge=0.15, sig_edge=0.0, sig_mid=0.82))          # the dump catcher earned 18.75%/day
+        eng.release_t = 0
+        plan = eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage())
+        self.assertEqual(plan.get(ex, {}).get("why"), "demand", plan)
+        eng.controls.set_paused(True, "t")               # never while new risk is paused
+        eng.release_t = 0
+        self.assertEqual(eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage()), {})
+        eng.controls.set_paused(False, "t")
+        from unittest import mock
+        eng.release_t = 0
+        with mock.patch.object(f_engine, "RELEASE_QUIET_HOURS", (0, 24)):   # Piero's review hour
+            self.assertEqual(eng.release_plan(eng.cash_hist[-1], time.time(), eng.bucket_usage()), {})
+
+    def test_reads_pnl_60s_orders_30s_prices_rotated(self):
+        f_engine.PNL_READ_S, f_engine.ORDERS_READ_S = 60, 30
+        fake, eng = self.rig()
+        real_pnl = fake.pnl
+        fake.pnl = lambda: (fake._count("pnl"), real_pnl())[1]   # the rig's lambda doesn't count: count here
+        for _ in range(3):                                # settle: the first loops place orders (a write -> re-read)
+            loop(eng, fake)
+        fake.reads = {}
+        n_all = len(eng.px)
+        loop(eng, fake)                                   # no writes, no fills: no open-orders read, no pnl read
+        self.assertEqual(fake.reads.get("pnl", 0), 0)
+        self.assertEqual(fake.reads.get("orders", 0), 0)
+        self.assertEqual(fake.reads.get("positions"), 1)
+        self.assertLess(fake.last_prices_n, n_all, "prices: core markets + one rotated chunk, not every market")
+        self.assertEqual(len(eng.px), n_all, "rotated markets keep their last price")
+        eng.pnl_read_t -= 61
+        eng.open_read_t -= 31
+        fake.reads = {}
+        loop(eng, fake)
+        self.assertEqual(fake.reads.get("pnl"), 1)
+        self.assertEqual(fake.reads.get("orders"), 1)
+        fake.reads = {}
+        eng.rt_event("fills", set(), time.time())         # our own fill -> open orders re-read at once
+        loop(eng, fake)
+        self.assertEqual(fake.reads.get("orders"), 1)
+
+    def test_loop_backs_off_to_20s_after_a_429(self):
+        self.assertEqual(f_engine.loop_gap(50, True, time.time()), 2.0)
+        self.assertEqual(f_engine.loop_gap(80, True, time.time()), 15.0)
+        f_engine.api.LAST_429 = [time.time()]
+        try:
+            self.assertEqual(f_engine.loop_gap(50, True, time.time()), 20.0)
+            self.assertEqual(f_engine.loop_gap(50, True, time.time() + 130), 2.0)
+        finally:
+            f_engine.api.LAST_429 = [0.0]
 
 
 class IntelTests(EngineCase):
