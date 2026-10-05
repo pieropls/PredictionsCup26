@@ -61,25 +61,65 @@ def strategy_pnl(eng, fills):
     return out
 
 
+def snapshot_path(eng, start):
+    return os.path.join(eng.DATA, "sigday", time.strftime("%Y-%m-%d", time.localtime(start)) + ".json")
+
+
+def take_snapshot(eng, now):
+    """The SIG-day start snapshot (first loop at or after 17:00 PT; `late` when the engine was down then): every position
+    (net YES) with SIG's own mark, the account value and cash. Market drift = Σ q0 x (mark_now - mark_0) over it."""
+    start = sig_day_start(now)
+    path = snapshot_path(eng, start)
+    if os.path.exists(path) or not eng.book or not eng.acct:
+        return None
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    pos = {ex: [b.get("pos", 0), eng.sig_mark(ex, "yes")] for ex, b in eng.book.items() if abs(b.get("pos", 0)) >= 1}
+    snap = dict(start=start, t=now, late=now - start > 300, account=eng.acct.get("totalAccountValue"),
+                cash=eng.acct.get("totalAccountValue", 0) - (eng.acct.get("totalHoldingsValue") or 0), positions=pos)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(snap, fh)
+    os.replace(tmp, path)
+    return snap
+
+
+def drift_estimate(eng, snap):
+    """Σ q0 x (SIG mark now - SIG mark at the snapshot) over the positions held then: the independent market drift."""
+    if not snap:
+        return None
+    out = 0.0
+    for ex, (q0, m0) in (snap.get("positions") or {}).items():
+        m = eng.sig_mark(ex, "yes")
+        if m is None or m0 is None:
+            continue
+        out += q0 * (m - m0)
+    return out
+
+
 def sigday_view(eng, now, pts):
-    """Today in SIG-day terms: Δ account, per-strategy P&L at current marks, market drift (independent), the check."""
+    """Today in SIG-day terms: today = Δ account since 17:00 PT; Σ strategies = fills since then at current SIG marks;
+    market drift = the rest (exact: Δ account = Σ fills at marks + Σ q0 (mark_now - mark_0)); the check on Admin compares
+    that drift with the independent estimate from the 17:00 position snapshot (within 25), when the snapshot was on time."""
     start = sig_day_start(now)
     a = eng.acct or {}
     acct = a.get("totalAccountValue")
-    unreal_now = a.get("unrealizedPnl")
     p0 = pnl_at(pts, start)
+    snap = eng.read_json(snapshot_path(eng, start), None)
     fills = [f for f in eng.ledger.fills if not f["before_engine"] and fill_ts(f) >= start]
     strat = strategy_pnl(eng, fills)
     s_sum = sum(v["pnl"] for v in strat.values())
-    today = None if acct is None or p0 is None else acct - p0["sig"]
-    drift = None
-    if p0 is not None and unreal_now is not None and p0.get("unreal") is not None:
-        drift = (float(unreal_now) - p0["unreal"]) - sum(v["unreal"] for v in strat.values())
-    check = None if today is None or drift is None else today - (s_sum + drift)
+    a0 = snap["account"] if snap and not snap.get("late") and snap.get("account") is not None else (None if p0 is None else p0["sig"])
+    today = None if acct is None or a0 is None else acct - a0
+    drift = None if today is None else today - s_sum
+    est = drift_estimate(eng, snap) if snap and not snap.get("late") else None
+    check = None if drift is None or est is None else drift - est
+    note = ("" if check is not None else "no 17:00 PT snapshot yet: the check runs from the next SIG day" if not snap
+            else f"snapshot taken late ({time.strftime('%H:%M', time.localtime(snap['t']))}): the check runs from the next SIG day")
     return dict(since=start, since_str=time.strftime("%Y-%m-%d %H:%M", time.localtime(start)), label=sig_day_label(start),
-                account_start=None if p0 is None else round(p0["sig"], 2), today=None if today is None else round(today, 2),
+                account_start=None if a0 is None else round(a0, 2), today=None if today is None else round(today, 2),
                 our_trades=round(s_sum, 2), drift=None if drift is None else round(drift, 2),
-                check=None if check is None else round(check, 2), ok=check is None or abs(check) <= 25,
+                drift_estimate=None if est is None else round(est, 2),
+                check=None if check is None else round(check, 2), ok=check is None or abs(check) <= 25, note=note,
                 strategies={k: dict(pnl=round(v["pnl"], 2), realized=round(v["realized"], 2), trades=v["trades"], volume=round(v["volume"], 2))
                             for k, v in strat.items()},
                 fair_account=None if not eng.book else round(eng.account_fair()[0], 2))
@@ -96,10 +136,12 @@ def daily_view(eng, now, pts):
         inwin = [p for p in pts if start <= p["t"] < end]
         if inwin:
             p1 = inwin[-1]
-        if p0 is not None and p1 is not None:
+        snap = eng.read_json(snapshot_path(eng, start), None)
+        a0 = snap["account"] if snap and not snap.get("late") and snap.get("account") is not None else (None if p0 is None else p0["sig"])
+        if a0 is not None and p1 is not None:
             fills = [f for f in eng.ledger.fills if not f["before_engine"] and start <= fill_ts(f) < end]
             strat = strategy_pnl(eng, fills)
-            tot = p1["sig"] - p0["sig"] if end <= now else ((eng.acct or {}).get("totalAccountValue") or p1["sig"]) - p0["sig"]
+            tot = p1["sig"] - a0 if end <= now else ((eng.acct or {}).get("totalAccountValue") or p1["sig"]) - a0
             s_sum = sum(v["pnl"] for v in strat.values())
             rows.append(dict(start=start, label=sig_day_label(start), partial=end > now, total=round(tot, 2),
                              strategies={k: round(v["pnl"], 2) for k, v in strat.items()}, drift=round(tot - s_sum, 2)))
@@ -297,7 +339,8 @@ def admin_v4(eng, now, sigday):
     ratchet = eng.controls.d.get("ratchet") or {}
     m = eng.money_view() or {}
     return dict(trims=dict(eng.ex.trims), foreign=foreign, duplicates=sum(1 for v in dup.values() if v > 1), unknown=eng.ex.stats().get("unknown"),
-                recon=dict(today=sigday.get("today"), sum=sigday.get("our_trades"), drift=sigday.get("drift"), check=sigday.get("check"), ok=sigday.get("ok")),
+                recon=dict(today=sigday.get("today"), sum=sigday.get("our_trades"), drift=sigday.get("drift"), estimate=sigday.get("drift_estimate"),
+                           check=sigday.get("check"), ok=sigday.get("ok"), note=sigday.get("note")),
                 coverage=cov, decisions=list(eng.controls.d.get("decisions") or []), ratchet=ratchet,
                 pt_day=m.get("today"), release=getattr(eng, "release_name", ""), hold_gates=bool(eng.controls.d.get("hold_gates")),
                 gate_free=list(eng.controls.d.get("gate_free") or []), truth_mode=eng.controls.d.get("truth_mode", "shadow"))

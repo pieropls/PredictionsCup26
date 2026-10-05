@@ -2427,6 +2427,9 @@ class DashV4PayloadTests(EngineCase):
             w.writerow(["time", "account_value", "account_book", "account_pm", "unrealized", "roi_pct"])
             w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start)), 92800.0, 92800.0, 92800.0, -6200.0, -7.2])
         eng.acct = fake.pnl()
+        snap_path = m_dash4.snapshot_path(eng, start)
+        if os.path.exists(snap_path):
+            os.remove(snap_path)                            # the loops above took a late snapshot: replace it with an on-time one
         s = eng.dash_state()
         for k in ("sigday", "status", "daily4", "feed", "strategies4", "capital4", "holdings4", "leaders4", "admin4"):
             self.assertTrue(s.get(k) not in (None, [], {}), k)
@@ -2434,6 +2437,32 @@ class DashV4PayloadTests(EngineCase):
         self.assertEqual(sd["since"], start)
         self.assertAlmostEqual(sd["today"], 93000.0 - 92800.0, places=2, msg="today = Δ account since 17:00 PT")
         self.assertAlmostEqual(sd["our_trades"] + sd["drift"], sd["today"], delta=25)
+        self.assertIsNone(sd["check"], "no on-time snapshot: no check yet")
+        self.assertIn("snapshot", sd["note"])
+        self.assertTrue(sd["ok"])
+        # an on-time 17:00 snapshot: every position held then, SIG marks 1c lower than now -> drift estimate = Σ q0 x 0.01
+        pos = {ex: [b["pos"], eng.sig_mark(ex, "yes") - 0.01] for ex, b in eng.book.items() if abs(b.get("pos", 0)) >= 1}
+        est = sum(q * 0.01 for q, _ in pos.values())
+        os.makedirs(os.path.dirname(snap_path), exist_ok=True)
+        with open(snap_path, "w") as fh:
+            json.dump(dict(start=start, t=start + 20, late=False, account=93000.0 - (sd["our_trades"] + est), cash=0, positions=pos), fh)
+        sd = eng.dash_state()["sigday"]
+        self.assertAlmostEqual(sd["drift_estimate"], est, places=2)
+        self.assertAlmostEqual(sd["check"], 0.0, places=1, msg="drift (residual) = the snapshot estimate")
+        self.assertTrue(sd["ok"])
+        with open(snap_path) as fh:
+            snap = json.load(fh)
+        snap["account"] -= 300                               # a 300 gap between the two -> red on Admin
+        with open(snap_path, "w") as fh:
+            json.dump(snap, fh)
+        sd = eng.dash_state()["sigday"]
+        self.assertFalse(sd["ok"])
+        self.assertAlmostEqual(abs(sd["check"]), 300.0, places=1)
+        snap["account"] += 300                               # back to the consistent snapshot for the rest of the checks
+        with open(snap_path, "w") as fh:
+            json.dump(snap, fh)
+        s = eng.dash_state()
+        sd = s["sigday"]
         self.assertTrue(sd["ok"])
         rows = s["strategies4"]
         self.assertEqual([r["key"] for r in rows], ["dump", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])

@@ -633,6 +633,13 @@ class Engine:
             self.track_scalps(now)
         except Exception as err:
             self.event("ERR", f"scalper exits: {err!r}")
+        try:
+            snap = dash4.take_snapshot(self, now)           # dashboard v4 rule 3: the 17:00 PT position snapshot (once per SIG day)
+            if snap:
+                self.event("SIGDAY", f"SIG day {dash4.sig_day_label(snap['start'])} snapshot: {len(snap['positions'])} positions, "
+                                     f"account {snap['account']:,.0f}" + (" (late: taken " + time.strftime('%H:%M', time.localtime(now)) + ")" if snap["late"] else ""))
+        except Exception as err:
+            self.event("ERR", f"sigday snapshot: {err!r}")
         self.controller(now)
         kappa, _ = self.kappa()
         used = self.bucket_usage()
