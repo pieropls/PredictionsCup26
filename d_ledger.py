@@ -354,6 +354,22 @@ class Ledger:
                         break
                 if not dry_run and abs(books.get("inventory", 0)) < 1:
                     books.pop("inventory", None)
+            # an order booked beyond its quantity (older pairs further apart than the window): drop its synthetic fills,
+            # newest first, until the booking fits the order
+            booked = {}
+            for f in self.fills:
+                if f.get("key") not in {d["key"] for d in drop}:
+                    booked[str(f.get("order"))] = booked.get(str(f.get("order")), 0.0) + f["qty"]
+            for oid, order in self.orders.items():
+                excess = booked.get(oid, 0.0) - (order.get("qty") or 0)
+                if excess <= 1:
+                    continue
+                for f in sorted((x for x in self.fills if str(x.get("order")) == oid and x.get("source") == "order_shrink" and x not in drop),
+                                key=lambda x: x["t"], reverse=True):
+                    if excess <= 1:
+                        break
+                    drop.append(f)
+                    excess -= f["qty"]
             keys = {f["key"] for f in drop}
             if not dry_run:
                 for f in drop:

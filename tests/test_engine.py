@@ -3014,7 +3014,8 @@ class DoubleBookingTests(EngineCase):
                     fair=0.9, sig_mid=0.82, edge=0.085, sig_edge=0.005)
         L.fills.append(dict(base, key="49074377:9001", t="2026-10-05 01:01:24"))
         L.fills.append(dict(base, key="order_shrink:9001:52", t="2026-10-05 01:01:27", source="order_shrink"))
-        L.fills.append(dict(base, key="order_shrink:9001:99", t="2026-10-05 01:40:00", source="order_shrink"))   # no SIG fill near it: stays
+        L.orders["9004"] = dict(L.orders["9001"], id="9004", filled=389.0, truth_q=389.0)
+        L.fills.append(dict(base, order="9004", key="order_shrink:9004:99", t="2026-10-05 01:40:00", source="order_shrink"))   # genuine: no SIG fill, fits its order
         L.subbooks[ex] = {"inventory": 389.0, f"dump:{ex}:no:0": -389.0}
         L.tranches[f"dump:{ex}:no:0"] = dict(ex=ex, side="no", kind="dump", state="open", ts=time.time(), t="x", avg=0.815)
         L.subbooks["975"] = {"inventory": 1450.0, "pairset:Oklahoma:1": -1396.0}
@@ -3023,12 +3024,22 @@ class DoubleBookingTests(EngineCase):
         self.assertEqual(len(L.fills), 3, "dry run changes nothing")
         r = L.dedup_synthetic(dry_run=False)
         self.assertEqual(r["removed"], ["order_shrink:9001:52"])
-        self.assertEqual([f["key"] for f in L.fills if f["order"] == "9001"], ["49074377:9001", "order_shrink:9001:99"])
+        self.assertEqual([f["key"] for f in L.fills if f["order"] in ("9001", "9004")], ["49074377:9001", "order_shrink:9004:99"])
         self.assertEqual(L.orders["9001"]["filled"], 389.0)
         self.assertEqual(L.subbooks.get(ex), {}, "the phantom tranche and the audit's inventory offset cancel")
         self.assertEqual(L.tranches[f"dump:{ex}:no:0"]["state"], "voided")
         self.assertEqual(L.subbooks["975"], {"inventory": 1450.0, "pairset:Oklahoma:1": -1396.0}, "pair-set legs are never netted")
         self.assertEqual(L.dedup_synthetic(dry_run=False), dict(removed=[], netted=[]), "idempotent")
+        # an order booked twice with the pair further apart than the window: the synthetic fill goes anyway (booked <= quantity)
+        L.orders["9003"] = dict(id="9003", bot="MKT x", layer="release", ex="1037", side="yes", action="buy", price=0.2, qty=2587, filled=5174.0, cost=0.0, left=0,
+                                placed="x", ts=time.time(), closed=None, status="done", sub="inventory", note="")
+        b3 = dict(order="9003", ex="1037", side="yes", qty=2587.0, price=0.2, action="buy", realized=0.0, bot="MKT x", layer="release", before_engine=False,
+                  fair=0.2, sig_mid=0.2, edge=0.0, sig_edge=0.0)
+        L.fills.append(dict(b3, key="500:9003", t="2026-10-04 10:00:00"))
+        L.fills.append(dict(b3, key="order_shrink:9003:7", t="2026-10-04 10:09:00", source="order_shrink"))
+        r = L.dedup_synthetic(dry_run=False)
+        self.assertEqual(r["removed"], ["order_shrink:9003:7"])
+        self.assertEqual(L.orders["9003"]["filled"], 2587.0)
         # a SIG fill replayed for an order already booked in full (truth_q lost across a restart) is not booked again
         L.orders["9002"] = dict(id="9002", bot="MKT x", layer="scalp", ex="990", side="yes", action="buy", price=0.5, qty=500, filled=500.0, cost=250.0, left=0,
                                 placed="x", ts=time.time(), closed=None, status="done", sub="scalp:990:yes", note="")

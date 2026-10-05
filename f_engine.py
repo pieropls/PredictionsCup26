@@ -3403,6 +3403,14 @@ class Engine:
         days = max(1.0, (time.mktime(time.strptime(SETTLE_DATE, "%Y-%m-%d")) - time.time()) / 86400)
         return ctf / days
 
+    @staticmethod
+    def release_tier_of(f):
+        """The tier of a release fill from its own numbers: the gap between the held side's fair and the sale price."""
+        if f.get("fair") is None:
+            return "unknown"
+        gap = f["price"] - f["fair"]                     # held fair - sale = (1 - fair_c) - (1 - price_c)
+        return "tier0" if gap <= RELEASE_TIER0 + 1e-9 else "tier1" if gap <= RELEASE_TIER1 + 1e-9 else "tier2" if gap <= RELEASE_TIER2 + 1e-9 else "legacy"
+
     def released_today_view(self):
         """Cash the release layer freed this SIG day (since 17:00 PT, day 6 §5.3), its average cost vs fair, and the branch
         of each sale (profit / funding)."""
@@ -3417,8 +3425,7 @@ class Engine:
             sig += sale * f["qty"]
             if held_fair is not None and sale > 0:
                 w += (held_fair - sale) / sale * sale * f["qty"]
-            t_, why = self.release_why.get(f["ex"], (0, None))
-            by[why or "unknown"] += round(sale * f["qty"])    # tier0 / tier1 / tier2 (day 6 §9)
+            by[self.release_tier_of(f)] += round(sale * f["qty"])    # tier0 / tier1 / tier2 from the gap at the fill (restart-proof)
         return dict(sig=round(sig, 2), avg_cost=round(w / sig, 4) if sig else None, fills=len(rel),
                     realized=round(sum(f.get("realized") or 0 for f in rel), 2), vs_fair=round(-w, 2),
                     demand=getattr(self, "release_demand", None), by_branch=dict(by), since="17:00 PT")
@@ -4068,7 +4075,7 @@ class Engine:
         tiers = collections.Counter()
         ev_up = 0.0
         for f in rel:
-            tiers[self.release_why.get(f["ex"], (0, "?"))[1]] += round((1 - f["price"]) * f["qty"])
+            tiers[self.release_tier_of(f)] += round((1 - f["price"]) * f["qty"])
             if f.get("fair") is not None:
                 ev_up += max(0.0, (1 - f["fair"]) - (1 - f["price"])) * f["qty"]
         T = float((self.controls.d.get("cash_target") or {}).get("T") or CASH_T_START)
