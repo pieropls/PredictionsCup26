@@ -198,9 +198,10 @@ def fills(known=(), max_pages=5):
     return out
 
 
-def leaderboard(limit=20, offset=0):
-    """Tournament leaderboard (sort by P&L): {leaderboard: [{rank, username, pnl, tradesCount, volume, roi}], total, myRank}."""
-    return _req("GET", f"/tournaments/{T['slug']}/leaderboard", params={"limit": limit, "offset": offset, "sort": "pnl", "period": "all"})
+def leaderboard(limit=20, offset=0, period="all"):
+    """Tournament leaderboard (sort by P&L): {leaderboard: [{rank, username, pnl, tradesCount, volume, roi}], total, myRank}.
+    period: all | 1d (SIG's day, from 00:00 UTC) | 7d | 30d."""
+    return _req("GET", f"/tournaments/{T['slug']}/leaderboard", params={"limit": limit, "offset": offset, "sort": "pnl", "period": period})
 
 
 def recent_markets(limit=20):

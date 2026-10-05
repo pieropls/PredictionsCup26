@@ -1544,15 +1544,15 @@ class DumpV3Tests(EngineCase):
             self.assertLessEqual(o["price"], fs - 0.03 + 1e-9, "at least 3c under fair")
         cost = sum(o["qty"] * o["price"] for o in mine)
         funded = min(a_config.OPPORTUNITY_RESERVE, 40_000)
-        size = max(1_500, min(6_000, funded / 8))
-        self.assertLessEqual(cost, size * 1.5 + 60, "<= per-side size (x1.5 if arena)")
+        size = min(max(a_config.DUMP_SIDE_MIN, min(a_config.DUMP_SIDE_MAX, funded / a_config.DUMP_SIDE_DIV)) * 1.5, a_config.DUMP_ARENA_MAX, funded / 2)
+        self.assertLessEqual(cost, size + 60, "<= per-side size (day 5: funded / 4, x1.5 if arena, <= 15k, <= funded / 2)")
         shares = [o["qty"] for o in mine]
         self.assertGreater(shares[0] * mine[0]["price"], shares[2] * mine[2]["price"], "40 / 35 / 25 weights")
         # pilot: half size
         fake2, eng2, favs2 = self.rig(state="pilot")
         self.settle(eng2, fake2, favs2, 6)
         c2 = sum(o["qty"] * o["price"] for o in self.dump_orders(eng2, fake2, favs2[0]))
-        self.assertLessEqual(c2, size * 1.5 * 0.5 + 60)
+        self.assertLessEqual(c2, size * 0.5 + 60)
 
     def test_eligibility(self):
         fake, eng, favs = self.rig()
@@ -1586,10 +1586,15 @@ class DumpV3Tests(EngineCase):
         want = min(max(pre, top["price"] + 0.015), eng.fair[ex] - 0.005)
         self.assertAlmostEqual(sell, bots.tick_up(max(want, top["price"] + 0.01)), places=3)
         self.assertLessEqual(sell, eng.fair[ex] - 0.005 + 1e-9)
-        t["ts"] -= 3700                                   # 60 min unfilled: steps down to fill + 1c
+        t["ts"] -= 1300                                   # 20 min unfilled (day 5 §1.4): max(fill + 1c, ref - 0.5c)
         self.settle(eng, fake, favs, 2)
         rb2 = self.dump_orders(eng, fake, ex, "dumpexit")
-        self.assertAlmostEqual(round(1 - rb2[0]["price"], 3), bots.tick_up(top["price"] + 0.01), places=3)
+        want2 = min(max(top["price"] + 0.01, eng.ref(ex) - 0.005), eng.fair[ex] - 0.005)
+        self.assertAlmostEqual(round(1 - rb2[0]["price"], 3), bots.tick_up(round(max(want2, top["price"] + 0.01), 6)), places=3)
+        t["ts"] -= 2500                                   # 60 min unfilled: fill + 0.5c
+        self.settle(eng, fake, favs, 2)
+        rb2 = self.dump_orders(eng, fake, ex, "dumpexit")
+        self.assertAlmostEqual(round(1 - rb2[0]["price"], 3), bots.tick_up(round(top["price"] + 0.005, 6)), places=3)
         fake.fill(rb2[0]["id"], rb2[0]["qty"])            # the sell-back fills: round trip, hold recorded, level re-armed
         self.settle(eng, fake, favs, 3)
         self.assertEqual(t["state"], "closed")
@@ -1698,6 +1703,46 @@ class DumpV3Tests(EngineCase):
         eng.truth_t = time.time()
         eng.controller(time.time())
         self.assertEqual(c.state("dump"), "full")
+
+    def test_ratchet_up_on_a_passing_gate_and_back_on_a_failure(self):
+        fake, eng, favs = self.rig(state="full")
+        now = time.time()
+        c = eng.controls
+        c.d["ratchet"] = {"dump": dict(level=0, since=now - 2 * 3600 - 10, hold_until=0.0, history=[])}
+        eng.ratchet("dump", now)                          # no fills: the gate fails -> stays 0, holds 2 h
+        self.assertEqual(c.d["ratchet"]["dump"]["level"], 0)
+        self.assertGreater(c.d["ratchet"]["dump"]["hold_until"], now)
+        from unittest import mock
+        c.d["ratchet"]["dump"].update(since=now - 2 * 3600 - 10, hold_until=0.0)
+        with mock.patch.object(eng, "dump_gate", return_value=dict(ok=True, why="test pass", stats={})):
+            eng.ratchet("dump", now)
+        self.assertEqual(c.d["ratchet"]["dump"]["level"], 1)
+        self.assertAlmostEqual(eng.ratchet_mult("dump"), 1.25)
+        self.assertTrue(any(e["kind"] == "RATCHET" for e in eng.events))
+        c.d["ratchet"]["dump"].update(since=now - 2 * 3600 - 10)
+        with mock.patch.object(eng, "dump_gate", return_value=dict(ok=False, why="test fail", stats={})):
+            eng.ratchet("dump", now)
+        self.assertEqual(c.d["ratchet"]["dump"]["level"], 0, "one notch back on the first failure")
+        # sizes follow the level but never pass 15k / funded / 2
+        c.d["ratchet"]["dump"]["level"] = 10
+        self.settle(eng, fake, favs, 3)
+        for ex in favs[:3]:
+            cost = sum(o["qty"] * o["price"] for o in self.dump_orders(eng, fake, ex))
+            self.assertLessEqual(cost, min(a_config.DUMP_SIDE_HARD_MAX, 40_000 / 2) + 60)
+
+    def test_party_exposure_cap(self):
+        fake, eng, favs = self.rig(state="full")
+        ex = favs[0]
+        d = eng.pol(ex, "yes")
+        other = next(e_ for e_ in favs[1:] if eng.pol(e_, "yes") == d)
+        eng.ledger.subbooks[other] = {f"dump:{other}:yes:0": 50_000.0}        # 50k shares held at ~0.9 on that party
+        eng.ledger.tranches[f"dump:{other}:yes:0"] = dict(ex=other, side="yes", kind="dump", avg=0.9, state="open", ts=time.time(), t="x")
+        self.assertGreaterEqual(f_engine.dash4.party_exposure(eng)[d], 40_000)
+        self.settle(eng, fake, favs, 3)
+        self.assertFalse(self.dump_orders(eng, fake, ex), "no new levels on a party side at its cap")
+        opp = next((e_ for e_ in favs if eng.pol(e_, "yes") != d), None)
+        if opp:
+            self.assertTrue(self.dump_orders(eng, fake, opp), "the other party still gets levels")
 
     def test_rebound_survives_a_pruned_entry_order(self):
         fake, eng, favs = self.rig()
@@ -2359,6 +2404,61 @@ class DashV3PayloadTests(EngineCase):
         self.assertIn("thresholds", s["leaders"])
         import g_dashboard as dashboard
         self.assertLess(len(dashboard.dumps(s)), 300_000)
+
+
+class DashV4PayloadTests(EngineCase):
+    """dashboard_v4.md 'Done when': today = Δ account since 17:00 PT; Σ strategies + drift = today ± 25; the Strategies total
+    is the Live 'today'; the Holdings total is the Capital 'in holdings'. DASH_FIXTURE=1 also writes tests/fixtures/dash_v4.json."""
+    def test_v4_payload_adds_up_on_one_clock(self):
+        import csv as _csv
+        import m_dash4
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        eng.leaders_t = 0
+        for _ in range(2):
+            loop(eng, fake)
+        mm = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"]
+        fake.fill(mm[0]["id"], mm[0]["qty"])
+        loop(eng, fake)
+        # one pnl.csv sample at the SIG day start (17:00 PT), 200 below the fake's fixed account value and unrealized
+        start = m_dash4.sig_day_start(time.time())
+        with open(a_config.PNL_FILE, "w", newline="") as fh:
+            w = _csv.writer(fh)
+            w.writerow(["time", "account_value", "account_book", "account_pm", "unrealized", "roi_pct"])
+            w.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start)), 92800.0, 92800.0, 92800.0, -6200.0, -7.2])
+        eng.acct = fake.pnl()
+        s = eng.dash_state()
+        for k in ("sigday", "status", "daily4", "feed", "strategies4", "capital4", "holdings4", "leaders4", "admin4"):
+            self.assertTrue(s.get(k) not in (None, [], {}), k)
+        sd = s["sigday"]
+        self.assertEqual(sd["since"], start)
+        self.assertAlmostEqual(sd["today"], 93000.0 - 92800.0, places=2, msg="today = Δ account since 17:00 PT")
+        self.assertAlmostEqual(sd["our_trades"] + sd["drift"], sd["today"], delta=25)
+        self.assertTrue(sd["ok"])
+        rows = s["strategies4"]
+        self.assertEqual([r["key"] for r in rows], ["dump", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])
+        self.assertEqual(next(r for r in rows if r["key"] == "mm")["trades_today"], 1)
+        self.assertAlmostEqual(sum(r["pnl_today"] for r in rows) + sd["drift"], sd["today"], delta=25, msg="Strategies total = Live today")
+        self.assertAlmostEqual(sum(h["value_sig"] for h in s["holdings4"]), s["capital4"]["holdings"], places=2, msg="Holdings total = Capital in holdings")
+        self.assertGreater(s["capital4"]["holdings"], 0)
+        for h in s["holdings4"]:
+            self.assertIn("exit", h)
+            self.assertIn("age_h", h)
+        c4 = s["capital4"]
+        self.assertAlmostEqual(c4["in_use"], c4["tranches"] + c4["scalper"] + c4["takes"], places=2)
+        self.assertEqual([b["key"] for b in c4["bar"]], ["floor", "reserve", "free", "tranches", "settle"])
+        self.assertEqual(s["status"]["kind"], "TRADING")
+        self.assertTrue(s["feed"] and s["feed"][0]["kind"] in ("trade", "alert", "market") and s["feed"][0]["id"])
+        self.assertEqual(s["daily4"][-1]["partial"], True)
+        self.assertAlmostEqual(s["daily4"][-1]["total"], sd["today"], places=2)
+        a4 = s["admin4"]
+        self.assertEqual(a4["recon"]["ok"], True)
+        self.assertIn("dump", a4["coverage"])
+        import g_dashboard as dashboard
+        self.assertLess(len(dashboard.dumps(s)), 300_000)
+        if os.environ.get("DASH_FIXTURE"):
+            with open(os.path.join(os.path.dirname(__file__), "fixtures", "dash_v4.json"), "w") as fh:
+                fh.write(dashboard.dumps(s))
 
 
 class ControlTests(EngineCase):

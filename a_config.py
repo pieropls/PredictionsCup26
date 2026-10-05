@@ -150,14 +150,18 @@ FAT_BOOK_READS = 3              # queue reads (order books) per loop
 # dump catcher v3 (day 4 §2, "shallow and fast"): rest just under SIG's price on every favourite side, sell back within minutes
 DUMP_MIN_FAIR = 0.80                      # sides with Polymarket fair_side >= this (not manual, no opposite holding, PM fresh)
 DUMP_V3_OFFSETS = [0.01, 0.02, 0.035]     # L1/L2/L3 = SIG 30-min median of the side - these
-DUMP_V3_WEIGHTS = [0.40, 0.35, 0.25]
+DUMP_V3_WEIGHTS = [0.50, 0.30, 0.20]      # day 5 §1.3 (was 40/35/25): L1 fills most often
 DUMP_FAIR_GAP = 0.03                      # every level <= fair_side - 3c: we only buy at least 3c under fair
 DUMP_SLIDE = 0.02                         # 30-min median < 6-h median - 2c: a slide in progress -> freeze the ref, never lower
-DUMP_SIDE_DIV, DUMP_SIDE_MIN, DUMP_SIDE_MAX = 8, 1_500, 6_000   # per side = funded reserve / 8, clipped; arena sides x 1.5
+DUMP_SIDE_DIV, DUMP_SIDE_MIN, DUMP_SIDE_MAX = 4, 2_000, 10_000  # day 5 §1.2: per side = funded reserve / 4, clipped; arena x 1.5
+DUMP_ARENA_MAX, DUMP_SIDE_HARD_MAX = 15_000, 15_000   # arena sides <= 15k; the ratchet never takes a side above 15k or reserve / 2
+DUMP_PARTY_CAP = 40_000                   # day 5 §1.5: held dump inventory at cost per party side (D favourites / R favourites)
+RATCHET_STEP, RATCHET_EVERY_S = 1.25, 2 * 3600   # day 5 §1.7: +25% per passing 2-h gate; one notch back + 2 h hold on a failure
 DUMP_ARENA_MULT, DUMP_ARENA_N = 1.5, 10   # arena = the markets with the most big events in the last 48 h (intel events + dumps)
 DUMP_CONC_CAP = 12_000                    # position (at cost) + resting dump bids on a side <= this
 DUMP_SELL_MIN, DUMP_SELL_FAIR_GAP = 0.015, 0.005   # sell-back at max(pre-dump ref, fill + 1.5c), <= fair_side - 0.5c
-DUMP_STEP_S, DUMP_STEP_MIN = 3600, 0.01   # unfilled after 60 min: sell-back steps down to fill + 1c
+DUMP_STEP1_S, DUMP_STEP2_S = 1200, 3600   # day 5 §1.4: after 20 min -> max(fill + 1c, ref - 0.5c); after 60 min -> fill + 0.5c
+DUMP_STEP_MIN, DUMP_STEP2_MIN = 0.01, 0.005
 DUMP_HOLD_S = 6 * 3600                    # unfilled after 6 h: the tranche goes to inventory (held to settlement)
 DUMP_TTL_S, DUMP_QUEUE_S, DUMP_BOOK_READS = 6 * 3600, 1800, 2
 DUMP_NEWS_DROP = 0.03                     # fair_side -3c in 10 min -> that side's levels pulled 30 min

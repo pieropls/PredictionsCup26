@@ -35,6 +35,7 @@ import g_dashboard as dashboard
 import i_realtime as rt
 import j_executor as jx
 import l_intel as intel
+import m_dash4 as dash4
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
                       RISK_MAX_EXPOSURE, CASH_RESERVE, POSITION_BOTS, POSITION_MAX_ADD, MANUAL_MARKETS, MB_PM_MAX_SPREAD,
                       MB_FOCUS, MB_REFILL_S, MB_QUOTE_TTL_S, PAIR_ENABLED, PAIR_EDGE, PAIR_THIRD_PARTY, PAIR_MAX_QTY,
@@ -49,7 +50,8 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S, FAT_MOVE, FAT_CAPACITY_SHARE, FAT_BOOK_READS, QTY_TOL,
                       FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, RELEASE_QUIET_HOURS, LIQUIDATE, PNL_READ_S, ORDERS_READ_S, PRICE_ROTATE, LEADERS_EVERY_S, TAPE_MIN_PER_MIN,
                       BACKOFF_429_S, BACKOFF_LOOP_S, TMM_TTL_S, LADDER_TTL_S, RECYCLE_TAKE_TTL_S, TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_TTL_S, DUMP_TTL_S, DUMP_MIN_FAIR, DUMP_V3_OFFSETS, DUMP_V3_WEIGHTS, DUMP_FAIR_GAP, DUMP_SLIDE, DUMP_SIDE_DIV, DUMP_SIDE_MIN,
-                      DUMP_SIDE_MAX, DUMP_ARENA_MULT, DUMP_ARENA_N, DUMP_SELL_MIN, DUMP_SELL_FAIR_GAP, DUMP_STEP_S, DUMP_STEP_MIN,
+                      DUMP_SIDE_MAX, DUMP_ARENA_MULT, DUMP_ARENA_N, DUMP_SELL_MIN, DUMP_SELL_FAIR_GAP, DUMP_STEP1_S, DUMP_STEP2_S, DUMP_STEP_MIN,
+                      DUMP_STEP2_MIN, DUMP_ARENA_MAX, DUMP_SIDE_HARD_MAX, DUMP_PARTY_CAP, RATCHET_STEP, RATCHET_EVERY_S,
                       DUMP_BREAKER_SIDES, DUMP_WRITE_SHARE, DUMP_WRITES_IDLE, DUMP_MIN_SIDE_COST, DUMP_QUEUE_S, DUMP_BOOK_READS, DUMP_HOLD_S,
                       DUMP_NEWS_DROP, DUMP_BREAKER_FAIR, DUMP_PILOT_S, DUMP_CONC_CAP, RELEASE_FALLBACK_QTY, FAT_BAND_EDGES, FAT_TIER_A_ONLY, FAT_NEW_LEVEL,
                       FAT_NEW_SIZES, RELEASE_MAX_COST, LONG_MAX_FAIR, LONG_LEVELS,
@@ -273,6 +275,8 @@ class NightLog:
 
 
 class Engine:
+    DATA, CASH_RESERVE, OPPORTUNITY_RESERVE = DATA, CASH_RESERVE, OPPORTUNITY_RESERVE   # for m_dash4
+    api, jx, read_json = api, jx, staticmethod(read_json)
     def __init__(self, only=None):
         os.makedirs(DATA, exist_ok=True)
         api.init()
@@ -342,6 +346,8 @@ class Engine:
         self.release_now, self.release_t, self.depth_cache = {}, 0.0, {}
         self.px_rot, self.open_read_t, self.open_wsig, self.pnl_read_t, self.last_fill_exs = 0, None, None, 0.0, set()   # day 4 §4
         self.release_demand = None
+        self.loop_end_t, self.cap_use_hist = None, collections.deque(maxlen=2000)   # dashboard v4
+        self.release_name = os.path.basename(os.path.realpath(os.path.join(os.path.dirname(DATA), "run"))) if os.path.exists(os.path.join(os.path.dirname(DATA), "run")) else ""
         self.fat_book, self.fat_anchor, self.fat_block, self.fair_hist, self.fat_now = {}, {}, {}, {}, {}
         self.fat_sent = collections.deque(maxlen=5000)      # placement times (pilot gate: write usage)
         self.dump_now, self.dump_book, self.dump_block, self.dump_view, self.dump_ref = {}, {}, {}, {}, {}   # dump catcher
@@ -751,6 +757,7 @@ class Engine:
         # F4 repair pair sets whose legs filled unevenly (runs whatever the pairs flag: repairs reduce risk)
         self.repair_baskets(now)
         self.t["loop"] = time.time() - now
+        self.loop_end_t = time.time()
         self.sample("plan_cycle", self.t["loop"])
 
         # F5 record
@@ -1324,6 +1331,10 @@ class Engine:
             if ok:
                 c.set_layer(l, "full", f"pilot gate passed: {why}")
         # Piero's unattended rule: writes/cancels failing with 5xx / UNKNOWN repeatedly -> stop and pull at-risk orders
+        try:
+            self.ratchet("dump", now)
+        except Exception as err:
+            self.event("ERR", f"ratchet: {err!r}")
         hw = api.health(600).get("write") or {}
         if hw.get("n", 0) >= 10 and hw.get("bad_rate", 0) >= 0.5:   # day 4 §1.2: >= 10 writes in 10 min and >= 50% failed
             self.stop_and_pull(f"SIG writes failing: {hw.get('bad_rate', 0):.0%} 5xx/timeouts of {hw.get('n', 0)} in 10 min")
@@ -2020,7 +2031,9 @@ class Engine:
                         self.event("NEWS", f"{self.name(ex)} {side.upper()} fair fell {top - cur:.2f} in 10 min: dump levels pulled 30 min")
                     self.dump_block[(ex, side)] = now + FAT_NEWS_HOLD_S
         funded = max(0.0, min(float(OPPORTUNITY_RESERVE), cash - CASH_RESERVE - used["committed"]))
-        per_side = max(DUMP_SIDE_MIN, min(DUMP_SIDE_MAX, funded / DUMP_SIDE_DIV))
+        mult = self.ratchet_mult("dump")                   # day 5 §1.7: x1.25 per passing 2-h gate
+        per_side = max(DUMP_SIDE_MIN, min(DUMP_SIDE_MAX, funded / DUMP_SIDE_DIV)) * mult
+        party = dash4.party_exposure(self)                  # day 5 §1.5: held dump inventory per party side <= 40k
         resting, rest_px = {}, {}
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
@@ -2033,8 +2046,12 @@ class Engine:
             key = (ex, side)
             if self.dump_block.get(key, 0) > now or self.breaker.get(("dump", self.pol(ex, side)), 0) > now or self.ex.is_frozen(ex):
                 continue
+            if party.get(self.pol(ex, side), 0.0) >= DUMP_PARTY_CAP:
+                continue                                    # that party side is at its 40k exposure cap: no new levels
             room = DUMP_CONC_CAP - self.side_cost(ex, side, bids=False)   # position + our levels <= 12k (levels sized here)
-            cost = min(per_side * (DUMP_ARENA_MULT if ex in arena else 1.0) * half, room)
+            cost = min(per_side * (DUMP_ARENA_MULT if ex in arena else 1.0), DUMP_ARENA_MAX if ex in arena else DUMP_SIDE_HARD_MAX,
+                       funded / 2) * half
+            cost = min(cost, room)
             if cost < DUMP_MIN_SIDE_COST:
                 continue
             sliding = self.dump_ref_v3(ex)[1]
@@ -2097,10 +2114,17 @@ class Engine:
                 continue
             t["avg"] = round(avg, 5)
             pre, fs = t.get("pre_ref_side"), self.side_fair(ex, t["side"])
-            target = max(avg + DUMP_SELL_MIN, pre or 0.0) if age <= DUMP_STEP_S else avg + DUMP_STEP_MIN
+            r_now = self.ref(ex)
+            ref_side = None if r_now is None else (r_now if t["side"] == "yes" else 1 - r_now)
+            if age <= DUMP_STEP1_S:                          # day 5 §1.4: 0-20 min max(pre-dump ref, fill + 1.5c)
+                target, floor_ = max(avg + DUMP_SELL_MIN, pre or 0.0), avg + DUMP_STEP_MIN
+            elif age <= DUMP_STEP2_S:                        # 20-60 min: max(fill + 1c, ref - 0.5c)
+                target, floor_ = max(avg + DUMP_STEP_MIN, (ref_side - 0.005) if ref_side is not None else 0.0), avg + DUMP_STEP_MIN
+            else:                                            # > 60 min: fill + 0.5c
+                target, floor_ = avg + DUMP_STEP2_MIN, avg + DUMP_STEP2_MIN
             if fs is not None:
                 target = min(target, fs - DUMP_SELL_FAIR_GAP)
-            rebound = bots.tick_up(round(max(target, avg + DUMP_STEP_MIN), 6))   # never below fill + 1c
+            rebound = bots.tick_up(round(max(target, floor_), 6))
             self.dump_view.setdefault(ex, []).append(dict(sub=sub, rebound=min(rebound, 0.99), avg=avg))
 
     def dump_fill_events(self, fills):
@@ -2337,6 +2361,41 @@ class Engine:
         msg = f"AUTO-RESUME after {kind}: paused {(now - ap['t']) / 60:.0f} min ({ap.get('reason', '')[:100]})"
         self.event("PAUSE", msg)
         self.night.line(msg)
+
+    def ratchet_mult(self, layer):
+        r = (self.controls.d.get("ratchet") or {}).get(layer) or {}
+        return RATCHET_STEP ** int(r.get("level", 0))
+
+    def ratchet(self, layer, now):
+        """Day 5 §1.7: every 2 h a full layer passes its gate, raise its size one notch (x1.25); the first failed gate steps
+        back one notch and holds 2 h. Caps are applied where the size is used. Every step is logged."""
+        c = self.controls
+        if c.state(layer) != "full" or c.paused:
+            return
+        with c.lock:
+            rr = c.d.setdefault("ratchet", {})
+            r = rr.setdefault(layer, dict(level=0, since=now, hold_until=0.0, history=[]))
+        if now < r.get("hold_until", 0) or now - r.get("since", now) < RATCHET_EVERY_S:
+            return
+        g = self.dump_gate(r.get("since", now - RATCHET_EVERY_S), now) if layer == "dump" else self.scalp_gate(r.get("since", now), now)
+        with c.lock:
+            if g["ok"]:
+                r["level"] = int(r.get("level", 0)) + 1
+                step = f"{layer} ratchet up to level {r['level']} (x{RATCHET_STEP ** r['level']:.2f})"
+            else:
+                r["level"] = max(0, int(r.get("level", 0)) - 1)
+                r["hold_until"] = now + RATCHET_EVERY_S
+                step = f"{layer} ratchet back to level {r['level']} (x{RATCHET_STEP ** r['level']:.2f}), holding 2 h"
+            r["since"] = now
+            r.setdefault("history", []).append(dict(t=stamp(), level=r["level"], ok=g["ok"]))
+            r["history"] = r["history"][-50:]
+            c.save()
+        msg = f"RATCHET {step}: {g['why']}"
+        self.event("RATCHET", msg)
+        self.night.line(msg)
+
+    def scalp_gate(self, since, now):
+        return dict(ok=False, why="scalper gate not built yet")
 
     def dump_stats(self, since):
         """Dump v3 KPIs since `since`: fills, round trips, realized, edge vs fair at fill, median hold (min), mark-out 30m."""
@@ -2607,6 +2666,14 @@ class Engine:
                 rows += [dict(r, ours=1) for r in me[:1]]
             if not api.DRY_RUN:
                 write_atomic(os.path.join(DATA, "leaders_meta.json"), json.dumps(dict(total=total, t=stamp(), my_rank=d.get("myRank"))))
+                try:                                        # dashboard v4: the daily board (SIG day) top 25 + our daily rank: 1 read
+                    dd = api.leaderboard(25, period="1d")
+                    write_atomic(os.path.join(DATA, "leaders_day.json"), json.dumps(dict(
+                        t=stamp(), my_rank=dd.get("myRank"), total=dd.get("total"),
+                        top=[dict(rank=r.get("rank"), name=r.get("username") or r.get("profileId"), pnl=r.get("pnl"), trades=r.get("tradesCount"))
+                             for r in dd.get("leaderboard", [])[:25]])))
+                except Exception as err:
+                    self.event("ERR", f"daily leaderboard: {str(err)[:80]}")
         except Exception as err:
             self.event("ERR", f"leaderboard: {str(err)[:120]}")
             return
@@ -3824,7 +3891,14 @@ class Engine:
                         for s in strategies if s.get("today")}), fh)
             except OSError:
                 pass
-        return dict(money=money, daily=daily, series=self.series_view(), capital=capital, strategies=strategies,
+        try:
+            v4 = dash4.v4_view(self, time.time(), capital, self.holdings_view())
+        except Exception as err:
+            self.event("ERR", f"dashboard v4 payload: {err!r}")
+            v4 = {}
+        return dict(sigday=v4.get("sigday"), status=v4.get("status"), daily4=v4.get("daily"), feed=v4.get("feed"), strategies4=v4.get("strategies"),
+                    capital4=v4.get("capital"), holdings4=v4.get("holdings"), leaders4=v4.get("leaders"), admin4=v4.get("admin"),
+                    money=money, daily=daily, series=self.series_view(), capital=capital, strategies=strategies,
                     coverage=cov,
                     holdings=self.holdings_view(), activity=self.activity_view(), leader_thresholds=lm.get("thresholds"))
 

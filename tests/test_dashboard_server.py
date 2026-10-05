@@ -1,5 +1,6 @@
-"""Dashboard v3 (g_dashboard.py): token, localhost, SSE snapshot + deltas, controls (confirm, read-only), crash isolation,
-and the v3 page (money, capital, strategies, holdings, activity, health) against tests/fixtures/dash_v3.json and a v2-only payload.
+"""Dashboard (g_dashboard.py): token, localhost, SSE snapshot + deltas, controls (confirm, read-only), crash isolation,
+and the v4 page (Live, Strategies, Capital, Holdings, Leaders, Admin) against tests/fixtures/dash_v4.json, plus the v3-only
+fixture (dash_v3.json) rendering with "not available yet".
 python3 -m unittest tests.test_dashboard_server"""
 import json
 import os
@@ -185,6 +186,12 @@ def fixture():
         return json.load(fh)
 
 
+def fixture4():
+    """A v4 payload written by tests.test_engine.DashV4PayloadTests (DASH_FIXTURE=1): the fake exchange after an MM fill."""
+    with open(os.path.join(ROOT, "tests", "fixtures", "dash_v4.json")) as fh:
+        return json.load(fh)
+
+
 def v2_only(p):
     """The same payload as an engine before the v3 upgrade: no v3 keys, no leader thresholds."""
     p = {k: v for k, v in p.items() if k not in V3_KEYS}
@@ -216,27 +223,30 @@ const drawAll = what => { for (const t of Object.keys(TABS)) { ui.tab = t; draw(
   if (!OPTIONAL.has(id) && !(els["b-" + id] && els["b-" + id].innerHTML.length)) fail(what + ": empty " + t + "/" + id); } check(what); };
 const out = id => (els["b-" + id] || {}).innerHTML || "";
 drawAll("every tab");
-ui.tab = "overview";
-for (const c of HCOLS) for (const dir of [1, -1]) { ui.hsort = {k: c.k, dir}; draw(); }
+ui.tab = "holdings";
+for (const c of H4) for (const dir of [1, -1]) { ui.hsort = {k: c.k, dir}; draw(); }
 ui.hsort = {k: "value_sig", dir: -1};
-ui.hl = "mm"; ui.hr = true; ui.hq = "a"; draw(); ui.hl = ""; ui.hr = false; ui.hq = "";
-ui.al = "mm"; ui.aq = "a"; draw(); ui.al = ""; ui.aq = "";
-ui.basis = "fair"; draw(); ui.basis = "sig"; draw(); ui.hall = ui.aall = true; draw(); ui.hall = ui.aall = false; draw(); check("filters");
-ui.tab = "controls"; ui.q = "a"; ui.layer = "mm"; ui.haspos = true; ui.mis = "1"; draw(); ui.q = ""; ui.layer = ""; ui.haspos = false; ui.mis = "";
-for (const t of ["controls", "overview"]) {
-  ui.tab = t; const ex = ((t === "controls" ? S.markets : S.holdings) || [])[0]; if (!ex) continue;
+for (const f of ["dump", "settle", "noexit", ""]) { ui.hf = f; draw(); }
+ui.hall = true; draw(); ui.hall = false; draw(); check("holdings filters");
+ui.tab = "live"; for (const f of ["trade", "alert", "market", ""]) { ui.feed = f; draw(); } check("feed filters");
+ui.tab = "strategies"; ui.sopen = "dump"; draw(); ui.sopen = null; draw(); check("strategy drawer");
+ui.tab = "admin"; ui.q = "a"; ui.layer = "mm"; ui.haspos = true; ui.mis = "1"; draw(); ui.q = ""; ui.layer = ""; ui.haspos = false; ui.mis = "";
+for (const t of ["admin", "holdings"]) {
+  ui.tab = t; const ex = ((t === "admin" ? S.markets : (S.holdings4 || S.holdings)) || [])[0]; if (!ex) continue;
   ui.open = ex.ex; ui.detail = {ex: ex.ex, orders: [{placed: "x", bot: "b", price: 0.4, qty: 1}], fills: [{t: "x", price: 0.4, qty: 1}]}; draw(); ui.open = null; ui.detail = null; draw();
 }
 check("market detail");
-apply({loop: 999, markets: {rows: [], gone: []}, holdings: {rows: [], gone: []}, events: [{id: 1e9, t: "x", kind: "K", text: "t"}],
-       activity: [{id: 1e9, t: "2026-10-02 23:59:59", layer: "mm", text: "DELTA-FILL"}]}, "delta");
-ui.tab = "overview"; draw();
+apply({loop: 999, markets: {rows: [], gone: []}, holdings: {rows: [], gone: []}, holdings4: {rows: [], gone: []}, events: [{id: 1e9, t: "x", kind: "K", text: "t"}],
+       feed: [{id: "f999999", t: "2026-10-02 23:59:59", kind: "trade", layer: "mm", text: "DELTA-FILL"}]}, "delta");
+ui.tab = "admin"; draw();
 if (!out("events").includes("K")) fail("event delta not applied");
-if (Array.isArray(S.activity) && !out("activity").includes("DELTA-FILL")) fail("activity delta not applied");
+ui.tab = "live"; draw();
+if (Array.isArray(S.feed) && !out("feed").includes("DELTA-FILL")) fail("feed delta not applied");
 const saved = JSON.parse(JSON.stringify(S));
-for (const k of ["money", "daily", "series", "capital", "strategies", "holdings", "activity", "leaders", "overview", "health", "layers", "markets", "pairs", "positions", "events"])
+for (const k of ["money", "daily", "series", "capital", "strategies", "holdings", "activity", "leaders", "overview", "health", "layers", "markets", "pairs", "positions", "events",
+                 "sigday", "status", "daily4", "feed", "strategies4", "capital4", "holdings4", "leaders4", "admin4"])
   for (const v of [undefined, null, {}, [], "x", 0]) { if (v === undefined) delete S[k]; else S[k] = v; drawAll(k + " = " + JSON.stringify(v)); S = JSON.parse(JSON.stringify(saved)); }
-for (const k of ["money", "capital"]) for (const f of Object.keys(saved[k] || {})) { S[k][f] = null; drawAll(k + "." + f + " = null"); S = JSON.parse(JSON.stringify(saved)); }
+for (const k of ["money", "capital", "sigday", "status", "capital4", "leaders4", "admin4"]) for (const f of Object.keys(saved[k] || {})) { S[k][f] = null; drawAll(k + "." + f + " = null"); S = JSON.parse(JSON.stringify(saved)); }
 S = {}; drawAll("empty payload"); S = saved; drawAll("restored");
 """ + extra + "\nconsole.log('ok');"
     fd, p = tempfile.mkstemp(suffix=".js")
@@ -251,78 +261,92 @@ class PageTests(unittest.TestCase):
     def test_every_view_renders(self):
         render_views(self, dashboard.render(payload(n=60, loop=5)))
 
-    def test_v3_fixture_renders_every_section_sorts_and_filters(self):
-        p = fixture()
-        h = p["holdings"]
-        self.assertGreaterEqual(len(h), 100)
+    def test_v4_fixture_renders_every_tab_sorts_and_filters(self):
+        p = fixture4()
+        h = p["holdings4"]
+        self.assertGreaterEqual(len(h), 3)
         by_unreal = [r["ex"] for r in sorted(h, key=lambda r: r["unreal_sig"])]
-        by_unreal_desc = [r["ex"] for r in sorted(h, key=lambda r: r["unreal_sig"], reverse=True)]     # stable, like the page
         by_market = [r["ex"] for r in sorted(h, key=lambda r: r["market"].lower())]
-        n_mm = sum(r["layer"] == "mm" for r in h)
-        n_rel = sum(bool(r["release_candidate"]) for r in h)
-        n_pairs_act = sum(a["layer"] == "pairs" for a in p["activity"])
-        self.assertTrue(n_mm and n_rel and n_pairs_act, "the fixture exercises every filter")
+        n_dump = sum(r["layer"] == "dump" for r in h)
+        n_noexit = sum(not r["exit"] for r in h)
+        n_trade = sum(a["kind"] == "trade" for a in p["feed"][:30])
+        today = p["sigday"]["today"]
         extra = f"""
-const rowsOf = html => [...html.matchAll(/<tr class="click" data-ex="([^"]+)" data-layer="([^"]*)"/g)].map(m => ({{ex: m[1], layer: m[2]}}));
-ui.tab = "overview"; ui.hall = true; ui.aall = true; draw();
-for (const id of ["money", "daily", "account", "capital", "strategies", "layers", "holdings", "activity", "health"])
-  if (out(id).includes("not available")) fail("v3 fixture: " + id + " says not available");
-for (const id of ["daily", "account", "layers"]) if (!out(id).includes("<svg")) fail(id + ": no chart");
-if (!out("money").includes({json.dumps(f"{p['money']['account_sig']:,.0f}")})) fail("hero account value missing");
-if (!out("money").includes("#{p['money']['rank']}")) fail("rank missing");
-if (out("banner").includes("recon-warn")) fail("reconciliation warning shown although ok");
-if (!out("money").includes("Adds up")) fail("reconciliation check not shown");
+const rowsOf = html => [...html.matchAll(/<tr class="click" data-ex="([^"]+)"/g)].map(m => m[1]);
+ui.tab = "live"; draw();
+for (const id of ["liveTiles", "daily4", "feed"]) if (out(id).includes("not available")) fail("v4 fixture: " + id + " says not available");   // the account chart needs 2+ pnl samples
+if (!out("daily4").includes("<svg")) fail("daily4: no chart");
+if (!out("liveTiles").includes({json.dumps(f"{p['money']['account_sig']:,.0f}")})) fail("leaderboard value tile missing");
+if (!out("liveTiles").includes({json.dumps(("+" if today > 0 else "") + f"{today:,.0f}")})) fail("today tile missing: " + out("liveTiles"));
+if (!out("liveTiles").includes("SIG day")) fail("today tile not labelled as the SIG day");
+if (!out("feed").includes("k-trade")) fail("feed: no trade chip");
+ui.feed = "trade"; draw(); const tr = [...out("feed").matchAll(/<tr data-id=/g)].length, wantTr = S.feed.filter(a => a.kind === "trade").slice(0, 30).length;
+if (tr !== wantTr || wantTr < {n_trade}) fail("feed trade filter: " + tr + " rows, want " + wantTr);
+if (out("feed").includes("k-alert") || out("feed").includes("k-market")) fail("feed trade filter shows other kinds");
+ui.feed = ""; draw();
+ui.tab = "strategies"; draw();
+if (out("strat4").includes("not available")) fail("strategies say not available");
+if (!out("strat4").includes("Market drift")) fail("strategies: no market drift row");
+if (!out("strat4").includes("<tfoot")) fail("strategies: no total row");
+const foot = out("strat4").slice(out("strat4").indexOf("<tfoot"));
+if (!foot.includes({json.dumps(("+" if today > 0 else "") + f"{today:,.0f}")})) fail("strategies total is not today's P&L: " + foot.replace(/<[^>]+>/g, " "));
+ui.sopen = "mm"; draw(); if (!out("strat4").includes("Last 10 trades")) fail("strategy drawer"); ui.sopen = null;
+ui.tab = "capital"; draw();
+if (out("cap4").includes("not available yet")) fail("capital says not available");
+if (!out("cap4").includes("sbar")) fail("capital: no scale bar");
+if (!out("cap4").includes({json.dumps(f"{p['capital4']['holdings']:,.0f}")})) fail("capital: holdings total missing");
+ui.tab = "holdings"; ui.hall = true; draw();
+if (!out("hold4").includes({json.dumps(f"{p['capital4']['holdings']:,.0f}")})) fail("holdings total differs from the capital page");
 ui.hsort = {{k: "unreal_sig", dir: 1}}; draw();
-if (JSON.stringify(rowsOf(out("holdings")).map(r => r.ex)) !== JSON.stringify({json.dumps(by_unreal)})) fail("sort by unrealized (SIG) ascending");
-ui.hsort = {{k: "unreal_sig", dir: -1}}; draw();
-if (JSON.stringify(rowsOf(out("holdings")).map(r => r.ex)) !== JSON.stringify({json.dumps(by_unreal_desc)})) fail("sort by unrealized (SIG) descending");
+if (JSON.stringify(rowsOf(out("hold4"))) !== JSON.stringify({json.dumps(by_unreal)})) fail("sort by P&L at SIG ascending");
 ui.hsort = {{k: "market", dir: 1}}; draw();
-const byMk = rowsOf(out("holdings")).map(r => r.ex), want = {json.dumps(by_market)};
-if (byMk.length !== want.length || byMk[0] !== want[0]) fail("sort by market");
-ui.hl = "mm"; draw(); let rs = rowsOf(out("holdings"));
-if (rs.length !== {n_mm} || rs.some(r => r.layer !== "mm")) fail("filter by layer: " + rs.length);
-ui.hl = ""; ui.hr = true; draw(); rs = rowsOf(out("holdings"));
-if (rs.length !== {n_rel} || !out("holdings").includes("release candidate")) fail("release-candidate filter: " + rs.length);
-ui.hr = false; ui.hq = "kansas"; draw(); rs = rowsOf(out("holdings"));
-if (!rs.length || rs.length >= {len(h)}) fail("search");
-ui.hq = ""; ui.hsort = {{k: "value_sig", dir: -1}}; draw();
-ui.al = "pairs"; draw();
-const acts = [...out("activity").matchAll(/<tr data-id="([^"]+)" data-layer="([^"]*)"/g)].map(m => ({{id: +m[1], layer: m[2]}}));
-if (acts.length !== {n_pairs_act} + 0 || acts.some(a => a.layer !== "pairs")) fail("activity filter: " + acts.length);
-if (acts.some((a, i) => i && a.id > acts[i - 1].id)) fail("activity not newest first");
-ui.al = ""; ui.hall = false; ui.aall = false; draw();
-if (rowsOf(out("holdings")).length !== Math.min(HOLD_FIRST, {len(h)}) || !out("holdings").includes('data-more="hall"')) fail("holdings: first rows + show all");
-if (!out("activity").includes('data-more="aall"')) fail("activity: show all");
+if (rowsOf(out("hold4"))[0] !== {json.dumps(by_market[0])}) fail("sort by market");
+ui.hsort = {{k: "value_sig", dir: -1}};
+ui.hf = "dump"; draw(); if (rowsOf(out("hold4")).length !== {n_dump}) fail("dump filter: " + rowsOf(out("hold4")).length);
+ui.hf = "noexit"; draw(); if (rowsOf(out("hold4")).length !== {n_noexit}) fail("no-exit filter: " + rowsOf(out("hold4")).length);
+ui.hf = ""; ui.hall = false; draw();
+if (rowsOf(out("hold4")).length !== Math.min(HOLD_FIRST, {len(h)})) fail("holdings: first rows");
+ui.tab = "leaders"; draw(); if (!out("lead4").includes("Overall") || !out("lead4").includes("SIG day")) fail("leaders: two halves");
+ui.tab = "admin"; draw();
+if (!out("admin4").includes("✓")) fail("admin: reconciliation check not shown as ok");
+if (out("admin4").includes("nok")) fail("admin: red check although ok");
+if (!out("admin4").includes("Coverage")) fail("admin: coverage missing");
+if (!out("ctlbar").length) fail("admin: controls missing");
+S.sigday.ok = false; S.sigday.check = 312; S.admin4.recon = {{ok: false, check: 312, today: 500, sum: 100, drift: 88}}; draw();
+if (!out("admin4").includes("nok") || !out("admin4").includes("off by")) fail("admin: gap over 25 not red");
+if (document.body.innerHTML && document.body.innerHTML.includes("alert")) fail("warning banner");
 """
         render_views(self, dashboard.render(p), extra)
 
-    def test_v2_only_payload_renders_with_not_available_yet(self):
-        p = v2_only(fixture())
-        extra = f"""
-ui.tab = "overview"; draw();
-for (const id of ["daily", "account", "layers"]) if (!out(id).includes("not available yet")) fail(id + " should say not available yet");
-if (!out("money").includes({json.dumps(f"{p['overview']['leaderboard']:,.0f}")})) fail("account value falls back to the v2 leaderboard value");
-if (!out("strategies").includes("v2 figures")) fail("strategies fall back to the v2 layers");
-if (!out("capital").includes("v2 figures")) fail("capital falls back to the v2 overview");
-"""
-        render_views(self, dashboard.render(p), extra)
-
-    def test_reconciliation_warning_when_the_split_does_not_add_up(self):
+    def test_v3_only_payload_renders_with_not_available_yet(self):
         p = fixture()
-        p["money"]["total"].update(ok=False, diff=312.0, sum=p["money"]["total"]["sum"] + 312.0)
+        extra = f"""
+ui.tab = "live"; draw();
+if (!out("daily4").includes("not available yet")) fail("daily4 should say not available yet");
+if (!out("liveTiles").includes({json.dumps(f"{p['money']['account_sig']:,.0f}")})) fail("account value falls back to money.account_sig");
+if (!out("liveTiles").includes("no sample at 17:00")) fail("today tile should say no sample yet");
+ui.tab = "strategies"; draw(); if (!out("strat4").includes("not available yet")) fail("strategies should say not available yet");
+ui.tab = "holdings"; draw(); if (!out("hold4").includes("<table")) fail("holdings fall back to the v3 rows");
+ui.tab = "leaders"; draw(); if (!out("lead4").length) fail("leaders fall back to the v3 view");
+"""
+        render_views(self, dashboard.render(p), extra)
+
+    def test_status_bar_paused_and_degraded(self):
+        p = fixture4()
         extra = """
-ui.tab = "overview"; draw();
-if (!out("banner").includes('id="recon-warn"') || !out("banner").includes("does not add up")) fail("no warning banner for ok=false");
-if (!out("money").includes("Does not match")) fail("no inline mismatch");
-S.money.total.ok = true; S.money.total.diff = 75; draw();
-if (!out("banner").includes("recon-warn")) fail("no warning for |diff| > 50");
-S.money.total.diff = 12; draw();
-if (out("banner").includes("recon-warn")) fail("warning although within 50");
+S.status = {kind: "PAUSED", text: "SIG writes failing · since 12:00 · resumes by itself when the condition clears"}; draw();
+const bar = () => (els["live"] || {}).innerHTML || "";
+if (!bar().includes("PAUSED") || !bar().includes("resumes by itself")) fail("paused status bar: " + bar());
+S.status = {kind: "DEGRADED", text: "SIG slow: 6 × 429 in 10 min"}; draw();
+if (!bar().includes("DEGRADED") || !bar().includes("429")) fail("degraded status bar: " + bar());
+S.status = {kind: "TRADING", text: "last loop 3 s ago · 412 orders resting · C53"}; draw();
+if (!bar().includes("TRADING") || !bar().includes("C53")) fail("trading status bar: " + bar());
 """
         render_views(self, dashboard.render(p), extra)
 
     def test_fixture_snapshot_is_small(self):
         self.assertLessEqual(len(dashboard.dumps(fixture())), 300_000)
+        self.assertLessEqual(len(dashboard.dumps(fixture4())), 300_000)
 
 
 class V3DiffTests(unittest.TestCase):
