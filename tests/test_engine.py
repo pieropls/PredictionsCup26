@@ -3008,7 +3008,7 @@ class DoubleBookingTests(EngineCase):
         eng = engine(fake)
         L = eng.ledger
         ex = "1043"
-        L.orders["9001"] = dict(bot="MKT x", layer="dump", ex=ex, side="no", action="buy", price=0.815, qty=389, filled=778.0, cost=0.0, left=0,
+        L.orders["9001"] = dict(id="9001", bot="MKT x", layer="dump", ex=ex, side="no", action="buy", price=0.815, qty=389, filled=778.0, cost=0.0, left=0,
                                 placed="x", ts=time.time(), closed=None, status="done", sub=f"dump:{ex}:no:0", note="", truth_q=389.0)
         base = dict(order="9001", ex=ex, side="no", qty=389.0, price=0.815, action="buy", realized=0.0, bot="MKT x", layer="dump", before_engine=False,
                     fair=0.9, sig_mid=0.82, edge=0.085, sig_edge=0.005)
@@ -3029,6 +3029,15 @@ class DoubleBookingTests(EngineCase):
         self.assertEqual(L.tranches[f"dump:{ex}:no:0"]["state"], "voided")
         self.assertEqual(L.subbooks["975"], {"inventory": 1450.0, "pairset:Oklahoma:1": -1396.0}, "pair-set legs are never netted")
         self.assertEqual(L.dedup_synthetic(dry_run=False), dict(removed=[], netted=[]), "idempotent")
+        # a SIG fill replayed for an order already booked in full (truth_q lost across a restart) is not booked again
+        L.orders["9002"] = dict(id="9002", bot="MKT x", layer="scalp", ex="990", side="yes", action="buy", price=0.5, qty=500, filled=500.0, cost=250.0, left=0,
+                                placed="x", ts=time.time(), closed=None, status="done", sub="scalp:990:yes", note="")
+        L.subbooks["990"] = {"scalp:990:yes": 500.0}
+        n0 = len(L.fills)
+        L.sync([], [dict(id="77", orderId=9002, exchangeId="990", side="YES", price=0.5, quantity=500, filledAt="2026-10-05T09:15:48Z")],
+               lambda ex: "MKT x", lambda ex, side: 0.5, lambda ex, side: 0.5, as_of=time.time())
+        self.assertEqual(len(L.fills), n0, "nothing booked beyond the order's quantity")
+        self.assertEqual(L.subbooks["990"], {"scalp:990:yes": 500.0})
 
 
 class ControlTests(EngineCase):

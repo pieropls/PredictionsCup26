@@ -214,6 +214,12 @@ class Ledger:
                 qty -= take
                 if qty < 1e-9:
                     continue
+            if order and order.get("qty"):                         # Oct 5 03:20: an order never fills more than its quantity, whatever
+                over = max(0.0, (order.get("filled") or 0) + qty - order["qty"])   # the page replays (synthetic booked, truth_q lost)
+                if over > 1e-9:
+                    qty -= over
+                    if qty < 1e-9:
+                        continue
             sgn = 1 if action == "buy" else -1 if action == "sell" else None
             fair, mid = side_fair(ex, side), side_mid(ex, side)
             rec = dict(key=key, order=oid, ex=ex, side=side, qty=qty, price=price, action=action,
@@ -348,8 +354,8 @@ class Ledger:
                         break
                 if not dry_run and abs(books.get("inventory", 0)) < 1:
                     books.pop("inventory", None)
+            keys = {f["key"] for f in drop}
             if not dry_run:
-                keys = {f["key"] for f in drop}
                 for f in drop:
                     order = self.orders.get(str(f.get("order")))
                     if order:
@@ -357,7 +363,37 @@ class Ledger:
                         order["cost"] = max(0.0, (order.get("cost") or 0) - f["qty"] * f["price"])
                         order["truth_q"] = max(0.0, (order.get("truth_q") or 0) - f["qty"])
                 self.fills = [f for f in self.fills if f.get("key") not in keys]
-            return dict(removed=[f["key"] for f in drop], netted=netted)
+            # same-sign overstatement: a touch / scalp sub-book (both younger than every order record they rest on) can never
+            # hold more than the net of its own fills plus recorded moves; the excess is a duplicate's leftover -> back to
+            # inventory. Dump levels are left alone: their entry orders can predate the records we still hold.
+            net = {}
+            for f in (f for f in self.fills if f.get("key") not in keys):
+                sub = (self.orders.get(str(f.get("order"))) or {}).get("sub")
+                if sub and sub.startswith(("touch:", "scalp:")) and f.get("action") in ("buy", "sell"):   # dump levels: fills older than their order records
+                    net[(f["ex"], sub)] = net.get((f["ex"], sub), 0.0) + (1 if f["action"] == "buy" else -1) * (f["qty"] if f["side"] == "yes" else -f["qty"])
+            for ex, src, dst, q, _t in getattr(self, "moves", []):
+                if (ex, src) in net:
+                    net[(ex, src)] -= q
+                if (ex, dst) in net:
+                    net[(ex, dst)] += q
+            trimmed = []
+            for (ex, sub), q in net.items():
+                books = self.subbooks.get(ex, {})
+                cur = books.get(sub, 0)
+                if abs(cur) > abs(q) + 1 and cur * q >= 0:
+                    trimmed.append((ex, sub, cur, round(q, 2)))
+                    if not dry_run:
+                        books["inventory"] = books.get("inventory", 0) + (cur - q)
+                        if abs(q) < 1:
+                            books.pop(sub, None)
+                            t = self.tranches.get(sub)
+                            if t and t.get("state") == "open":
+                                t["state"] = "voided"
+                        else:
+                            books[sub] = round(q, 2)
+                        if abs(books.get("inventory", 0)) < 1e-9:
+                            books.pop("inventory", None)
+            return dict(removed=[f["key"] for f in drop], netted=netted + trimmed)
 
     def markouts(self, side_mid, horizons=((5, "mo5"), (30, "mo30"))):
         """Mark-out of each engine fill 5 and 30 minutes later: (SIG mid of its side then - fill price), + for buys that
