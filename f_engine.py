@@ -3964,6 +3964,15 @@ class EngineControls:
                 c.save()
             self.eng.event("CONTROL", f"order-truth fills: {mode} (dashboard)")
             return f"order-truth fills: {mode}"
+        if action == "gate_free":                          # day 4: layers that may promote although the hold is on
+            layers = [str(l) for l in (args.get("layers") or [])]
+            if not set(layers) <= set(self.STRATEGY):
+                raise ValueError(f"layers must be among {self.STRATEGY}")
+            with c.lock:
+                c.d["gate_free"] = layers
+                c.save()
+            self.eng.event("CONTROL", f"gates free to promote: {layers or 'none'} (dashboard)")
+            return f"gates free to promote: {layers or 'none'}"
         if action == "hold_gates":                         # evening §1.5: no pilot promotes while set
             on = bool(args.get("on", True))
             with c.lock:
