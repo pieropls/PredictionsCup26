@@ -243,7 +243,7 @@ def capital_v4(eng, now, capital, holdings=()):
     scalp = eng.scalp_cost()
     takes = sum(abs(q) * (eng.sig_mark(ex, "yes" if q > 0 else "no") or 0) for ex, books in eng.ledger.subbooks.items() for sub, q in books.items() if sub == "sniper" and abs(q) >= 1)
     in_use = tr + scalp + takes
-    use = in_use / free if free > 0 else None
+    use = in_use / (in_use + max(0.0, free)) if in_use + max(0.0, free) > 0 else None   # share of deployable cash in use (0-100%)
     eng.cap_use_hist.append((round(now), None if use is None else round(use, 4)))
     hist = [(t, u) for t, u in eng.cap_use_hist if t >= now - 86400]
     party = party_exposure(eng)
