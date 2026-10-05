@@ -1773,7 +1773,7 @@ class DumpV3Tests(EngineCase):
     def test_touch_book_becomes_l0_tranches_and_the_ratchet_replays_its_history(self):
         fresh_data(layers=dict(position=dict(state="full"), dump=dict(state="full"), touch=dict(state="full")))
         fake = new_fake(writes_per_min=10_000)
-        with open(a_config.LEDGER_FILE, "w") as fh:        # a touch holding from last night
+        with open(d_ledger.LEDGER_FILE, "w") as fh:        # a touch holding from last night (the path the Ledger reads in this process)
             json.dump(dict(orders={}, fills=[], baskets=[], subbooks={"1074": {"touch:1074:no": -2058.0}},
                            tranches={"touch:1074:no": dict(ex="1074", side="no", kind="touch", state="open", ts=time.time() - 3600, t="x", avg=0.875)},
                            ladder_seq={}, moves=[]), fh)
