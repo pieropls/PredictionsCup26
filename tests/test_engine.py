@@ -2121,6 +2121,11 @@ class Day4Tests(EngineCase):
         bid_no = bots.side_book(*eng.px[AK][:2], "no")[0]
         self.assertTrue(all(abs(p - bots.tick_up(max(fair_no + 0.01, bid_no))) < 1e-9 for p, _ in sells), (sells, fair_no, bid_no))
         self.assertGreater(sells[0][0], fair_no, "sold above Polymarket fair: +EV")
+        b, a_, l = fake.px[AK]
+        fake.px[AK] = (b - 0.005, a_ - 0.005, l)           # the SIG bid ticks up 0.5c on NO: the slices are kept (no churn)
+        fake.calls.clear()
+        loop(eng, fake)
+        self.assertFalse([c for c in fake.calls if c[0] == "cancel"], "a 1-tick move doesn't re-price the AK slices")
 
     def test_release_on_demand_rules(self):
         fake, eng = self.rig()

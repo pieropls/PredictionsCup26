@@ -109,7 +109,8 @@ class PositionBot:
             n, each = int(liq.get("slices", 3)), int(held // int(liq.get("slices", 3)))
             qs = [each] * n
             qs[-1] += held - sum(qs)
-            out = [want(side, "sell", px, q, px, px, 0.05, "exit", sub="manual") for q in qs if q >= MIN_QTY]
+            floor_px = tick_up(fair + liq.get("over_fair", 0.01))           # a resting slice within 1c of the target stays
+            out = [want(side, "sell", px, q, max(floor_px, px - 0.01), px + 0.01, 0.05, "exit", sub="manual") for q in qs if q >= MIN_QTY]
             if s.get("recycle") and s.get("fair") is not None:
                 out += recycle_wants(s["recycle"], s["fair"], s.get("bid"), s.get("ask"), s.get("kappa", 0.0), s.get("own", ()))
             self.ladder = [dict(px=px, yes_px=self._yes(px), qty=q, state="resting") for q in qs]
