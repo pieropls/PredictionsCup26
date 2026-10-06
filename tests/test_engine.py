@@ -2629,7 +2629,7 @@ class DashV4PayloadTests(EngineCase):
         sd = s["sigday"]
         self.assertTrue(sd["ok"])
         rows = s["strategies4"]
-        self.assertEqual([r["key"] for r in rows], ["dump", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])
+        self.assertEqual([r["key"] for r in rows], ["dump", "wall", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])
         self.assertEqual(next(r for r in rows if r["key"] == "mm")["trades_today"], 1)
         self.assertAlmostEqual(sum(r["pnl_today"] for r in rows) + sd["drift"], sd["today"], delta=25, msg="Strategies total = Live today")
         self.assertAlmostEqual(sum(h["value_sig"] for h in s["holdings4"]), s["capital4"]["holdings"], places=2, msg="Holdings total = Capital in holdings")
@@ -3175,6 +3175,83 @@ class CashGuardTests(EngineCase):
             FAIR.pop(ex, None)
         eng.release_t = 0
         self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage()), "above 15k free: the tiers rule again")
+
+
+class WallTests(EngineCase):
+    """Piero's manual wall (Oct 5 23:40): a control places one big resting order; it is cut so a full fill leaves >= 2k free;
+    what fills rests its buy-back at his YES price (rule 0 applies); after 6 h it is held; a 2c Polymarket move against it
+    pulls it; everything is logged."""
+
+    def rig(self, cash_above_floor=60_000):
+        fresh_data(layers=dict(position=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + cash_above_floor)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] <= 0.10)
+        fake.px[ex] = (0.10, 0.105, 0.10)                 # YES 0.10 / 0.105: NO bid 0.895
+        return fake, eng, ex
+
+    def walls(self, eng, fake, ex, layer="wall"):
+        return [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == layer]
+
+    def test_place_cut_fill_buyback_hold(self):
+        fake, eng, ex = self.rig(cash_above_floor=10_000)   # a full 15,000 x 0.88 = 13.2k fill would leave < 2k: cut
+        msg = f_engine.EngineControls(eng).apply("wall", dict(ex=ex, side="no", price=0.88, qty=15_000, exit_px=0.105, ttl_h=24, hold_h=6))
+        self.assertIn("WALL", msg)
+        loop(eng, fake)
+        loop(eng, fake)
+        ws = self.walls(eng, fake, ex)
+        self.assertEqual(len(ws), 1, ws)
+        self.assertEqual((ws[0]["side"], ws[0]["action"], ws[0]["price"]), ("no", "buy", 0.88))
+        self.assertEqual(ws[0]["qty"], int((10_000 - a_config.WALL_MIN_FREE) / 0.88), "cut so a full fill leaves >= 2k free")
+        self.assertTrue(any("cut to" in e["text"] for e in eng.events if e["kind"] == "WALL"))
+        fake, eng, ex = self.rig(cash_above_floor=60_000)
+        f_engine.EngineControls(eng).apply("wall", dict(ex=ex, side="no", price=0.88, qty=15_000, exit_px=0.105, ttl_h=24, hold_h=6))
+        loop(eng, fake)
+        loop(eng, fake)
+        ws = self.walls(eng, fake, ex)
+        self.assertEqual(ws[0]["qty"], 15_000)
+        wid = eng.ledger.orders[ws[0]["id"]]["sub"].rsplit(":", 1)[-1]
+        fake.fill(ws[0]["id"], 4_000)
+        loop(eng, fake)
+        loop(eng, fake)
+        sub = f"wall:{ex}:no:{wid}"
+        self.assertEqual(eng.ledger.subbooks[ex].get(sub), -4_000.0)
+        xs = self.walls(eng, fake, ex, layer="wallexit")
+        self.assertEqual(len(xs), 1, xs)
+        self.assertEqual((xs[0]["side"], xs[0]["action"], xs[0]["price"], xs[0]["qty"]), ("yes", "buy", 0.105, 4_000), "the buy-back: YES bid 0.105 for the filled quantity")
+        self.assertEqual(self.walls(eng, fake, ex)[0]["qty"], 11_000, "the wall keeps resting for the rest")
+        w = next(w for w in eng.walls() if w["id"] == wid)
+        self.assertEqual(w["filled"], 4_000)
+        self.assertTrue(any("WALL fill" in e["text"] for e in eng.events))
+        eng.ledger.tranches[sub]["ts"] -= a_config.WALL_HOLD_S + 60   # 6 h later: held to settlement, no buy-back
+        loop(eng, fake)
+        loop(eng, fake)
+        self.assertEqual(self.walls(eng, fake, ex, layer="wallexit"), [])
+        self.assertEqual(eng.ledger.tranches[sub]["state"], "held")
+        self.assertTrue(any("held to settlement" in e["text"] for e in eng.events))
+        self.assertEqual(engine_order_problems(fake, eng.ledger), [])
+
+    def test_news_guard_pulls_the_wall_and_rule_0_covers_the_buyback(self):
+        fake, eng, ex = self.rig()
+        f_engine.EngineControls(eng).apply("wall", dict(ex=ex, side="no", price=0.88, qty=15_000, exit_px=0.105))
+        loop(eng, fake)
+        loop(eng, fake)
+        self.assertTrue(self.walls(eng, fake, ex))
+        FAIR[ex] = eng.fair[ex] + 0.025                   # Polymarket YES up 2.5c in 10 min: against a NO buyer
+        try:
+            for _ in range(3):
+                loop(eng, fake)
+            self.assertEqual(self.walls(eng, fake, ex), [], "pulled")
+            self.assertEqual(next(w for w in eng.walls())["state"], "pulled")
+        finally:
+            FAIR.pop(ex, None)
+        eng.ledger.tranches["wall:x"] = dict(ex=ex, side="no", kind="wall", state="open", ts=time.time(), t="x", avg=0.88)
+        self.assertEqual(eng.rule0_allowed(ex, "no", "wall:x", 0.895, 100), 100, "selling NO at 0.895 clears the wall's entry 0.88 + 0.5c")
+        self.assertEqual(eng.rule0_allowed(ex, "no", "wall:x", 0.88, 100), 0, "at entry it does not")
 
 
 class ControlTests(EngineCase):

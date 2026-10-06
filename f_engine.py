@@ -48,7 +48,8 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                       CASH_T_PEAK_DOWN, CASH_T_IDLE_H, RELEASE_TIER0, RELEASE_TIER1, RELEASE_TIER2, RELEASE_TIER2_RETURN,
                       RI_RACES, RI_ENGINE_CAP, DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP, DUMP_L0_REFILLS, DUMP_L0_WINDOW_S, UNCOVERED_LOG_S,
                       ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE, DUMP_NEAR_TTL_S, DUMP_NEAR_GAP, DUMP_L0_BUDGET,
-                      REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP)
+                      REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
+                      WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
                       RISK_MAX_EXPOSURE, CASH_RESERVE, POSITION_BOTS, POSITION_MAX_ADD, MANUAL_MARKETS, MB_PM_MAX_SPREAD,
                       MB_FOCUS, MB_REFILL_S, MB_QUOTE_TTL_S, PAIR_ENABLED, PAIR_EDGE, PAIR_THIRD_PARTY, PAIR_MAX_QTY,
@@ -111,7 +112,7 @@ def host_id():
 
 
 # ====================================================================================================== controls
-LAYERS = ["position", "recycler", "release", "mm", "scalp", "touch", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
+LAYERS = ["position", "recycler", "release", "mm", "scalp", "touch", "wall", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
 TMM_ENABLED = True              # afternoon D-C: the engine's MM is the turnover MM (False: classic MM v2, tests only)
 LAYER_STATES = ("off", "pilot", "full")
 
@@ -375,6 +376,7 @@ class Engine:
         self.release_fund_log, self.dump_refresh_t = [], {}   # day 6 §3.3 funding per hour; §4.1 level refresh times
         self.release_why = {}                               # ex -> (t, branch) of the last release plan (fill labels)
         self.touch_now, self.touch_view, self.touch_block, self.touch_note = {}, {}, {}, {}   # day 6 §2
+        self.wall_now, self.wall_view = {}, {}               # Piero's manual walls (control `wall`)
         self.in_use_hist, self.use_peak, self.rule0_log, self.rule0_blocked, self.lots_cache = collections.deque(maxlen=3000), 0.0, {}, collections.deque(maxlen=5000), (None, {})   # §9
         self.uncovered_since, self.uncovered_log, self.uncovered_n, self.refreshed = {}, {}, collections.deque(maxlen=2000), {}   # day 7 §1.3
         try:
@@ -471,8 +473,8 @@ class Engine:
     MARKET_LAYERS = {"exit": "recycler", "recycle": "recycler", "take": "sniper", "mm": "mm",   # "touch" is the day-6 layer (the old MM touch quote is gone)
                      "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs",
                      "release": "release", "fatfinger": "fatfinger", "dump": "dump", "dumpexit": "dump",
-                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch"}
-    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit", "touchexit"}
+                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall"}
+    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit", "touchexit", "wallexit"}
 
     def gate(self, b, wants):
         """Layer flags (data/overrides.json): a want survives only if its layer is on and allowed on this market. Pause
@@ -629,6 +631,7 @@ class Engine:
                 self.longshot_fill_events(new_f)
                 self.scalp_fill_events(new_f)
                 self.touch_fill_events(new_f)
+                self.wall_fill_events(new_f)
                 for f in new_f:                             # an order filled out before any snapshot showed it: no longer "acked, resting"
                     rec = self.ledger.orders.get(str(f.get("order") or ""))
                     if rec and rec.get("filled", 0) >= rec.get("qty", 0) - QTY_TOL:
@@ -700,6 +703,12 @@ class Engine:
         except Exception as err:
             self.long_now = {}
             self.event("ERR", f"longshot plan: {err!r}")
+        try:
+            self.track_walls(now)
+            self.wall_now = self.wall_plan(now, cash)
+        except Exception as err:
+            self.wall_now = {}
+            self.event("ERR", f"wall plan: {err!r}")
         try:
             self.scalp_now = self.scalp_plan(now, cash, used)
         except Exception as err:
@@ -1151,6 +1160,7 @@ class Engine:
                     longshot=self.long_now.get(b.ex) or [], long_exits=self.long_view.get(b.ex, []),
                     scalp=self.scalp_now.get(b.ex) or [], scalp_exits=self.scalp_view.get(b.ex, []),
                     touch=self.touch_now.get(b.ex) or [], touch_exits=self.touch_view.get(b.ex, []),
+                    wall=self.wall_now.get(b.ex) or [], wall_exits=self.wall_view.get(b.ex, []),
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
                     room={sd: max(0.0, MARKET_MAX_POS - held[sd]) for sd in ("yes", "no")},
@@ -1785,7 +1795,7 @@ class Engine:
     LAYER_TTL = {"mm": TMM_TTL_S, "fatfinger": FAT_TTL_S, "dump": DUMP_TTL_S, "dumpexit": DUMP_TTL_S, "ladder": LADDER_TTL_S,
                  "rebound": LADDER_TTL_S, "release": RECYCLE_TAKE_TTL_S, "take": TAKE_TTL_S, "recycle": RECYCLE_REST_TTL_S,
                  "set": PAIR_TTL_S, "unwind": PAIR_TTL_S, "repair": PAIR_TTL_S,
-                 "longshot": LONG_TTL_S, "longexit": LONG_EXIT_TTL_S, "scalp": SCALP_TTL_S, "scalpexit": SCALP_TTL_S, "touch": TOUCH_TTL_S, "touchexit": TOUCH_TTL_S}
+                 "longshot": LONG_TTL_S, "longexit": LONG_EXIT_TTL_S, "scalp": SCALP_TTL_S, "scalpexit": SCALP_TTL_S, "touch": TOUCH_TTL_S, "touchexit": TOUCH_TTL_S, "wall": WALL_TTL_S, "wallexit": WALL_HOLD_S}
 
     def vanished_fill(self, oid, rec, q0, now):
         """Shares an order filled since the previous snapshot: it shrank, or it left the book while we didn't cancel it
@@ -2309,8 +2319,10 @@ class Engine:
         n_lv = len(DUMP_V3_OFFSETS_DAY)
         missing = {lvl: any(r[0] == lvl and not r[1] for r in rows) for lvl in range(n_lv)}
         keep = []
+        total_w = sum(w["px"] * w["qty"] * w["weight"] for _, _, _, w in rows)
+        binding = total_w > self.entry_budget(cash) + 1e-6   # Oct 5 23:45: with the budget binding, every level competes on edge
         for lvl, is_resting, ex, w in rows:
-            if is_resting or lvl in (0, 4) or all(not missing[k] for k in range(lvl)):   # L0 and L1 go out first, everywhere
+            if binding or is_resting or lvl in (0, 4) or all(not missing[k] for k in range(lvl)):   # else L0 and L1 go out first, everywhere
                 keep.append((lvl, is_resting, ex, w))
         # Oct 5 22:50 guard (a): every resting entry bid costs against 2 x free cash above the floor (near-touch and L0 at 3x);
         # L1-L4 get the cash first, then L0; within a group the best edge first (a resting level keeps a small edge bonus
@@ -3040,6 +3052,123 @@ class Engine:
                 self.event("RATCHET", msg)
                 self.night.line(msg)
 
+    # ------------------------------------------------------------------------------------------------ manual walls (Piero's pilot)
+    def walls(self):
+        return list(self.controls.d.get("walls") or [])
+
+    def wall_cost(self):
+        return sum(abs(q) * float((self.ledger.tranches.get(sub) or {}).get("avg") or self.sig_mark(ex, "yes" if q > 0 else "no") or 0)
+                   for ex, books in self.ledger.subbooks.items() for sub, q in books.items() if sub.startswith("wall:") and abs(q) >= 1)
+
+    def wall_plan(self, now, cash):
+        """{ex: [want-spec]}: each active wall rests as one order at its price; its quantity is cut so that a full fill leaves
+        >= 2k free above the floor (none if that is < MIN_QTY); it counts against the entry budget; the news guard pulls it
+        when Polymarket's fair for the market moves >= 2c against it within 10 min; it expires at its TTL."""
+        c = self.controls
+        plan = {}
+        if not c.on("wall") or c.paused:
+            return {}
+        free = cash - CASH_RESERVE
+        changed = False
+        for w in self.walls():
+            if w.get("state") != "active":
+                continue
+            ex, side = str(w["ex"]), w["side"]
+            if now - w["t"] >= w.get("ttl_s", WALL_TTL_S):
+                w["state"], changed = "expired", True
+                self.event("WALL", f"WALL {w['id']} {self.name(ex)} {side.upper()} expired at its TTL ({w.get('ttl_s', WALL_TTL_S) / 3600:.0f} h), filled {w.get('filled', 0):,.0f} of {w['qty']:,}")
+                self.night.line(f"WALL {w['id']} expired: filled {w.get('filled', 0):,.0f} of {w['qty']:,}")
+                continue
+            f = self.fair.get(ex)
+            if f is not None:                               # news guard: fair for the side we are SELLING rises >= 2c in 10 min
+                h = [x for x in self.fair_hist.get(ex, []) if x[0] >= now - WALL_NEWS_WINDOW_S]
+                if not h or now - h[-1][0] >= 5:
+                    h.append((now, f))
+                    self.fair_hist[ex] = h
+                sold = "no" if side == "yes" else "yes"      # buying NO = selling YES: a YES rise is against us
+                cur = f if sold == "yes" else 1 - f
+                low = min((v if sold == "yes" else 1 - v) for _, v in h + [(now, f)])
+                if cur - low >= w.get("news_c", WALL_NEWS_C) - 1e-9:
+                    w["state"], changed = "pulled", True
+                    self.event("WALL", f"WALL {w['id']} {self.name(ex)}: Polymarket {sold.upper()} rose {(cur - low) * 100:.1f}c in 10 min: wall pulled")
+                    self.night.line(f"WALL {w['id']} pulled by the news guard ({sold.upper()} +{(cur - low) * 100:.1f}c in 10 min); filled {w.get('filled', 0):,.0f}")
+                    continue
+            left_q = int(w["qty"] - (w.get("filled") or 0))
+            cap_q = int(max(0.0, free - WALL_MIN_FREE) / w["px"])
+            q = min(left_q, cap_q)
+            if q < MIN_QTY:
+                if now - w.get("nocash_t", 0) >= 1800:
+                    w["nocash_t"], changed = now, True
+                    self.event("WALL", f"WALL {w['id']} {self.name(ex)}: a full fill would leave < {WALL_MIN_FREE:,} free (free {free:,.0f}): not resting")
+                continue
+            if q < left_q and now - w.get("cut_t", 0) >= 1800:
+                w["cut_t"], changed = now, True
+                self.event("WALL", f"WALL {w['id']} {self.name(ex)}: cut to {q:,} of {left_q:,} so a full fill leaves >= {WALL_MIN_FREE:,} free")
+            plan.setdefault(ex, []).append(dict(side=side, px=w["px"], qty=q, sub=f"wall:{ex}:{side}:{w['id']}", ttl=w.get("ttl_s", WALL_TTL_S)))
+            self.entry_left = max(0.0, getattr(self, "entry_left", float("inf")) - q * w["px"])
+        if changed:
+            with c.lock:
+                c.save()
+        return plan
+
+    def track_walls(self, now):
+        """A filled wall rests its buy-back (the exit price Piero gave, in YES terms) for the filled quantity; after the hold
+        time it is held to settlement (no exit). Rule 0 applies to the buy-back like to every sale."""
+        self.wall_view = {}
+        c = self.controls
+        changed = False
+        for w in self.walls():
+            ex, side = str(w["ex"]), w["side"]
+            sub = f"wall:{ex}:{side}:{w['id']}"
+            q = self.ledger.subbooks.get(ex, {}).get(sub, 0)
+            if abs(q) < MIN_QTY:
+                continue
+            if (q > 0) != (side == "yes"):
+                continue
+            t = self.ledger.tranches.get(sub)
+            if t is not None and t.get("state") == "held":
+                continue                                    # held to settlement: no buy-back, ever
+            if t is None or t.get("state") != "open":
+                t = self.ledger.tranches[sub] = dict(ex=ex, side=side, kind="wall", t=stamp(), ts=now, state="open", avg=w["px"])
+            avg = self.ledger.tranche_avg(sub, "wall", ex=ex, side=side, since=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t["ts"] - 300))) or t.get("avg")
+            t["avg"] = round(avg, 5)
+            if now - t["ts"] > w.get("hold_s", WALL_HOLD_S):
+                if t.get("state") != "held":
+                    t["state"], changed = "held", True
+                    self.event("WALL", f"WALL {w['id']} {self.name(ex)}: {abs(q):,.0f} {side.upper()} not bought back within {w.get('hold_s', WALL_HOLD_S) / 3600:.0f} h: held to settlement")
+                    self.night.line(f"WALL {w['id']}: {abs(q):,.0f} {side.upper()} held to settlement (fair {self.side_fair(ex, side)})")
+                continue
+            exit_yes = float(w["exit_px"])                    # the buy-back price in YES terms
+            sell_px = (1 - exit_yes) if side == "no" else exit_yes   # what the held side fetches
+            self.wall_view.setdefault(ex, []).append(dict(sub=sub, side=side, sell_px=round(sell_px, 3), avg=avg))
+        if changed:
+            with c.lock:
+                c.save()
+
+    def wall_fill_events(self, fills):
+        c = self.controls
+        changed = False
+        for f in fills:
+            if f["layer"] not in ("wall", "wallexit"):
+                continue
+            sub = (self.ledger.orders.get(f["order"]) or {}).get("sub", "")
+            wid = sub.rsplit(":", 1)[-1]
+            for w in self.walls():
+                if str(w["id"]) == wid and f["layer"] == "wall":
+                    w["filled"] = (w.get("filled") or 0) + f["qty"]
+                    w["fill_t"] = w.get("fill_t") or f["t"]
+                    changed = True
+            fs = self.side_fair(f["ex"], f["side"])
+            if f["layer"] == "wall":
+                msg = f"WALL fill {self.name(f['ex'])}: bought {f['qty']:,.0f} {f['side'].upper()} at {f['price']:.3f}" + ("" if fs is None else f" (fair {fs:.3f}, {(fs - f['price']) * 100:.1f}c under)")
+            else:
+                msg = f"WALL buy-back {self.name(f['ex'])}: {f['qty']:,.0f} closed at {1 - f['price']:.3f} (YES bid {f['price']:.3f}), realized {f.get('realized') or 0:+,.0f}"
+            self.event("WALL", msg)
+            self.night.line(msg)
+        if changed:
+            with c.lock:
+                c.save()
+
     # ------------------------------------------------------------------------------------------------ touch layer (day 6 §2)
     def touch_budget(self):
         """The layer's budget at cost: the cap (pilot half, full 15k; a failed scalper gate adds its slice) x the ratchet, <= 30k."""
@@ -3552,7 +3681,7 @@ class Engine:
         ok = sum(l[0] for l in lots if l[2] == "day1" or l[1] + margin <= sale_px + 1e-9)
         if qty > known:                                     # shares the lot history can't place: the tranche's own entry (the
             t = self.ledger.tranches.get(sub) or {}          # engine's record, e.g. a hand-over sub), else SIG's average cost
-            avg = float(t.get("avg") or 0) if sub.startswith(("dump:", "touch:", "scalp:")) and t.get("avg") else \
+            avg = float(t.get("avg") or 0) if sub.startswith(("dump:", "touch:", "scalp:", "wall:")) and t.get("avg") else \
                 float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
             if avg and avg + margin <= sale_px + 1e-9:
                 ok += qty - known
@@ -4755,6 +4884,7 @@ class Engine:
               "mm": ("Market maker", "Quotes both sides around the Polymarket price"),
               "scalp": ("Scalper", "Joins the best bid 2c+ under fair on the busiest markets; sells a tick inside the ask"),
               "touch": ("Touch (big sellers)", "Joins the SIG best bid on >= 93% favourites priced 6c+ under fair; sells at entry + 1.5c or holds to settlement"),
+              "wall": ("Wall (manual pilot)", "One big resting order placed by Piero through a control; buy-back at his price, held after 6 h, pulled on a 2c Polymarket move"),
               "ladder": ("Deep ladders", "Deep bids that catch sweeps, then sell back"),
               "pairs": ("Pair sets", "Buys every side of a race when the set costs less than it pays"),
               "sniper": ("Sniper", "Buys big gaps below fair, and new markets"),
@@ -5308,6 +5438,37 @@ class EngineControls:
             return f"gates free to promote: {layers or 'none'}"
         if action == "travel":                             # day 6 §4.2: ./travel.sh [off]
             return self.eng.travel(bool(args.get("on", True)))
+        if action == "wall":                               # Piero's manual wall: {ex, side, price, qty, exit_px, ttl_h=24, hold_h=6, news_c=0.02}
+            ex, side = str(args.get("ex")), str(args.get("side", "")).lower()
+            if ex not in self.eng.owner or side not in ("yes", "no"):
+                raise ValueError("wall needs a known market (ex) and side yes/no (the side we BUY)")
+            px, qty, exit_px = float(args["price"]), int(args["qty"]), float(args["exit_px"])
+            if not (0.01 <= px <= 0.99) or not (0.01 <= exit_px <= 0.99) or qty < MIN_QTY:
+                raise ValueError("wall price / exit_px must be 0.01-0.99 and qty >= 10")
+            wid = f"w{int(time.time())}"
+            w = dict(id=wid, ex=ex, side=side, px=round(px, 3), qty=qty, exit_px=round(exit_px, 3), ttl_s=int(float(args.get("ttl_h", 24)) * 3600),
+                     hold_s=int(float(args.get("hold_h", 6)) * 3600), news_c=float(args.get("news_c", WALL_NEWS_C)), t=time.time(), state="active",
+                     filled=0.0, fill_t=None, by=str(args.get("by", "Piero")))
+            with c.lock:
+                c.d.setdefault("walls", []).append(w)
+                if c.state("wall") == "off":
+                    c.d["layers"].setdefault("wall", dict(state="off", caps={}, killed=None))["state"] = "full"
+                c.save()
+            msg = (f"WALL {wid} placed by {w['by']}: {self.eng.name(ex)} buy {qty:,} {side.upper()} at {px:.3f} (= sell {'YES' if side == 'no' else 'NO'} at {1 - px:.3f}), "
+                   f"TTL {w['ttl_s'] / 3600:.0f} h; buy-back YES bid {exit_px:.3f} for what fills, held after {w['hold_s'] / 3600:.0f} h; pulled if Polymarket moves {w['news_c'] * 100:.0f}c against it in 10 min; "
+                   f"cut so a full fill leaves >= {WALL_MIN_FREE:,} free")
+            self.eng.event("WALL", msg)
+            self.eng.night.line(msg)
+            return msg
+        if action == "wall_cancel":
+            wid = str(args.get("id"))
+            with c.lock:
+                for w in c.d.get("walls") or []:
+                    if w["id"] == wid and w.get("state") == "active":
+                        w["state"] = "cancelled"
+                c.save()
+            self.eng.event("WALL", f"WALL {wid} cancelled by control")
+            return f"wall {wid} cancelled"
         if action == "dedup_fills":                        # Oct 5: undo synthetic fills that duplicated SIG's fill (dry_run lists them)
             dry = bool(args.get("dry_run", True))
             fixed = self.eng.ledger.dedup_synthetic(dry_run=dry, window_s=int(args.get("window_s") or 0))

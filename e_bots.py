@@ -9,7 +9,7 @@ Prices: SIG books are YES-normalized; an order's price is in its own side (a NO 
 """
 import math
 
-from a_config import (TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, ROC_MIN_TIGHT, DUMP_TTL_S, TMM_BUY_EDGE, TMM_TTL_S, LONG_TTL_S, LONG_EXIT_TTL_S, SCALP_TTL_S, TOUCH_TTL_S, RECYCLE_BID_EDGE,
+from a_config import (TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, ROC_MIN_TIGHT, DUMP_TTL_S, TMM_BUY_EDGE, TMM_TTL_S, LONG_TTL_S, LONG_EXIT_TTL_S, SCALP_TTL_S, TOUCH_TTL_S, WALL_TTL_S, WALL_HOLD_S, RECYCLE_BID_EDGE,
                       RECYCLE_REST_EDGE, RECYCLE_TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_EDGE, MM_U_MULT, MM_NOTIONAL, MM_TTL_S,
                       LADDER_LEVELS, LADDER_TTL_S, TAKE_EDGE, TAKE_U_MULT, TAKE_NOTIONAL, TAKE_TTL_S, FAT_TTL_S)
 
@@ -405,6 +405,13 @@ class MarketBot:
             q = abs(subs.get(x["sub"], 0))
             if q >= MIN_QTY:
                 reduce_buy(x["side"], x["px"], int(q), "touchexit", x["sub"], TOUCH_TTL_S, band=0.0, a2=False)
+        # manual walls (Piero's pilot): one resting order per wall, exact price, its own TTL; the buy-back for what filled
+        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], 2 * QTY_TOL, "wall", sub=x["sub"], ttl=x.get("ttl") or WALL_TTL_S)
+                for x in (s.get("wall") or [])]
+        for x in s.get("wall_exits") or []:
+            q = abs(subs.get(x["sub"], 0))
+            if q >= MIN_QTY:
+                reduce_buy(x["side"], x["sell_px"], int(q), "wallexit", x["sub"], WALL_HOLD_S, band=0.0, a2=False)
         self.orders = out
         layers = sorted({w["layer"] for w in out})
         net = sum(subs.values())

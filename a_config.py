@@ -150,6 +150,7 @@ LAYER_CAPS = {
     "longshot": {"resting": (20_000, 20_000, 25_000)},        # day 3 §2: total resting cost (worst case 200 per side)
     "scalp": {"inventory": (10_000, 10_000, 20_000)},         # day 5 §2: the slice at cost (3k per market); ratchet / idle rule up to 20k
     "touch": {"budget": (7_500, 15_000, 30_000)},             # day 6 §2: the layer budget at cost (pilot half); ratchet up to 30k
+    "wall": {"notional": (50_000, 50_000, 100_000)},          # manual walls (control): bounded by the cash guard, not by this
 }
 # fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
 FAT_LEVELS = [0.12]             # Oct 3 (Piero): only the 0.12 level on each side (0.08 / 0.05: 0 fills since day 1)
@@ -191,6 +192,8 @@ DUMP_NEAR_TTL_S, DUMP_NEAR_GAP = 1200, 0.02      # L0 and levels within 2c of th
 DUMP_L0_BUDGET = 8_000          # L0 holds <= 8k at cost across all sides; refills only under it; L1-L4 get the cash first
 REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2 = 15_000, 0.07, 0.10   # rebuild free cash to 15k: engine lots above entry + 0.5c at the bid, lowest gap first
 REBUILD_MARGIN, REBUILD_MARGIN_GAP = -0.01, 0.05 # Piero 23:00: lots <= 5c under fair may go down to entry - 1c for the rebuild
+# wall layer (Piero's manual pilot, Oct 5 23:40): one big resting order placed by control, with its buy-back, hold and news guard
+WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE = 24 * 3600, 6 * 3600, 0.02, 600, 2_000
 DUMP_V3_OFFSETS_DAY, DUMP_V3_WEIGHTS_DAY = [0.01, 0.02, 0.035, 0.05], [0.45, 0.25, 0.15, 0.15]   # §1.3: L4 in the day window (replay: 5c)
 DUMP_RECYCLE_FAST_S = 1800      # §1.5: cash-constrained -> a tranche older than 30 min sells back at fill + 0.5c
 CONSTRAINED_FREE, CONSTRAINED_FILLS_30M = 10_000, 3_000   # §3.3: constrained = free cash < 10k AND dump fills >= 3k cost in 30 min
