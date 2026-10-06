@@ -2322,7 +2322,11 @@ class Day4Tests(EngineCase):
             self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage()))
             eng.trading_return_24h = lambda now: 0.25
             eng.release_t = 0
+            self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage()), "day 8 §1.4: tier 2 needs Piero's flag")
+            eng.controls.d["release_tier2"] = True
+            eng.release_t = 0
             self.assertEqual(eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage()).get(ex, {}).get("why"), "tier2")
+            eng.controls.d.pop("release_tier2")
             FAIR[ex] = bid + 0.08                              # > 7c under fair: never for funding
             loop(eng, fake)
             eng.release_t = 0
@@ -2348,22 +2352,29 @@ class Day4Tests(EngineCase):
         self.assertEqual(eng.cash_target(now), 35_000)
         c.d["cash_target"]["hour"] -= 1
         for i in range(20):
-            eng.constrained_min.append(now - 60 * i)          # 20 constrained minutes
-        self.assertEqual(eng.cash_target(now), 45_000)
+            eng.constrained_min.append(now - 60 * i)          # 20 constrained minutes: at the cap (day 8 §1.1: 35k) nothing changes
+        self.assertEqual(eng.cash_target(now), 35_000, "capped at 35k")
+        c.d["cash_target"]["hour"] -= 1                       # day 8 §1.2: an hour with peak 65% and constrained minutes is not idle
+        eng.use_peak = 0.65
+        eng.cash_target(now)
+        self.assertEqual(c.d["cash_target"]["idle"], 0)
         eng.constrained_min.clear()
-        for _ in range(4):                                    # 3 idle hours -> -10k, min 25k
-            c.d["cash_target"]["hour"] -= 1
-            eng.use_peak = 0.1
-            eng.cash_target(now)
-        self.assertEqual(c.d["cash_target"]["T"], 35_000)
-        for _ in range(6):
+        c.d["cash_target"]["hour"] -= 1                       # peak 65% but no constrained minute: idle hour 1
+        eng.use_peak = 0.65
+        eng.cash_target(now)
+        self.assertEqual((c.d["cash_target"]["T"], c.d["cash_target"]["idle"]), (35_000, 1))
+        c.d["cash_target"]["hour"] -= 1                       # peak 10%: idle hour 2 -> -10k
+        eng.use_peak = 0.1
+        eng.cash_target(now)
+        self.assertEqual(c.d["cash_target"]["T"], 25_000)
+        for _ in range(4):
             c.d["cash_target"]["hour"] -= 1
             eng.use_peak = 0.1
             eng.cash_target(now)
         self.assertEqual(c.d["cash_target"]["T"], 25_000, "never below 25k")
-        c.d["cash_target"].update(T=55_000, hour=c.d["cash_target"]["hour"] - 1)
+        c.d["cash_target"].update(T=55_000, hour=c.d["cash_target"]["hour"] - 1)   # an old 55k target is clamped on read
         eng.use_peak = 0.9
-        self.assertEqual(eng.cash_target(now), 55_000, "never above 55k")
+        self.assertEqual(eng.cash_target(now), 35_000, "never above 35k")
         self.assertTrue(any(e["kind"] == "CASH" and "CASH TARGET" in e["text"] for e in eng.events))
 
     def test_reads_pnl_60s_orders_30s_prices_rotated(self):
@@ -3064,16 +3075,23 @@ class CashGuardTests(EngineCase):
     def entries(self, eng, fake):
         return [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] in ("dump", "fatfinger", "scalp")]
 
-    def test_resting_entries_capped_at_twice_free_cash_and_none_under_2k(self):
+    @staticmethod
+    def weight_of(rec):
+        """Day 8 §2 weight of a resting entry from its order record."""
+        if rec["layer"] == "dump":
+            tail = str(rec.get("sub", "")).rsplit(":", 1)[-1]
+            return a_config.ENTRY_WEIGHTS["L0" if tail == "L0" else f"L{int(tail) + 1}"]
+        return a_config.ENTRY_WEIGHTS[rec["layer"]]
+
+    def test_resting_entries_capped_at_1_5x_free_cash_weighted_and_none_under_2k(self):
         fake, eng, favs = self.rig(cash_above_floor=6_000)
         ents = self.entries(eng, fake)
         self.assertTrue(ents)
-        weighted = 0.0
-        for o in ents:
-            best = bots.side_book(*eng.px[o["ex"]][:2], o["side"])[0]
-            w = 3.0 if (str(eng.ledger.orders[o["id"]].get("sub", "")).endswith(":L0") or (best is not None and o["price"] >= best - 0.01 - 1e-9)) else 1.0
-            weighted += o["qty"] * o["price"] * w
-        self.assertLessEqual(weighted, 2.0 * 6_000 + 1e-6, f"weighted resting entries {weighted:.0f} > 2 x free")
+        weighted = sum(o["qty"] * o["price"] * self.weight_of(eng.ledger.orders[o["id"]]) for o in ents)
+        self.assertLessEqual(weighted, 1.5 * 6_000 + 1e-6, f"weighted resting entries {weighted:.0f} > 1.5 x free")
+        self.assertGreater(len([o for o in ents if eng.ledger.orders[o["id"]]["layer"] == "dump"]), 7, "the weighted budget funds more than the 7 levels of the 2x rule")
+        cov = eng.dump_cov
+        self.assertTrue(cov and cov["eligible"] > 0 and cov["covered"] > 0 and cov["weighted"] <= cov["budget"], cov)
         fake, eng, favs = self.rig(cash_above_floor=1_500)
         self.assertEqual(self.entries(eng, fake), [], "under 2k free: no entry bids at all")
         self.assertTrue(any("no entry bids" in e["text"] for e in eng.events))
@@ -3094,8 +3112,10 @@ class CashGuardTests(EngineCase):
             loop(eng, fake)
         by = collections.Counter(eng.ledger.orders[o["id"]]["layer"] for o in fake.open_orders() if o["id"] in eng.ledger.orders)
         self.assertGreater(by.get("dump", 0), 0, by)
-        cost = {l: sum(o["qty"] * o["price"] for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == l) for l in ("dump", "fatfinger", "scalp")}
-        self.assertLessEqual(cost["fatfinger"], max(0.0, 12_000 - cost["dump"]) + 1e-6, cost)
+        cost = {l: sum(o["qty"] * o["price"] * self.weight_of(eng.ledger.orders[o["id"]]) for o in fake.open_orders()
+                       if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == l) for l in ("dump", "fatfinger", "scalp")}
+        self.assertLessEqual(cost["fatfinger"], max(0.0, 1.5 * 6_000 - cost["dump"] - cost["scalp"]) + 1e-6, cost)   # weighted: dump first, fat-finger last
+        self.assertLessEqual(sum(cost.values()), 1.5 * 6_000 + 1e-6, cost)
 
     def test_near_touch_levels_have_a_20_min_ttl_and_l0_stops_at_8k(self):
         fake, eng, favs = self.rig(cash_above_floor=60_000)
@@ -3166,6 +3186,8 @@ class CashGuardTests(EngineCase):
         plan = eng.release_plan(a_config.CASH_RESERVE + 3_000, time.time(), eng.bucket_usage())
         self.assertEqual(plan.get(ex, {}).get("why"), "rebuild", "...unless the lot is <= 5c under fair: Piero's -1c exception applies")
         self.assertLess(plan[ex]["rule0_margin"], 0)
+        eng.release_t = 0                                      # day 8 §1.5: the exception runs only while free < 10k
+        self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 12_000, time.time(), eng.bucket_usage()), "free 12k: rule 0 holds, no exception")
         FAIR[ex] = bid + 0.06                                  # 6c under fair: the exception is off, rule 0 holds
         try:
             loop(eng, fake)

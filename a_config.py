@@ -187,11 +187,13 @@ DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP = 0.90, 0.05, 2_000   # day 7 §2.1:
 DUMP_L0_REFILLS, DUMP_L0_WINDOW_S = 3, 600            # sweep follow: at most 3 refills per side per 10 min while the tranche is open
 UNCOVERED_LOG_S = 30            # §1.3: an eligible side without its level for > 30 s is logged
 # Oct 5 22:50 (Piero): hard cash guards after the floor breach
-ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE = 2.0, 0.01, 3.0, 2_000   # resting entries <= 2 x free cash; near-touch bids count 3x; < 2k free: none
+ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE = 1.5, 0.01, 3.0, 2_000   # day 8 §2: sum(resting cost x weight) <= 1.5 x free cash above the floor; < 2k free: none
+ENTRY_WEIGHTS = dict(L0=1.0, L1=0.5, L2=0.3, L3=0.15, L4=0.15, scalp=1.0, wall=1.0, fatfinger=0.05, longshot=0.05)   # day 8 §2 (replay reach 40/25/10/1%; ours since C64: L0 15%, L1 0.1%, L2-L3 0)
 DUMP_NEAR_TTL_S, DUMP_NEAR_GAP = 1200, 0.02      # L0 and levels within 2c of the touch: 20-min TTL (make-before-break); deeper 60 min
 DUMP_L0_BUDGET = 8_000          # L0 holds <= 8k at cost across all sides; refills only under it; L1-L4 get the cash first
 REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2 = 15_000, 0.07, 0.10   # rebuild free cash to 15k: engine lots above entry + 0.5c at the bid, lowest gap first
 REBUILD_MARGIN, REBUILD_MARGIN_GAP = -0.01, 0.05 # Piero 23:00: lots <= 5c under fair may go down to entry - 1c for the rebuild
+REBUILD_EXC_FREE = 10_000       # day 8 §1.5: that exception runs only while free cash above the floor is under 10k
 # wall layer (Piero's manual pilot, Oct 5 23:40): one big resting order placed by control, with its buy-back, hold and news guard
 WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE = 24 * 3600, 6 * 3600, 0.02, 600, 2_000
 DUMP_V3_OFFSETS_DAY, DUMP_V3_WEIGHTS_DAY = [0.01, 0.02, 0.035, 0.05], [0.45, 0.25, 0.15, 0.15]   # §1.3: L4 in the day window (replay: 5c)
@@ -201,8 +203,8 @@ RELEASE_FUND_PER_H, RELEASE_MIN_AGE_S = 10_000, 24 * 3600  # §3.3 funding branc
 # capital policy v2 (day 6 §9): rule 0 + the cash ratchet + release tiers
 RULE0_MARGIN = 0.005            # an engine lot sells only at >= its entry + 0.5c, in any layer; day-1 lots (Oct 1 PT) may go below entry
 DAY1_CUTOFF = "2026-10-02 00:00:00"   # fills before this (PT) or before the engine are day-1 lots
-CASH_T_START, CASH_T_STEP, CASH_T_MIN, CASH_T_MAX = 25_000, 10_000, 25_000, 55_000
-CASH_T_CONSTRAINED_MIN, CASH_T_PEAK_UP, CASH_T_PEAK_DOWN, CASH_T_IDLE_H = 15, 0.70, 0.40, 3
+CASH_T_START, CASH_T_STEP, CASH_T_MIN, CASH_T_MAX = 25_000, 10_000, 25_000, 35_000   # day 8 §1.1: cap 35k (was 55k)
+CASH_T_CONSTRAINED_MIN, CASH_T_PEAK_UP, CASH_T_PEAK_DOWN, CASH_T_IDLE_H = 15, 0.70, 0.60, 2   # day 8 §1.2: -10k after 2 idle h (bounded peak < 60% or no constrained minute)
 RELEASE_TIER0, RELEASE_TIER1, RELEASE_TIER2 = 0.02, 0.05, 0.07   # gap to fair: tier 0 always (rule 0), tier 1 for T, tier 2 for T if trading >= 10%/day
 RELEASE_TIER2_RETURN = 0.10     # the trading layers' realized return per day on their average capital over 24 h
 SCALP_DAY_OFF = None            # day 6 §10.3 (01:20 addendum): the scalper runs all day; it yields to the catcher and keeps its 2-h hand-off

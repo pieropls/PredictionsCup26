@@ -47,7 +47,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                       RULE0_MARGIN, DAY1_CUTOFF, CASH_T_START, CASH_T_STEP, CASH_T_MIN, CASH_T_MAX, CASH_T_CONSTRAINED_MIN, CASH_T_PEAK_UP,
                       CASH_T_PEAK_DOWN, CASH_T_IDLE_H, RELEASE_TIER0, RELEASE_TIER1, RELEASE_TIER2, RELEASE_TIER2_RETURN,
                       RI_RACES, RI_ENGINE_CAP, DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP, DUMP_L0_REFILLS, DUMP_L0_WINDOW_S, UNCOVERED_LOG_S,
-                      ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE, DUMP_NEAR_TTL_S, DUMP_NEAR_GAP, DUMP_L0_BUDGET,
+                      ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE, DUMP_NEAR_TTL_S, DUMP_NEAR_GAP, DUMP_L0_BUDGET, ENTRY_WEIGHTS, REBUILD_EXC_FREE,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
@@ -387,6 +387,10 @@ class Engine:
             self.day7_migrations()
         except Exception as err:
             print(f"day 7 migrations: {err!r}")
+        try:
+            self.day8_migrations()
+        except Exception as err:
+            print(f"day 8 migrations: {err!r}")
         try:                                                # Oct 5 02:30: undo synthetic fills that duplicated a SIG fill
             fixed = self.ledger.dedup_synthetic()          # booked <= quantity per order + phantom netting (no time-window pairing)
             if fixed["removed"] or fixed["netted"]:
@@ -413,6 +417,7 @@ class Engine:
         self.long_now, self.long_view, self.long_block, self.long_quota = {}, {}, {}, 0   # day 3 §2: longshot catcher
         self.long_hist = {}
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
+        self.dump_cov = None                                # day 8 §2: dump coverage (sides with >= 1 level / eligible sides)
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
         self.wake, self.rt_lock, self.rt_pending = threading.Event(), threading.Lock(), []   # realtime -> planner
@@ -898,6 +903,9 @@ class Engine:
             c = self.coverage
             self.intel_write("coverage.jsonl", dict(t=now, pct=round(100 * c["covered"] / c["eligible"], 1) if c["eligible"] else None,
                                                     eligible=c["eligible"], covered=c["covered"], uncovered=len(c["reasons"])))
+        if self.dump_cov and now - self.intel_s.get("dcov", 0) >= 60:      # day 8 §2: dump coverage every minute
+            self.intel_s["dcov"] = now
+            self.intel_write("dump_coverage.jsonl", dict(t=now, **self.dump_cov))
         for k, d in list(self.dump_track.items()):          # dump tracker: SIG mid of the gaining side, every minute, 2 h
             b_, a_, _ = self.px.get(d["ex"], (None, None, None))
             m = (now - d["t"]) / 60
@@ -1718,7 +1726,7 @@ class Engine:
             cut, spent = {}, 0.0
             for ex in plan:
                 for w in plan[ex]:
-                    c_ = w["px"] * w["qty"]
+                    c_ = w["px"] * w["qty"] * ENTRY_WEIGHTS["fatfinger"]   # day 8 §2: 0.05 (0 real fills since Oct 2)
                     if spent + c_ <= left + 1e-6:
                         cut.setdefault(ex, []).append(w)
                         spent += c_
@@ -2114,8 +2122,8 @@ class Engine:
                 if fs >= DUMP_MIN_FAIR and not (held <= -MIN_QTY if side == "yes" else held >= MIN_QTY)]
 
     def entry_budget(self, cash):
-        """Oct 5 22:50 hard guard (a)+(b): resting entry bids may cost at most 2 x free cash above the floor (near-touch
-        bids count 3x); below 2k free there are no entry bids at all."""
+        """Oct 5 22:50 hard guard (b) + day 8 §2: sum(resting entry cost x weight) <= 1.5 x free cash above the floor
+        (weights: L0, scalper, walls 1.0; L1 0.5; L2 0.3; L3-L4 0.15; fat-finger 0.05); below 2k free no entry bids at all."""
         free = cash - CASH_RESERVE
         return 0.0 if free < ENTRY_MIN_FREE else ENTRY_CASH_MULT * free
 
@@ -2126,9 +2134,7 @@ class Engine:
             rec = self.ledger.orders.get(o["id"])
             if not rec or rec.get("layer") not in ("fatfinger", "scalp", "longshot") or o["action"] != "buy":
                 continue
-            best = bots.side_book(*self.px.get(o["ex"], (None, None, None))[:2], o["side"])[0]
-            near = best is not None and o["price"] >= best - ENTRY_NEAR_TOUCH - 1e-9
-            out += o["qty"] * o["price"] * (ENTRY_NEAR_WEIGHT if near else 1.0)
+            out += o["qty"] * o["price"] * ENTRY_WEIGHTS.get(rec.get("layer"), 1.0)   # day 8 §2 weights
         return out
 
     def l0_held(self):
@@ -2282,7 +2288,7 @@ class Engine:
                 near = i == 4 or (best_s is not None and px >= best_s - DUMP_NEAR_GAP - 1e-9)
                 rows.append((i, i in resting.get(key, set()), ex, dict(side=side, px=px, qty=q, sub=sub, level=i, edge=fs - px, arena=ex in arena, l0=i == 4,
                                                                         ttl=DUMP_NEAR_TTL_S if near else DUMP_TTL_S,
-                                                                        weight=ENTRY_NEAR_WEIGHT if (i == 4 or (best_s is not None and px >= best_s - ENTRY_NEAR_TOUCH - 1e-9)) else 1.0)))
+                                                                        weight=ENTRY_WEIGHTS["L0" if i == 4 else f"L{i + 1}"])))   # day 8 §2
         # day 7 §1.3 make-before-break: a level due for its refresh is placed again first, then the old one is cancelled
         # (resting orders lock no cash; the overlap is seconds). A side is never left without its level.
         wanted = {w["sub"]: (ex, w) for _, _, ex, w in rows}
@@ -2324,9 +2330,9 @@ class Engine:
         for lvl, is_resting, ex, w in rows:
             if binding or is_resting or lvl in (0, 4) or all(not missing[k] for k in range(lvl)):   # else L0 and L1 go out first, everywhere
                 keep.append((lvl, is_resting, ex, w))
-        # Oct 5 22:50 guard (a): every resting entry bid costs against 2 x free cash above the floor (near-touch and L0 at 3x);
-        # L1-L4 get the cash first, then L0; within a group the best edge first (a resting level keeps a small edge bonus
-        # so the book does not churn). Levels that do not fit are not placed (a resting one is cancelled).
+        # Day 8 §2: every resting entry bid costs weight x cost against 1.5 x free cash above the floor (L0 1.0, L1 0.5, L2 0.3,
+        # L3-L4 0.15); L1-L4 get the cash first, then L0; within a group the best edge first (a resting level keeps a small
+        # edge bonus so the book does not churn). Levels that do not fit are not placed (a resting one is cancelled).
         budget = self.entry_budget(cash)                    # the dump catcher is first in line for the whole budget
         keep.sort(key=lambda r: (r[3]["l0"], -(r[3]["edge"] + (0.005 if r[1] else 0.0) + (0.01 if r[3]["arena"] else 0.0))))
         out, spent = [], 0.0
@@ -2339,6 +2345,10 @@ class Engine:
         self.entry_left = max(0.0, budget - spent)
         for lvl, is_resting, ex, w in out:
             plan.setdefault(ex, []).append(w)
+        elig = {(ex, side) for ex, side, _, _ in cands}
+        sides = {(ex, w["side"]) for _, _, ex, w in out} | (set(resting) & elig)
+        self.dump_cov = dict(eligible=len(elig), covered=len(sides & elig), levels=len(out), weighted=round(spent), budget=round(budget),
+                             nominal=round(sum(w["px"] * w["qty"] for _, _, _, w in out)))   # day 8 §2: coverage for the hourly line
         return plan
 
     def track_dumps(self, now):
@@ -2806,8 +2816,8 @@ class Engine:
                 resting_cost += o["qty"] * o["price"]
         n = SCALP_MARKETS if c.state("scalp") == "full" else SCALP_PILOT_MARKETS
         left = getattr(self, "entry_left", float("inf"))    # the entry budget left after the dump catcher (Oct 5 23:35)
-        room_total = min(self.scalp_slice() - self.scalp_cost() - resting_cost, left - resting_cost * ENTRY_NEAR_WEIGHT)
-        self.entry_left = max(0.0, left - resting_cost * ENTRY_NEAR_WEIGHT)
+        room_total = min(self.scalp_slice() - self.scalp_cost() - resting_cost, left - resting_cost * ENTRY_WEIGHTS["scalp"])
+        self.entry_left = max(0.0, left - resting_cost * ENTRY_WEIGHTS["scalp"])   # day 8 §2: scalper weight 1.0
         plan = {}
         for ex in self.scalp_rank(n):
             f, px = self.fair.get(ex), self.px.get(ex)
@@ -2856,7 +2866,7 @@ class Engine:
                 plan.setdefault(ex, []).append(dict(side=side, px=p, qty=q, sub=f"scalp:{ex}:{side}"))
                 room_m -= q * p
                 room_total -= q * p
-                self.entry_left = max(0.0, self.entry_left - q * p * ENTRY_NEAR_WEIGHT)
+                self.entry_left = max(0.0, self.entry_left - q * p * ENTRY_WEIGHTS["scalp"])
                 budget -= 1
                 n_rest += 1
         return plan
@@ -3105,7 +3115,7 @@ class Engine:
                 w["cut_t"], changed = now, True
                 self.event("WALL", f"WALL {w['id']} {self.name(ex)}: cut to {q:,} of {left_q:,} so a full fill leaves >= {WALL_MIN_FREE:,} free")
             plan.setdefault(ex, []).append(dict(side=side, px=w["px"], qty=q, sub=f"wall:{ex}:{side}:{w['id']}", ttl=w.get("ttl_s", WALL_TTL_S)))
-            self.entry_left = max(0.0, getattr(self, "entry_left", float("inf")) - q * w["px"])
+            self.entry_left = max(0.0, getattr(self, "entry_left", float("inf")) - q * w["px"] * ENTRY_WEIGHTS["wall"])
         if changed:
             with c.lock:
                 c.save()
@@ -3517,7 +3527,7 @@ class Engine:
         the minutes constrained (the hourly line)."""
         free = cash - CASH_RESERVE
         recent = sum(f["qty"] * f["price"] for f in self.fills_since(now - 1800) if f["layer"] == "dump" and f["action"] == "buy")
-        on = free < CONSTRAINED_FREE and recent >= CONSTRAINED_FILLS_30M
+        on = free < CONSTRAINED_FREE and recent >= CONSTRAINED_FILLS_30M and free >= ENTRY_MIN_FREE   # day 8 §1.3: below the floor guard the guard rules, not release
         if on and not self.constrained:
             self.constrained_t = now
             self.event("CASH", f"cash-constrained: free {free:,.0f} < {CONSTRAINED_FREE:,} and dump fills {recent:,.0f} in 30 min (funding branch on)")
@@ -3570,7 +3580,7 @@ class Engine:
             return self.rebuild_plan(cash, now, free, pending)
         self.release_fund_log = [(t_, v) for t_, v in self.release_fund_log if t_ >= now - 3600]
         budget = max(0.0, min(T - free - pending, RELEASE_FUND_PER_H - sum(v for _, v in self.release_fund_log)))   # tiers 1-2: up to T, <= 10k/h
-        tier2_ok = self.trading_return_24h(now) >= RELEASE_TIER2_RETURN
+        tier2_ok = bool(self.controls.d.get("release_tier2")) and self.trading_return_24h(now) >= RELEASE_TIER2_RETURN   # day 8 §1.4: tier 2 needs Piero (release_tier2 flag)
         cands = []
         for ex, b in self.book.items():
             q = b["pos"]
@@ -3736,11 +3746,12 @@ class Engine:
         return realized / avg if avg >= 1000 else 0.0
 
     def cash_target(self, now):
-        """§9.2 the cash ratchet: T starts at 25k; +10k after an hour in which the trading layers were cash-constrained
-        >= 15 min or peaked at >= 70% of free cash (max 55k); -10k after 3 hours with peak use < 40% (min 25k). Logged."""
+        """§9.2 + day 8 §1: T starts at 25k; +10k after an hour in which the trading layers were cash-constrained >= 15 min
+        or peaked at >= 70% of free cash (max 35k); -10k after 2 idle hours (bounded peak use < 60% or no constrained
+        minute; min 25k). Logged."""
         c = self.controls
         ct = c.d.get("cash_target") or {}
-        T = float(ct.get("T") or CASH_T_START)
+        T = min(float(CASH_T_MAX), float(ct.get("T") or CASH_T_START))
         hour = int(now // 3600)
         if ct.get("hour") is None:
             with c.lock:
@@ -3755,14 +3766,15 @@ class Engine:
             if minutes >= CASH_T_CONSTRAINED_MIN or peak >= CASH_T_PEAK_UP:
                 T2 = min(float(CASH_T_MAX), T + CASH_T_STEP)
                 idle = 0
-                if T2 != T:                                  # at the 55k cap nothing changes: no line
+                if T2 != T:                                  # at the cap nothing changes: no line
                     msg = f"CASH TARGET {T:,.0f} -> {T2:,.0f}: last hour constrained {minutes} min, peak use {peak:.0%}"
                 T = T2
-            elif peak < CASH_T_PEAK_DOWN:
+            elif peak < CASH_T_PEAK_DOWN or minutes == 0:   # day 8 §1.2: an idle hour = bounded peak < 60% or no constrained minute
                 idle += 1
                 if idle >= CASH_T_IDLE_H:
                     T2 = max(float(CASH_T_MIN), T - CASH_T_STEP)
-                    msg = f"CASH TARGET {T:,.0f} -> {T2:,.0f}: {idle} idle hours (peak use < {CASH_T_PEAK_DOWN:.0%})"
+                    if T2 != T:
+                        msg = f"CASH TARGET {T:,.0f} -> {T2:,.0f}: {idle} idle hours (peak use < {CASH_T_PEAK_DOWN:.0%} or no constrained minute)"
                     T, idle = T2, 0
             else:
                 idle = 0
@@ -3796,7 +3808,7 @@ class Engine:
             gap = fs - bid
             if gap > REBUILD_GAP2 + 1e-9:
                 continue
-            margin = REBUILD_MARGIN if gap <= REBUILD_MARGIN_GAP + 1e-9 else RULE0_MARGIN
+            margin = REBUILD_MARGIN if (gap <= REBUILD_MARGIN_GAP + 1e-9 and free < REBUILD_EXC_FREE) else RULE0_MARGIN   # day 8 §1.5: the -1c exception only under 10k free
             split = {}
             for sub, v in self.ledger.subbooks.get(ex, {}).items():
                 if v * q <= 0 or sub.startswith(self.REBUILD_SKIP):
@@ -3851,6 +3863,39 @@ class Engine:
         """Afternoon §2.2: expected return to settlement per SIG held, per day: (fair - bid)/bid over the days left."""
         days = max(1.0, (time.mktime(time.strptime(SETTLE_DATE, "%Y-%m-%d")) - time.time()) / 86400)
         return ctf / days
+
+    def ev_given_up(self, since_t):
+        """Day 8 §1.5: the expected value given up by release / rebuild sales since `since_t` (held fair - sale price, per
+        share, only where the fill carries a fair)."""
+        start = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(since_t))
+        ev = 0.0
+        for f in self.ledger.fills:
+            if f["layer"] == "release" and f["action"] == "buy" and f["t"] >= start and f.get("fair") is not None:
+                ev += max(0.0, (1 - f["fair"]) - (1 - f["price"])) * f["qty"]
+        return round(ev, 2)
+
+    def day8_migrations(self):
+        """Once (flag in overrides): the cash target is clamped to the new 35k cap and the day-8 budget weights are logged."""
+        c = self.controls
+        d8 = c.d.setdefault("day8", {})
+        if d8.get("weights_v1"):
+            return
+        ct = c.d.get("cash_target") or {}
+        T = float(ct.get("T") or CASH_T_START)
+        with c.lock:
+            if T > CASH_T_MAX:
+                ct["T"] = float(CASH_T_MAX)
+                c.d["cash_target"] = ct
+            d8["weights_v1"] = stamp()
+            c.save()
+        w = ENTRY_WEIGHTS
+        msg = (f"DAY 8: entry budget = {ENTRY_CASH_MULT:g} x free cash above the floor, weighted: L0 {w['L0']:g}, L1 {w['L1']:g}, L2 {w['L2']:g}, "
+               f"L3-L4 {w['L3']:g}, scalper {w['scalp']:g}, walls {w['wall']:g}, fat-finger {w['fatfinger']:g} (calibration: dumps reaching ref -1 / -2 / -3.5 / -5c "
+               f"in the Oct 4 20:00 - Oct 5 18:15 replay 40 / 25 / 10 / 1% per dump; our own fills since C64: L0 15% of placed shares, L1 0.1%, L2-L3 0, "
+               f"no weight raised); T {T:,.0f}" + (f" -> {CASH_T_MAX:,}" if T > CASH_T_MAX else "") + f" (cap {CASH_T_MAX:,}, -10k after {CASH_T_IDLE_H} idle h); "
+               f"release for T: tier 1 only; the -1c rebuild exception only under {REBUILD_EXC_FREE:,} free")
+        self.event("CASH", msg)
+        self.night.line(msg)
 
     @staticmethod
     def release_tier_of(f):
@@ -5288,7 +5333,7 @@ class Engine:
         return dict(sigday=v4.get("sigday"), status=v4.get("status"), daily4=v4.get("daily"), feed=v4.get("feed"), strategies4=v4.get("strategies"),
                     capital4=v4.get("capital"), holdings4=v4.get("holdings"), leaders4=v4.get("leaders"), admin4=v4.get("admin"),
                     money=money, daily=daily, series=self.series_view(), capital=capital, strategies=strategies,
-                    coverage=cov,
+                    coverage=cov, dump_coverage=self.dump_cov,
                     holdings=self.holdings_view(), activity=self.activity_view(), leader_thresholds=lm.get("thresholds"))
 
     def layer_note(self, layer):
