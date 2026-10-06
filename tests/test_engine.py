@@ -3211,6 +3211,23 @@ class CashGuardTests(EngineCase):
         self.assertEqual(sorted(r[2] for r in out), ["A", "B"], out)
         self.assertEqual([r[2] for r in cut], ["A"])
 
+    def test_resting_levels_are_not_resized_for_small_cash_moves(self):
+        """C72: a resting level keeps its quantity while the fresh size stays within x0.5..x2 of it (a fill or a sell-back
+        moving the per-side cost must not cancel and re-place the whole book)."""
+        fake, eng, favs = self.rig(cash_above_floor=60_000)
+        before = {o["id"]: (o["price"], o["qty"]) for o in self.entries(eng, fake) if eng.ledger.orders[o["id"]]["layer"] == "dump"}
+        self.assertTrue(before)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 45_000)   # cash -25%: sizes would shrink ~25%
+        fake.calls.clear()
+        for _ in range(2):
+            for e_ in favs:
+                seed_ref(eng, e_, mid=eng.fair[e_] - 0.06)
+            loop(eng, fake)
+        after = {o["id"]: (o["price"], o["qty"]) for o in self.entries(eng, fake) if eng.ledger.orders[o["id"]]["layer"] == "dump"}
+        kept = len(set(before) & set(after))
+        self.assertGreaterEqual(kept, 0.8 * len(before), f"{kept} of {len(before)} resting levels kept after a 25% cash move")
+
     def test_near_touch_levels_have_a_20_min_ttl_and_l0_stops_at_8k(self):
         fake, eng, favs = self.rig(cash_above_floor=60_000)
         ttls = {}

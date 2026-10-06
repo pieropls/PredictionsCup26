@@ -2298,13 +2298,14 @@ class Engine:
         mult = self.ratchet_mult("dump")                   # day 5 §1.7: x1.25 per passing 2-h gate
         per_side = max(DUMP_SIDE_MIN, min(DUMP_SIDE_MAX, funded / DUMP_SIDE_DIV)) * mult
         party = dash4.party_exposure(self)                  # day 5 §1.5: held dump inventory per party side <= 40k
-        resting, rest_px = {}, {}
+        resting, rest_px, rest_q = {}, {}, {}
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
-            if rec and rec.get("layer") == "dump":
+            if rec and rec.get("layer") == "dump" and o["id"] not in self.ex.cancelling:
                 tail = str(rec.get("sub", "")).rsplit(":", 1)[-1]
                 resting.setdefault((o["ex"], o["side"]), set()).add(4 if tail == "L0" else int(tail) if tail.isdigit() else 0)
                 rest_px[rec.get("sub")] = o["price"]
+                rest_q[rec.get("sub")] = o["qty"]
         plan, rows = {}, []
         for ex, side, fs, rs in cands:
             key = (ex, side)
@@ -2329,6 +2330,8 @@ class Engine:
                 if sliding and sub in rest_px and px < rest_px[sub] - 1e-9:
                     px = rest_px[sub]                       # a slide in progress: never lower a resting level
                     q = int(cost * DUMP_V3_WEIGHTS[i] / px)
+                if sub in rest_q and 0.5 * rest_q[sub] <= q <= 2.0 * rest_q[sub]:
+                    q = int(rest_q[sub])                    # C72: quantity hysteresis — a resting level keeps its size within x0.5..x2 (no re-size churn)
                 near = i == 4 or (best_s is not None and px >= best_s - DUMP_NEAR_GAP - 1e-9)
                 rows.append((i, i in resting.get(key, set()), ex, dict(side=side, px=px, qty=q, sub=sub, level=i, edge=fs - px, arena=ex in arena, l0=i == 4,
                                                                         ttl=DUMP_NEAR_TTL_S if near else DUMP_TTL_S,
