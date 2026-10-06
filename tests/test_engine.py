@@ -3117,6 +3117,29 @@ class CashGuardTests(EngineCase):
         self.assertLessEqual(cost["fatfinger"], max(0.0, 1.5 * 6_000 - cost["dump"] - cost["scalp"]) + 1e-6, cost)   # weighted: dump first, fat-finger last
         self.assertLessEqual(sum(cost.values()), 1.5 * 6_000 + 1e-6, cost)
 
+    def test_piero_walls_come_off_the_top_of_the_entry_budget(self):
+        """C70: the dump levels may use only 1.5 x free minus the resting walls' cost (weight 1.0); the walls are never cut."""
+        fake, eng, favs = self.rig(cash_above_floor=20_000)
+        cov0 = dict(eng.dump_cov)
+        self.assertLessEqual(cov0["weighted"], cov0["budget"] + 1e-6)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and b.ex not in favs and eng.fair.get(b.ex) is not None and eng.fair[b.ex] <= 0.10)
+        fake.px[ex] = (0.10, 0.105, 0.10)
+        eng.controls.d["layers"]["wall"] = dict(state="full", caps={}, killed=None)
+        eng.controls.d["walls"] = [dict(id="wt", ex=ex, side="no", px=0.88, qty=12_000, exit_px=0.105, t=time.time(), ttl_s=86400, hold_s=21600, news_c=0.02, state="active", filled=0.0, by="Piero")]
+        for _ in range(3):
+            for e_ in favs:
+                seed_ref(eng, e_, mid=eng.fair[e_] - 0.06)
+            loop(eng, fake)
+        wall = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "wall"]
+        self.assertEqual(sum(o["qty"] for o in wall), 12_000, "the wall rests in full")
+        self.assertAlmostEqual(eng.wall_resting(), 12_000 * 0.88, delta=1.0)
+        cov = eng.dump_cov
+        self.assertLessEqual(cov["weighted"], 1.5 * 20_000 - 12_000 * 0.88 + 1e-6, cov)
+        ents = self.entries(eng, fake)
+        weighted = sum(o["qty"] * o["price"] * self.weight_of(eng.ledger.orders[o["id"]]) for o in ents) + eng.wall_resting()
+        self.assertLessEqual(weighted, 1.5 * 20_000 + 1e-6, f"dump levels + wall weighted {weighted:.0f} > 1.5 x free")
+        self.assertLess(cov["weighted"], cov0["weighted"], "the wall took budget from the dump levels")
+
     def test_near_touch_levels_have_a_20_min_ttl_and_l0_stops_at_8k(self):
         fake, eng, favs = self.rig(cash_above_floor=60_000)
         ttls = {}

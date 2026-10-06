@@ -2325,15 +2325,15 @@ class Engine:
         n_lv = len(DUMP_V3_OFFSETS_DAY)
         missing = {lvl: any(r[0] == lvl and not r[1] for r in rows) for lvl in range(n_lv)}
         keep = []
+        budget = max(0.0, self.entry_budget(cash) - self.wall_resting())   # C70: Piero's walls come off the top (weight 1.0)
         total_w = sum(w["px"] * w["qty"] * w["weight"] for _, _, _, w in rows)
-        binding = total_w > self.entry_budget(cash) + 1e-6   # Oct 5 23:45: with the budget binding, every level competes on edge
+        binding = total_w > budget + 1e-6                     # Oct 5 23:45: with the budget binding, every level competes on edge
         for lvl, is_resting, ex, w in rows:
             if binding or is_resting or lvl in (0, 4) or all(not missing[k] for k in range(lvl)):   # else L0 and L1 go out first, everywhere
                 keep.append((lvl, is_resting, ex, w))
         # Day 8 §2: every resting entry bid costs weight x cost against 1.5 x free cash above the floor (L0 1.0, L1 0.5, L2 0.3,
         # L3-L4 0.15); L1-L4 get the cash first, then L0; within a group the best edge first (a resting level keeps a small
         # edge bonus so the book does not churn). Levels that do not fit are not placed (a resting one is cancelled).
-        budget = self.entry_budget(cash)                    # the dump catcher is first in line for the whole budget
         keep.sort(key=lambda r: (r[3]["l0"], -(r[3]["edge"] + (0.005 if r[1] else 0.0) + (0.01 if r[3]["arena"] else 0.0))))
         out, spent = [], 0.0
         for lvl, is_resting, ex, w in keep:
@@ -3065,6 +3065,14 @@ class Engine:
     # ------------------------------------------------------------------------------------------------ manual walls (Piero's pilot)
     def walls(self):
         return list(self.controls.d.get("walls") or [])
+
+    def wall_resting(self):
+        """Day 8 §2 (C70): Piero's walls resting or queued, at cost x their weight (1.0): they come off the top of the entry
+        budget before the dump levels are allocated (the walls are his orders, the engine never cuts them for its own levels)."""
+        out = sum(o["qty"] * o["price"] for o in self.open
+                  if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "wall" and o["action"] == "buy" and o["id"] not in self.ex.cancelling)
+        out += sum((p.get("qty") or 0) * (p.get("price") or 0) for p in self.ex.pending() if p.get("layer") == "wall")
+        return out * ENTRY_WEIGHTS["wall"]
 
     def wall_cost(self):
         return sum(abs(q) * float((self.ledger.tranches.get(sub) or {}).get("avg") or self.sig_mark(ex, "yes" if q > 0 else "no") or 0)
