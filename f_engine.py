@@ -3886,7 +3886,7 @@ class Engine:
     def reserve_ok(self, ex, w):
         """Day 2 §3.2: only these may spend the opportunity reserve (down to the floor): fat-finger levels, sniper takes on
         a new market (< 30 min old), and takes >= 8c through fair."""
-        if w.get("layer") in ("fatfinger", "dump", "longshot"):
+        if w.get("layer") in ("fatfinger", "dump", "longshot", "wall"):   # a manual wall is bounded by its own cash cut (>= 2k free)
             return True
         if w.get("layer") != "take":
             return False
