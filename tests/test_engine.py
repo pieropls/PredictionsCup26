@@ -1658,14 +1658,17 @@ class DumpV3Tests(EngineCase):
             seen.append(sorted((o["price"], o["qty"]) for o in self.dump_orders(eng, fake, other)))
         self.assertTrue(all(s == seen[0] for s in seen), seen)
 
-    def test_l1_everywhere_first_after_a_restart(self):
+    def test_every_side_gets_levels_after_a_restart(self):
+        """Day 9 §3 replaced 'L1 everywhere first' with the expected-edge ranking: with the budget not binding every
+        eligible side gets its whole ladder on the first plan after a start."""
         fake, eng, favs = self.rig()
         for ex in favs:
             seed_ref(eng, ex, mid=eng.fair[ex] - 0.06)
         eng.step()                                        # the first plan after a start: nothing resting yet
         lv = [w["level"] for ws in eng.dump_now.values() for w in ws]
         self.assertTrue(lv)
-        self.assertEqual(set(lv), {0}, "L1 on every side before any L2 / L3")
+        self.assertEqual(eng.dump_cov["cut"], 0, "nothing cut: the budget does not bind in this rig")
+        self.assertGreaterEqual(len({ex for ex in eng.dump_now}), len(favs) - 1)
 
     def test_news_guard_and_breaker(self):
         fake, eng, favs = self.rig()
@@ -3088,7 +3091,7 @@ class CashGuardTests(EngineCase):
         ents = self.entries(eng, fake)
         self.assertTrue(ents)
         weighted = sum(o["qty"] * o["price"] * self.weight_of(eng.ledger.orders[o["id"]]) for o in ents)
-        self.assertLessEqual(weighted, 1.5 * 6_000 + 1e-6, f"weighted resting entries {weighted:.0f} > 1.5 x free")
+        self.assertLessEqual(weighted, a_config.BUDGET_K_MAX * 6_000 + 1e-6, f"weighted resting entries {weighted:.0f} > k x free")
         self.assertGreater(len([o for o in ents if eng.ledger.orders[o["id"]]["layer"] == "dump"]), 7, "the weighted budget funds more than the 7 levels of the 2x rule")
         cov = eng.dump_cov
         self.assertTrue(cov and cov["eligible"] > 0 and cov["covered"] > 0 and cov["weighted"] <= cov["budget"], cov)
@@ -3114,8 +3117,9 @@ class CashGuardTests(EngineCase):
         self.assertGreater(by.get("dump", 0), 0, by)
         cost = {l: sum(o["qty"] * o["price"] * self.weight_of(eng.ledger.orders[o["id"]]) for o in fake.open_orders()
                        if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == l) for l in ("dump", "fatfinger", "scalp")}
-        self.assertLessEqual(cost["fatfinger"], max(0.0, 1.5 * 6_000 - cost["dump"] - cost["scalp"]) + 1e-6, cost)   # weighted: dump first, fat-finger last
-        self.assertLessEqual(sum(cost.values()), 1.5 * 6_000 + 1e-6, cost)
+        k = a_config.BUDGET_K_MAX
+        self.assertLessEqual(cost["fatfinger"], max(0.0, k * 6_000 - cost["dump"] - cost["scalp"]) + 1e-6, cost)   # weighted: dump first, fat-finger last
+        self.assertLessEqual(sum(cost.values()), k * 6_000 + 1e-6, cost)
 
     def test_piero_walls_come_off_the_top_of_the_entry_budget(self):
         """C70: the dump levels may use only 1.5 x free minus the resting walls' cost (weight 1.0); the walls are never cut."""
@@ -3134,11 +3138,72 @@ class CashGuardTests(EngineCase):
         self.assertEqual(sum(o["qty"] for o in wall), 12_000, "the wall rests in full")
         self.assertAlmostEqual(eng.wall_resting(), 12_000 * 0.88, delta=1.0)
         cov = eng.dump_cov
-        self.assertLessEqual(cov["weighted"], 1.5 * 20_000 - 12_000 * 0.88 + 1e-6, cov)
+        k = a_config.BUDGET_K_MAX
+        self.assertLessEqual(cov["weighted"], k * 20_000 - 12_000 * 0.88 + 1e-6, cov)
         ents = self.entries(eng, fake)
         weighted = sum(o["qty"] * o["price"] * self.weight_of(eng.ledger.orders[o["id"]]) for o in ents) + eng.wall_resting()
-        self.assertLessEqual(weighted, 1.5 * 20_000 + 1e-6, f"dump levels + wall weighted {weighted:.0f} > 1.5 x free")
+        self.assertLessEqual(weighted, k * 20_000 + 1e-6, f"dump levels + wall weighted {weighted:.0f} > k x free")
         self.assertLess(cov["weighted"], cov0["weighted"], "the wall took budget from the dump levels")
+
+    def test_budget_k_auto_adjust(self):
+        """Day 9 §2: k starts at k_max; -0.5 after 30 min with peak use > 70% or a constrained minute; +0.5 after 2 h with
+        peak use < 40%, never above k_max; a new k_max in the config resets k."""
+        fake, eng, favs = self.rig(cash_above_floor=20_000)
+        now = time.time()
+        c = eng.controls
+        self.assertEqual(eng.budget_k(), a_config.BUDGET_K_MAX)
+        self.assertEqual(c.d["budget_k"]["k_max"], a_config.BUDGET_K_MAX)
+        k0 = eng.budget_k()
+        eng.cap_use_hist.append((round(now), 0.80))              # peak use 80% in the last 30 min
+        c.d["budget_k"]["t"] = now - 1000                        # only 17 min since the last step: no change yet
+        eng.adjust_budget_k(now)
+        self.assertEqual(eng.budget_k(), k0)
+        c.d["budget_k"]["t"] = now - 1900
+        eng.adjust_budget_k(now)
+        self.assertEqual(eng.budget_k(), k0 - 0.5, "peak use > 70% for 30 min: k - 0.5")
+        self.assertTrue(any("BUDGET k" in e["text"] for e in eng.events))
+        eng.cap_use_hist.clear()
+        eng.cap_use_hist.append((round(now), 0.10))
+        c.d["budget_k"]["t"] = now - 1900
+        eng.constrained_min.append(now - 100)                    # a constrained minute in the last 30 min: another -0.5
+        eng.adjust_budget_k(now)
+        self.assertEqual(eng.budget_k(), max(a_config.BUDGET_K_MIN, k0 - 1.0))
+        eng.constrained_min.clear()
+        c.d["budget_k"]["t"] = now - 7300                        # 2 h quiet at 10%: +0.5
+        eng.adjust_budget_k(now)
+        self.assertEqual(eng.budget_k(), max(a_config.BUDGET_K_MIN, k0 - 1.0) + 0.5)
+        for _ in range(5):
+            c.d["budget_k"]["t"] = now - 7300
+            eng.adjust_budget_k(now)
+        self.assertEqual(eng.budget_k(), a_config.BUDGET_K_MAX, "never above k_max")
+        self.assertLessEqual(eng.entry_budget(a_config.CASH_RESERVE + 10_000), a_config.BUDGET_K_MAX * 10_000 + 1e-6)
+
+    def test_levels_ranked_by_expected_edge_l0_first_resting_kept(self):
+        """Day 9 §3-§4: L0 first within its 8k cap, then (fair - price) x reach / weight; a resting level keeps its slot
+        before any new level is funded."""
+        fake, eng, favs = self.rig(cash_above_floor=20_000)
+        def row(lname, edge, resting=False, px=0.90, qty=1000, ex="x"):
+            lvl = 4 if lname == "L0" else int(lname[1]) - 1
+            return (lvl, resting, ex, dict(side="yes", px=px, qty=qty, sub=f"dump:{ex}:yes:{lname}", level=lvl, edge=edge, arena=False, l0=lname == "L0",
+                                           ttl=3600, weight=a_config.ENTRY_WEIGHTS[lname], lname=lname))
+        rows = [row("L3", 0.05, ex="a"), row("L1", 0.02, ex="b"), row("L0", 0.06, ex="c"), row("L2", 0.03, ex="d"), row("L0", 0.055, ex="e")]
+        out, cut, spent = eng.allocate_levels(rows, budget=1e9, l0_room=1e9)
+        names = [(r[3]["lname"], r[2]) for r in out]
+        self.assertEqual(names[:2], [("L0", "c"), ("L0", "e")], "L0 first")
+        xe = lambda w: w["edge"] * a_config.DUMP_REACH[w["lname"]] / w["weight"]
+        rest = [xe(r[3]) for r in out[2:]]
+        self.assertEqual(rest, sorted(rest, reverse=True), "then by expected edge")
+        self.assertEqual([r[3]["lname"] for r in out[2:]], ["L3", "L2", "L1"], "5c x 0.10 / 0.15 > 3c x 0.25 / 0.3 > 2c x 0.40 / 0.5")
+        out, cut, spent = eng.allocate_levels(rows, budget=1e9, l0_room=1_500)   # 8k cap: one L0 (900) fits, the second (900 more) does not
+        self.assertEqual(sum(1 for r in out if r[3]["l0"]), 1)
+        self.assertEqual(sum(1 for r in cut if r[3]["l0"]), 1)
+        # hysteresis: a resting L3 with a small edge keeps its slot ahead of a better new L1 when only one fits
+        rows = [row("L3", 0.03, resting=True, ex="r"), row("L1", 0.03, ex="n")]
+        out, cut, spent = eng.allocate_levels(rows, budget=0.90 * 1000 * 0.15 + 1.0, l0_room=1e9)
+        self.assertEqual([r[2] for r in out], ["r"], out)
+        self.assertEqual([r[2] for r in cut], ["n"])
+        self.assertIn("k", eng.dump_cov)
+        self.assertIn("by_l", eng.dump_cov)
 
     def test_near_touch_levels_have_a_20_min_ttl_and_l0_stops_at_8k(self):
         fake, eng, favs = self.rig(cash_above_floor=60_000)

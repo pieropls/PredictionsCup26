@@ -188,7 +188,11 @@ DUMP_L0_REFILLS, DUMP_L0_WINDOW_S = 3, 600            # sweep follow: at most 3 
 UNCOVERED_LOG_S = 30            # §1.3: an eligible side without its level for > 30 s is logged
 # Oct 5 22:50 (Piero): hard cash guards after the floor breach
 ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE = 1.5, 0.01, 3.0, 2_000   # day 8 §2: sum(resting cost x weight) <= 1.5 x free cash above the floor; < 2k free: none
-ENTRY_WEIGHTS = dict(L0=1.0, L1=0.5, L2=0.3, L3=0.15, L4=0.15, scalp=1.0, wall=1.0, fatfinger=0.05, longshot=0.05)   # day 8 §2 (replay reach 40/25/10/1%; ours since C64: L0 15%, L1 0.1%, L2-L3 0)
+ENTRY_WEIGHTS = dict(L0=1.0, L1=0.5, L2=0.3, L3=0.15, L4=0.15, scalp=1.0, wall=1.0, fatfinger=0.05, longshot=0.05)
+DUMP_REACH = dict(L0=0.15, L1=0.40, L2=0.25, L3=0.10, L4=0.014)   # day 9 §3: share of dumps that reach the level (L0 = measured fill share)
+BUDGET_K_MAX, BUDGET_K_MIN, BUDGET_K_STEP = 2.0, 1.0, 0.5          # day 9 §2: k x free; k_max from the replay (set before C71's build)
+BUDGET_K_DOWN_S, BUDGET_K_UP_S, BUDGET_K_PEAK_DOWN, BUDGET_K_PEAK_UP = 1800, 7200, 0.70, 0.40   # -0.5 after 30 min > 70% or constrained; +0.5 after 2 h < 40%
+DUMP_WANT_BAND_LO, DUMP_WANT_BAND_HI, DUMP_GAP_LOG_S = 0.01, 0.005, 30   # day 9 §4: a resting level within [px - 1c, px + 0.5c] is kept; gaps > 30 s logged with cause   # day 8 §2 (replay reach 40/25/10/1%; ours since C64: L0 15%, L1 0.1%, L2-L3 0)
 DUMP_NEAR_TTL_S, DUMP_NEAR_GAP = 1200, 0.02      # L0 and levels within 2c of the touch: 20-min TTL (make-before-break); deeper 60 min
 DUMP_L0_BUDGET = 8_000          # L0 holds <= 8k at cost across all sides; refills only under it; L1-L4 get the cash first
 REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2 = 15_000, 0.07, 0.10   # rebuild free cash to 15k: engine lots above entry + 0.5c at the bid, lowest gap first

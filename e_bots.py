@@ -9,7 +9,7 @@ Prices: SIG books are YES-normalized; an order's price is in its own side (a NO 
 """
 import math
 
-from a_config import (TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, ROC_MIN_TIGHT, DUMP_TTL_S, TMM_BUY_EDGE, TMM_TTL_S, LONG_TTL_S, LONG_EXIT_TTL_S, SCALP_TTL_S, TOUCH_TTL_S, WALL_TTL_S, WALL_HOLD_S, RECYCLE_BID_EDGE,
+from a_config import (DUMP_WANT_BAND_LO, DUMP_WANT_BAND_HI, TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, ROC_MIN_TIGHT, DUMP_TTL_S, TMM_BUY_EDGE, TMM_TTL_S, LONG_TTL_S, LONG_EXIT_TTL_S, SCALP_TTL_S, TOUCH_TTL_S, WALL_TTL_S, WALL_HOLD_S, RECYCLE_BID_EDGE,
                       RECYCLE_REST_EDGE, RECYCLE_TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_EDGE, MM_U_MULT, MM_NOTIONAL, MM_TTL_S,
                       LADDER_LEVELS, LADDER_TTL_S, TAKE_EDGE, TAKE_U_MULT, TAKE_NOTIONAL, TAKE_TTL_S, FAT_TTL_S)
 
@@ -377,8 +377,9 @@ class MarketBot:
                     add_entry(side, px, s.get("take_notional", TAKE_NOTIONAL), "take", px - 0.01, px, TAKE_TTL_S, sub="sniper")
 
         out += fat
-        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"] if x.get("l0") else x["px"] - 0.005, x["px"], QTY_TOL, "dump", sub=x["sub"], ttl=x.get("ttl") or DUMP_TTL_S)
-                for x in (s.get("dump") or [])]                 # dump v3 (day 4 §2): 1c level spacing -> a 1-tick band
+        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"] - (0.005 if x.get("l0") else DUMP_WANT_BAND_LO), x["px"] + (0.0 if x.get("l0") else DUMP_WANT_BAND_HI),
+                     QTY_TOL, "dump", sub=x["sub"], ttl=x.get("ttl") or DUMP_TTL_S)
+                for x in (s.get("dump") or [])]                 # day 9 §4: a resting level within [px - 1c, px + 0.5c] is kept (L0: 1 tick below)
         # day 3 §2 longshot catcher: resting 0.5-1c bids (re-placed only when gone), exits at 3x entry / the SIG 6-h median
         out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], 1.0, "longshot", sub=x["sub"], ttl=LONG_TTL_S)
                 for x in (s.get("longshot") or [])]

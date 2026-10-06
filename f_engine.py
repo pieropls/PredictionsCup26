@@ -48,6 +48,8 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                       CASH_T_PEAK_DOWN, CASH_T_IDLE_H, RELEASE_TIER0, RELEASE_TIER1, RELEASE_TIER2, RELEASE_TIER2_RETURN,
                       RI_RACES, RI_ENGINE_CAP, DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP, DUMP_L0_REFILLS, DUMP_L0_WINDOW_S, UNCOVERED_LOG_S,
                       ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE, DUMP_NEAR_TTL_S, DUMP_NEAR_GAP, DUMP_L0_BUDGET, ENTRY_WEIGHTS, REBUILD_EXC_FREE,
+                     DUMP_REACH, BUDGET_K_MAX, BUDGET_K_MIN, BUDGET_K_STEP, BUDGET_K_DOWN_S, BUDGET_K_UP_S, BUDGET_K_PEAK_DOWN, BUDGET_K_PEAK_UP,
+                     DUMP_WANT_BAND_LO, DUMP_WANT_BAND_HI, DUMP_GAP_LOG_S,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
@@ -391,6 +393,10 @@ class Engine:
             self.day8_migrations()
         except Exception as err:
             print(f"day 8 migrations: {err!r}")
+        try:
+            self.day9_migrations()
+        except Exception as err:
+            print(f"day 9 migrations: {err!r}")
         try:                                                # Oct 5 02:30: undo synthetic fills that duplicated a SIG fill
             fixed = self.ledger.dedup_synthetic()          # booked <= quantity per order + phantom netting (no time-window pairing)
             if fixed["removed"] or fixed["netted"]:
@@ -418,6 +424,7 @@ class Engine:
         self.long_hist = {}
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.dump_cov = None                                # day 8 §2: dump coverage (sides with >= 1 level / eligible sides)
+        self.dump_gap_since, self.dump_gap_log, self.dump_cut_t = {}, {}, {}   # day 9 §4: gaps on funded sides, with cause
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
         self.wake, self.rt_lock, self.rt_pending = threading.Event(), threading.Lock(), []   # realtime -> planner
@@ -752,8 +759,8 @@ class Engine:
         mine = {}
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
-            if rec:
-                mine.setdefault(rec["bot"], []).append(dict(o, sub=rec.get("sub", ""), layer=rec.get("layer", "")))
+            if rec and not (rec.get("layer") == "dump" and o["id"] in self.ex.cancelling):   # day 9 §4: a dump level being cancelled
+                mine.setdefault(rec["bot"], []).append(dict(o, sub=rec.get("sub", ""), layer=rec.get("layer", "")))   # is not resting: its replacement stays
         for p in self.ex.pending():
             mine.setdefault(p["bot"], []).append(dict(p, id=None, price=p["price"]))
         plans = []
@@ -2125,7 +2132,43 @@ class Engine:
         """Oct 5 22:50 hard guard (b) + day 8 §2: sum(resting entry cost x weight) <= 1.5 x free cash above the floor
         (weights: L0, scalper, walls 1.0; L1 0.5; L2 0.3; L3-L4 0.15; fat-finger 0.05); below 2k free no entry bids at all."""
         free = cash - CASH_RESERVE
-        return 0.0 if free < ENTRY_MIN_FREE else ENTRY_CASH_MULT * free
+        return 0.0 if free < ENTRY_MIN_FREE else self.budget_k() * free
+
+    def budget_k(self):
+        """Day 9 §2: the live multiplier k (k_max from the replay; -0.5 / +0.5 steps by adjust_budget_k)."""
+        bk = self.controls.d.get("budget_k") or {}
+        return float(bk.get("k") or BUDGET_K_MAX)
+
+    def adjust_budget_k(self, now):
+        """Day 9 §2 live auto-adjust: k -0.5 after 30 min with bounded peak use > 70% or any constrained minute; k +0.5 after
+        2 h with peak use < 40%, never above k_max (the replay pick); a new k_max in the config resets k to it. Logged."""
+        c = self.controls
+        bk = c.d.get("budget_k") or {}
+        if not bk or float(bk.get("k_max") or 0) != float(BUDGET_K_MAX):
+            bk = dict(k=float(BUDGET_K_MAX), k_max=float(BUDGET_K_MAX), t=now, hist=(bk.get("hist") or [])[-48:] + [dict(t=stamp(), k=float(BUDGET_K_MAX), why="k_max from the replay")])
+            with c.lock:
+                c.d["budget_k"] = bk
+                c.save()
+            self.event("CASH", f"BUDGET k = {bk['k']:g} x free cash above the floor (replay pick k_max {BUDGET_K_MAX:g}; -0.5 after 30 min > {BUDGET_K_PEAK_DOWN:.0%} "
+                               f"peak use or a constrained minute, +0.5 after 2 h < {BUDGET_K_PEAK_UP:.0%})")
+            return
+        k, since = float(bk["k"]), now - float(bk.get("t") or now)
+        use30 = max((u for t, u in self.cap_use_hist if t >= now - BUDGET_K_DOWN_S and u is not None), default=0.0)
+        use2h = max((u for t, u in self.cap_use_hist if t >= now - BUDGET_K_UP_S and u is not None), default=0.0)
+        cm = self.constrained_minutes(now - BUDGET_K_DOWN_S)
+        k2, why = k, None
+        if since >= BUDGET_K_DOWN_S and (use30 > BUDGET_K_PEAK_DOWN or cm > 0) and k > BUDGET_K_MIN + 1e-9:
+            k2, why = max(BUDGET_K_MIN, k - BUDGET_K_STEP), f"last 30 min: peak use {use30:.0%}, constrained {cm} min"
+        elif since >= BUDGET_K_UP_S and use2h < BUDGET_K_PEAK_UP and k < float(bk["k_max"]) - 1e-9:
+            k2, why = min(float(bk["k_max"]), k + BUDGET_K_STEP), f"2 h peak use {use2h:.0%} < {BUDGET_K_PEAK_UP:.0%}"
+        if why:
+            with c.lock:
+                bk.update(k=k2, t=now, hist=(bk.get("hist") or [])[-48:] + [dict(t=stamp(), k=k2, why=why)])
+                c.d["budget_k"] = bk
+                c.save()
+            msg = f"BUDGET k {k:g} -> {k2:g} ({why}); entry budget now {k2:g} x free"
+            self.event("CASH", msg)
+            self.night.line(msg)
 
     def other_entry_cost(self):
         """Resting entry bids of the other layers (fat-finger, scalper, longshot) at cost, weighted like the dump levels."""
@@ -2223,6 +2266,7 @@ class Engine:
                 self.scalp_note["nocash"] = now
                 self.event("CASH", f"free cash {cash - CASH_RESERVE:,.0f} < {ENTRY_MIN_FREE:,}: no entry bids (dump, fat-finger, scalper)")
             return {}
+        self.adjust_budget_k(now)                           # day 9 §2
         half = 0.5 if self.controls.state("dump") == "pilot" else 1.0
         arena = self.dump_arena(now)
         l0_ok = self.l0_held() < DUMP_L0_BUDGET              # L0 holds <= 8k at cost across all sides
@@ -2288,7 +2332,7 @@ class Engine:
                 near = i == 4 or (best_s is not None and px >= best_s - DUMP_NEAR_GAP - 1e-9)
                 rows.append((i, i in resting.get(key, set()), ex, dict(side=side, px=px, qty=q, sub=sub, level=i, edge=fs - px, arena=ex in arena, l0=i == 4,
                                                                         ttl=DUMP_NEAR_TTL_S if near else DUMP_TTL_S,
-                                                                        weight=ENTRY_WEIGHTS["L0" if i == 4 else f"L{i + 1}"])))   # day 8 §2
+                                                                        weight=ENTRY_WEIGHTS["L0" if i == 4 else f"L{i + 1}"], lname="L0" if i == 4 else f"L{i + 1}")))   # day 8 §2
         # day 7 §1.3 make-before-break: a level due for its refresh is placed again first, then the old one is cancelled
         # (resting orders lock no cash; the overlap is seconds). A side is never left without its level.
         wanted = {w["sub"]: (ex, w) for _, _, ex, w in rows}
@@ -2299,57 +2343,85 @@ class Engine:
             age = now - (rec.get("ts") or now)
             ttl = rec.get("ttl") or DUMP_TTL_S
             jitter = ((hash(rec.get("sub", "")) % (2 * DUMP_REFRESH_JITTER_S)) - DUMP_REFRESH_JITTER_S) * (ttl / DUMP_TTL_S)
-            if age < 0.75 * ttl + jitter or api.writes_left() < DUMP_WRITES_IDLE:
-                continue
             w = wanted.get(rec.get("sub"))
-            if w is not None:
+            due = age >= 0.75 * ttl + jitter
+            reprice = (w is not None and not w[1]["l0"] and not (w[1]["px"] - DUMP_WANT_BAND_LO - 1e-9 <= o["price"] <= w[1]["px"] + DUMP_WANT_BAND_HI + 1e-9))
+            reprice = reprice or (w is not None and w[1]["l0"] and not (w[1]["px"] - 0.005 - 1e-9 <= o["price"] <= w[1]["px"] + 1e-9))
+            if not (due or reprice) or api.writes_left() < DUMP_WRITES_IDLE:
+                continue
+            if w is not None:                               # day 9 §4: a re-price is also make-before-break (place first, then cancel)
                 ex_, spec = w
                 self.ex.place([(self.owner[ex_].name, spec["sub"], "dump", (ex_, spec["side"], "buy", spec["px"], int(spec["qty"])))], ttl_s=spec.get("ttl") or DUMP_TTL_S)
             self.refreshed[o["id"]] = now
-            self.ex.cancel(o, reason="refresh (make-before-break)")
+            self.dump_cut_t[(o["ex"], o["side"])] = (now, "refresh (make-before-break)" if due else "re-price (make-before-break)")
+            self.ex.cancel(o, reason="refresh (make-before-break)" if due else "re-price (make-before-break)")
         if len(self.refreshed) > 3000:
             self.refreshed = {k: v for k, v in self.refreshed.items() if v >= now - 7200}
-        # §1.3: an eligible side without a resting level for > 30 s is logged (and counted for the hourly line)
-        covered = set(resting) | {(p["ex"], p["side"]) for p in self.ex.pending() if p.get("layer") == "dump"}
-        for ex, side, fs, rs in cands:
-            key = (ex, side)
-            if key in covered or not any(r[2] == ex and r[3]["side"] == side for r in rows):
-                self.uncovered_since.pop(key, None)
-                continue
-            t0 = self.uncovered_since.setdefault(key, now)
-            if now - t0 > UNCOVERED_LOG_S and now - self.uncovered_log.get(key, 0) > 1800:
-                self.uncovered_log[key] = now
-                self.uncovered_n.append((now, ex, side, round(now - t0)))
-                self.event("DUMP", f"{self.name(ex)} {side.upper()}: no level resting for {now - t0:.0f} s (refresh / placement lag)")
-        # L1 everywhere first: a new L2 goes out only when no side is missing L1, a new L3 only when none is missing L2
-        n_lv = len(DUMP_V3_OFFSETS_DAY)
-        missing = {lvl: any(r[0] == lvl and not r[1] for r in rows) for lvl in range(n_lv)}
-        keep = []
+        # Day 9 §2-§3: the budget is k x free cash above the floor (minus Piero's walls); levels are allocated resting-first
+        # (hysteresis: a resting level loses its slot only when the resting set alone no longer fits), L0 first within its
+        # 8k cap (held + resting), then by expected edge = (fair - price) x reach / weight.
         budget = max(0.0, self.entry_budget(cash) - self.wall_resting())   # C70: Piero's walls come off the top (weight 1.0)
-        total_w = sum(w["px"] * w["qty"] * w["weight"] for _, _, _, w in rows)
-        binding = total_w > budget + 1e-6                     # Oct 5 23:45: with the budget binding, every level competes on edge
-        for lvl, is_resting, ex, w in rows:
-            if binding or is_resting or lvl in (0, 4) or all(not missing[k] for k in range(lvl)):   # else L0 and L1 go out first, everywhere
-                keep.append((lvl, is_resting, ex, w))
-        # Day 8 §2: every resting entry bid costs weight x cost against 1.5 x free cash above the floor (L0 1.0, L1 0.5, L2 0.3,
-        # L3-L4 0.15); L1-L4 get the cash first, then L0; within a group the best edge first (a resting level keeps a small
-        # edge bonus so the book does not churn). Levels that do not fit are not placed (a resting one is cancelled).
-        keep.sort(key=lambda r: (r[3]["l0"], -(r[3]["edge"] + (0.005 if r[1] else 0.0) + (0.01 if r[3]["arena"] else 0.0))))
-        out, spent = [], 0.0
-        for lvl, is_resting, ex, w in keep:
-            c_ = w["px"] * w["qty"] * w["weight"]
-            if spent + c_ <= budget + 1e-6:
-                out.append((lvl, is_resting, ex, w))
-                spent += c_
+        out, cut, spent = self.allocate_levels(rows, budget, max(0.0, DUMP_L0_BUDGET - self.l0_held()))
         self.entry_spent = round(spent)
         self.entry_left = max(0.0, budget - spent)
         for lvl, is_resting, ex, w in out:
             plan.setdefault(ex, []).append(w)
+        for lvl, is_resting, ex, w in cut:
+            if is_resting:
+                self.dump_cut_t[(ex, w["side"])] = (now, "cut for budget")
         elig = {(ex, side) for ex, side, _, _ in cands}
-        sides = {(ex, w["side"]) for _, _, ex, w in out} | (set(resting) & elig)
+        funded = {(ex, w["side"]) for _, _, ex, w in out}
+        sides = funded | (set(resting) & elig)
+        by_l = collections.Counter(w["lname"] for _, _, _, w in out)
         self.dump_cov = dict(eligible=len(elig), covered=len(sides & elig), levels=len(out), weighted=round(spent), budget=round(budget),
-                             nominal=round(sum(w["px"] * w["qty"] for _, _, _, w in out)))   # day 8 §2: coverage for the hourly line
+                             nominal=round(sum(w["px"] * w["qty"] for _, _, _, w in out)), k=self.budget_k(),
+                             by_l={k_: by_l.get(k_, 0) for k_ in ("L0", "L1", "L2", "L3", "L4")}, cut=len(cut))   # day 8 §2 / day 9 §3
+        # Day 9 §4: a FUNDED side without a resting level (and nothing queued) for > 30 s is a gap: logged with its cause
+        covered = set(resting) | {(p["ex"], p["side"]) for p in self.ex.pending() if p.get("layer") == "dump"}
+        for key in list(self.dump_gap_since):
+            if key not in funded or key in covered:
+                self.dump_gap_since.pop(key, None)
+        for key in funded:
+            if key in covered:
+                continue
+            t0 = self.dump_gap_since.setdefault(key, now)
+            if now - t0 > DUMP_GAP_LOG_S and now - self.dump_gap_log.get(key, 0) > 600:
+                self.dump_gap_log[key] = now
+                ex, side = key
+                cut_t, why = self.dump_cut_t.get(key, (0, None))
+                if cut_t < now - 600:
+                    why = None
+                if why is None:
+                    cut_off = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 600))
+                    last = max((r for r in self.ledger.orders.values() if r.get("layer") == "dump" and r["ex"] == ex and r["side"] == side
+                                and (r.get("closed") or "") >= cut_off), key=lambda r: r["closed"], default=None)
+                    why = ({"done": "filled: its tranche is selling back", "expired": "TTL expired without a replacement",
+                            "cancelled": "cancelled (plan change)"}.get((last or {}).get("status"), "placement lag (queued / write pacing)"))
+                self.uncovered_n.append((now, ex, side, round(now - t0)))
+                self.event("DUMP", f"{self.name(ex)} {side.upper()}: funded but no level resting for {now - t0:.0f} s: {why}")
         return plan
+
+    def allocate_levels(self, rows, budget, l0_room):
+        """Day 9 §3 allocation: -> (out, cut, spent). rows = (lvl, is_resting, ex, spec). Resting levels first (hysteresis),
+        then new ones; within each group L0 first (its cost capped by l0_room), then by expected edge (fair - price) x reach /
+        weight (+0.5c for arena markets). A level that does not fit is cut (a resting one gets cancelled by the reconcile)."""
+        def xe(w):
+            return w["edge"] * DUMP_REACH[w["lname"]] / w["weight"] + (0.005 if w.get("arena") else 0.0)
+        order = sorted(rows, key=lambda r: (not r[1], not r[3]["l0"], -xe(r[3])))
+        out, cut, spent, l0_spent = [], [], 0.0, 0.0
+        for lvl, is_resting, ex, w in order:
+            c_ = w["px"] * w["qty"] * w["weight"]
+            if w["l0"] and l0_spent + w["px"] * w["qty"] > l0_room + 1e-6:
+                cut.append((lvl, is_resting, ex, w))
+                continue
+            if spent + c_ <= budget + 1e-6:
+                out.append((lvl, is_resting, ex, w))
+                spent += c_
+                if w["l0"]:
+                    l0_spent += w["px"] * w["qty"]
+            else:
+                cut.append((lvl, is_resting, ex, w))
+        return out, cut, spent
 
     def track_dumps(self, now):
         """A filled level becomes a tranche: sell-back for the whole tranche at max(pre-dump ref_side, fill + 1.5c), never
@@ -3881,6 +3953,23 @@ class Engine:
             if f["layer"] == "release" and f["action"] == "buy" and f["t"] >= start and f.get("fair") is not None:
                 ev += max(0.0, (1 - f["fair"]) - (1 - f["price"])) * f["qty"]
         return round(ev, 2)
+
+    def day9_migrations(self):
+        """Once: log the day-9 rules (the k budget, expected-edge ranking, hysteresis, re-price make-before-break)."""
+        c = self.controls
+        d9 = c.d.setdefault("day9", {})
+        if d9.get("c71"):
+            return
+        with c.lock:
+            d9["c71"] = stamp()
+            c.save()
+        r = DUMP_REACH
+        msg = (f"DAY 9 (C71): entry budget = k x free (k_max {BUDGET_K_MAX:g} from the replay, -0.5 / +0.5 live); levels ranked by (fair - price) x reach / weight "
+               f"(reach L0 {r['L0']:g}, L1 {r['L1']:g}, L2 {r['L2']:g}, L3 {r['L3']:g}, L4 {r['L4']:g}), L0 first within its 8k cap, then L1-L4, scalper, fat-finger; "
+               f"resting levels keep their slot while they fit (no churn); re-prices and refreshes are make-before-break; a level being cancelled is not 'resting' "
+               f"for the reconcile; gaps > {DUMP_GAP_LOG_S} s on funded sides are logged with their cause")
+        self.event("DUMP", msg)
+        self.night.line(msg)
 
     def day8_migrations(self):
         """Once (flag in overrides): the cash target is clamped to the new 35k cap and the day-8 budget weights are logged."""
