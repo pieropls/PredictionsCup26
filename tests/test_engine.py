@@ -1223,7 +1223,8 @@ class FatFingerTests(EngineCase):
         self.addCleanup(setattr, f_engine, "FAT_TIER_A_ONLY", f_engine.FAT_TIER_A_ONLY)
         f_engine.FAT_TIER_A_ONLY = False                  # every eligible side (tier-A-only has its own test)
 
-    def rig(self, cash_above_floor=20_000):
+    def rig(self, cash_above_floor=400_000):
+        """cash 400k above the floor: the Oct 5 22:50 entry budget (2 x free, fat-finger last) never binds here; CashGuardTests covers it."""
         fresh_data(layers=self.LAYERS)
         fake = new_fake(writes_per_min=10_000)
         base = fake.pnl()
@@ -3076,6 +3077,25 @@ class CashGuardTests(EngineCase):
         fake, eng, favs = self.rig(cash_above_floor=1_500)
         self.assertEqual(self.entries(eng, fake), [], "under 2k free: no entry bids at all")
         self.assertTrue(any("no entry bids" in e["text"] for e in eng.events))
+
+    def test_dump_levels_get_the_budget_before_the_fat_finger_and_the_scalper(self):
+        fresh_data(layers=dict(position=dict(state="full"), dump=dict(state="full"), fatfinger=dict(state="full"), scalp=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 6_000)   # budget 12k
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] >= 0.90]
+        for _ in range(4):
+            eng.ex.capacity = 6000.0
+            for ex in favs:
+                seed_ref(eng, ex, mid=eng.fair[ex] - 0.06)
+            loop(eng, fake)
+        by = collections.Counter(eng.ledger.orders[o["id"]]["layer"] for o in fake.open_orders() if o["id"] in eng.ledger.orders)
+        self.assertGreater(by.get("dump", 0), 0, by)
+        cost = {l: sum(o["qty"] * o["price"] for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == l) for l in ("dump", "fatfinger", "scalp")}
+        self.assertLessEqual(cost["fatfinger"], max(0.0, 12_000 - cost["dump"]) + 1e-6, cost)
 
     def test_near_touch_levels_have_a_20_min_ttl_and_l0_stops_at_8k(self):
         fake, eng, favs = self.rig(cash_above_floor=60_000)

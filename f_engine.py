@@ -689,11 +689,7 @@ class Engine:
         except Exception as err:                            # never let it stop the loop
             self.release_now = {}
             self.event("ERR", f"release plan: {err!r}")
-        try:
-            self.fat_now = self.fat_plan(now)
-        except Exception as err:
-            self.fat_now = {}
-            self.event("ERR", f"fat-finger plan: {err!r}")
+        self.entry_left = self.entry_budget(cash)             # Oct 5 23:35: the 2 x free budget, allocated dump L1-L4 -> L0 -> scalper -> fat-finger
         try:
             self.dump_now = self.dump_plan(now, cash, used)
         except Exception as err:
@@ -709,6 +705,11 @@ class Engine:
         except Exception as err:
             self.scalp_now = {}
             self.event("ERR", f"scalper plan: {err!r}")
+        try:
+            self.fat_now = self.fat_plan(now)               # last in line for the entry budget
+        except Exception as err:
+            self.fat_now = {}
+            self.event("ERR", f"fat-finger plan: {err!r}")
         try:
             self.track_touch(now)
             self.touch_now = self.touch_plan(now, cash, used)
@@ -1700,16 +1701,25 @@ class Engine:
                                                         qtol=1.0 if key in recent_fill else QTY_TOL))
                 if not resting.get(key) and f"{ex}|{side}" not in cov["reasons"]:
                     cov["reasons"][f"{ex}|{side}"] = "being placed (paced at 30% of SIG capacity)"
+        left = getattr(self, "entry_left", float("inf"))
         if self.entry_budget(min(self.cash_hist) if self.cash_hist else 0.0) <= 0:   # Oct 5 22:50 guard (b): under 2k free, no levels
+            left = 0.0
+        if left < float("inf"):                             # Oct 5 23:35: last in line for the entry budget (deep levels, 1x)
+            cut, spent = {}, 0.0
             for ex in plan:
                 for w in plan[ex]:
-                    cov["reasons"][f"{ex}|{w['side']}"] = "reserve not funded"
+                    c_ = w["px"] * w["qty"]
+                    if spent + c_ <= left + 1e-6:
+                        cut.setdefault(ex, []).append(w)
+                        spent += c_
+                    else:
+                        cov["reasons"][f"{ex}|{w['side']}"] = "reserve not funded"
+            cov["covered"] = sum(len(v) for v in cut.values())
             for k in list(cov["reasons"]):
-                if cov["reasons"][k].startswith("being placed"):
+                if cov["reasons"][k].startswith("being placed") and not any(f"{ex}|{w['side']}" == k for ex in cut for w in cut[ex]):
                     cov["reasons"][k] = "reserve not funded"
-            cov["covered"] = 0
-            self.coverage = cov
-            return {}
+            plan = cut
+            self.entry_left = max(0.0, left - spent)
         self.coverage = cov
         return plan
 
@@ -2305,7 +2315,7 @@ class Engine:
         # Oct 5 22:50 guard (a): every resting entry bid costs against 2 x free cash above the floor (near-touch and L0 at 3x);
         # L1-L4 get the cash first, then L0; within a group the best edge first (a resting level keeps a small edge bonus
         # so the book does not churn). Levels that do not fit are not placed (a resting one is cancelled).
-        budget = max(0.0, self.entry_budget(cash) - self.other_entry_cost())
+        budget = self.entry_budget(cash)                    # the dump catcher is first in line for the whole budget
         keep.sort(key=lambda r: (r[3]["l0"], -(r[3]["edge"] + (0.005 if r[1] else 0.0) + (0.01 if r[3]["arena"] else 0.0))))
         out, spent = [], 0.0
         for lvl, is_resting, ex, w in keep:
@@ -2314,6 +2324,7 @@ class Engine:
                 out.append((lvl, is_resting, ex, w))
                 spent += c_
         self.entry_spent = round(spent)
+        self.entry_left = max(0.0, budget - spent)
         for lvl, is_resting, ex, w in out:
             plan.setdefault(ex, []).append(w)
         return plan
@@ -2782,7 +2793,9 @@ class Engine:
                 existing[(o["ex"], o["side"])] = o
                 resting_cost += o["qty"] * o["price"]
         n = SCALP_MARKETS if c.state("scalp") == "full" else SCALP_PILOT_MARKETS
-        room_total = self.scalp_slice() - self.scalp_cost() - resting_cost
+        left = getattr(self, "entry_left", float("inf"))    # the entry budget left after the dump catcher (Oct 5 23:35)
+        room_total = min(self.scalp_slice() - self.scalp_cost() - resting_cost, left - resting_cost * ENTRY_NEAR_WEIGHT)
+        self.entry_left = max(0.0, left - resting_cost * ENTRY_NEAR_WEIGHT)
         plan = {}
         for ex in self.scalp_rank(n):
             f, px = self.fair.get(ex), self.px.get(ex)
@@ -2831,6 +2844,7 @@ class Engine:
                 plan.setdefault(ex, []).append(dict(side=side, px=p, qty=q, sub=f"scalp:{ex}:{side}"))
                 room_m -= q * p
                 room_total -= q * p
+                self.entry_left = max(0.0, self.entry_left - q * p * ENTRY_NEAR_WEIGHT)
                 budget -= 1
                 n_rest += 1
         return plan
@@ -2953,6 +2967,23 @@ class Engine:
                 d7["cash_target_v2"] = stamp()
                 c.save()
             self.event("CASH", "DAY 7: cash target reset to 25,000; rises only after >= 15 constrained min or bounded peak use >= 70%")
+        if not d7.get("phantom_2217"):                     # the same pattern at 22:17:45 (booked under C64, before the both-sides rule)
+            bad = [f for f in self.ledger.fills if f["t"] == "2026-10-05 22:17:45" and f.get("source") == "order_shrink" and f.get("layer") == "fatfinger"]
+            with self.ledger.lock:
+                for f in bad:
+                    order = self.ledger.orders.get(str(f.get("order"))) or {}
+                    if order:                               # the sub-books were already zeroed by subbook_fix at 23:03; fix the records only
+                        order["filled"] = max(0.0, (order.get("filled") or 0) - f["qty"])
+                        order["cost"] = max(0.0, (order.get("cost") or 0) - f["qty"] * f["price"])
+                keys = {f["key"] for f in bad}
+                self.ledger.fills = [f for f in self.ledger.fills if f.get("key") not in keys]
+            with c.lock:
+                d7["phantom_2217"] = stamp()
+                c.save()
+            if bad:
+                self.event("AUDIT", f"PHANTOM: the six 22:17:45 fat-finger order_shrink fill records removed (sub-books were zeroed by subbook_fix at 23:03): "
+                                    + "; ".join(f"{self.name(f['ex'])} {f['side'].upper()} {f['qty']:,.0f}" for f in bad))
+            self.ledger.save()
         if not d7.get("phantom_1815"):
             bad = [f for f in self.ledger.fills if f["t"] == "2026-10-05 18:15:04" and f.get("source") == "order_shrink" and f.get("layer") == "fatfinger"]
             with self.ledger.lock:
