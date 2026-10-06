@@ -1507,7 +1507,8 @@ class DumpV3Tests(EngineCase):
     each <= fair - 3c; sell-back at max(pre-dump ref, fill + 1.5c) <= fair - 0.5c, stepping down after 60 min, inventory
     after 6 h; size = funded reserve / 8 (1.5k..6k), arena x 1.5, pilot x 0.5; concentration cap; slide freeze; gate."""
 
-    def rig(self, state="full", cash_above_floor=40_000, ref_gap=0.06):
+    def rig(self, state="full", cash_above_floor=300_000, ref_gap=0.06):
+        """cash 300k above the floor: the Oct 5 22:50 entry budget (2 x free) then never binds; CashGuardTests covers it."""
         fresh_data(layers=dict(position=dict(state="full"), dump=dict(state=state)))
         fake = new_fake(writes_per_min=10_000)
         base = fake.pnl()
@@ -1820,7 +1821,7 @@ class DumpV3Tests(EngineCase):
         self.settle(eng, fake, favs, 3)
         for ex in favs[:3]:
             cost = sum(o["qty"] * o["price"] for o in self.dump_orders(eng, fake, ex))
-            self.assertLessEqual(cost, min(a_config.DUMP_SIDE_HARD_MAX, 40_000 / 2) + 60)
+            self.assertLessEqual(cost, min(a_config.DUMP_SIDE_HARD_MAX, a_config.OPPORTUNITY_RESERVE / 2) + 60)
 
     def test_party_exposure_cap(self):
         fake, eng, favs = self.rig(state="full")
@@ -3036,6 +3037,124 @@ class DoubleBookingTests(EngineCase):
                lambda ex: "MKT x", lambda ex, side: 0.5, lambda ex, side: 0.5, as_of=time.time())
         self.assertEqual(len(L.fills), n0, "nothing booked beyond the order's quantity")
         self.assertEqual(L.subbooks["990"], {"scalp:990:yes": 500.0})
+
+
+class CashGuardTests(EngineCase):
+    """Oct 5 22:50 (Piero), after the floor breach: resting entries <= 2 x free cash (near-touch and L0 at 3x), none under 2k
+    free; L0 holds <= 8k; near-touch levels have a 20-min TTL; a rebuild sells engine lots at the bid to 15k free (rule 0,
+    with the -1c exception for lots <= 5c under fair); both sides vanishing at once are never booked as fills."""
+
+    def rig(self, cash_above_floor):
+        fresh_data(layers=dict(position=dict(state="full"), dump=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + cash_above_floor)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] >= 0.90]
+        for _ in range(4):
+            eng.ex.capacity = 6000.0
+            for ex in favs:
+                seed_ref(eng, ex, mid=eng.fair[ex] - 0.06)
+            loop(eng, fake)
+        return fake, eng, favs
+
+    def entries(self, eng, fake):
+        return [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] in ("dump", "fatfinger", "scalp")]
+
+    def test_resting_entries_capped_at_twice_free_cash_and_none_under_2k(self):
+        fake, eng, favs = self.rig(cash_above_floor=6_000)
+        ents = self.entries(eng, fake)
+        self.assertTrue(ents)
+        weighted = 0.0
+        for o in ents:
+            best = bots.side_book(*eng.px[o["ex"]][:2], o["side"])[0]
+            w = 3.0 if (str(eng.ledger.orders[o["id"]].get("sub", "")).endswith(":L0") or (best is not None and o["price"] >= best - 0.01 - 1e-9)) else 1.0
+            weighted += o["qty"] * o["price"] * w
+        self.assertLessEqual(weighted, 2.0 * 6_000 + 1e-6, f"weighted resting entries {weighted:.0f} > 2 x free")
+        fake, eng, favs = self.rig(cash_above_floor=1_500)
+        self.assertEqual(self.entries(eng, fake), [], "under 2k free: no entry bids at all")
+        self.assertTrue(any("no entry bids" in e["text"] for e in eng.events))
+
+    def test_near_touch_levels_have_a_20_min_ttl_and_l0_stops_at_8k(self):
+        fake, eng, favs = self.rig(cash_above_floor=60_000)
+        ttls = {}
+        for o in self.entries(eng, fake):
+            rec = eng.ledger.orders[o["id"]]
+            if rec["layer"] != "dump":
+                continue
+            best = bots.side_book(*eng.px[o["ex"]][:2], o["side"])[0]
+            near = str(rec.get("sub", "")).endswith(":L0") or (best is not None and o["price"] >= best - 0.02 - 1e-9)
+            ttls.setdefault(near, set()).add(rec.get("ttl"))
+        self.assertEqual(ttls.get(True, {a_config.DUMP_NEAR_TTL_S}), {a_config.DUMP_NEAR_TTL_S})
+        self.assertEqual(ttls.get(False, {a_config.DUMP_TTL_S}), {a_config.DUMP_TTL_S})
+        ex = favs[0]
+        eng.ledger.subbooks.setdefault(ex, {})[f"dump:{ex}:yes:L0"] = 9_000.0
+        eng.ledger.tranches[f"dump:{ex}:yes:L0"] = dict(ex=ex, side="yes", kind="dump", state="open", ts=time.time(), t="x", avg=0.9)
+        self.assertGreaterEqual(eng.l0_held(), a_config.DUMP_L0_BUDGET)
+        for _ in range(3):
+            for e_ in favs:
+                seed_ref(eng, e_, mid=eng.fair[e_] - 0.06)
+            loop(eng, fake)
+        self.assertEqual([o for o in self.entries(eng, fake) if str(eng.ledger.orders[o["id"]].get("sub", "")).endswith(":L0")], [], "L0 at its 8k budget: no L0 bids")
+
+    def test_both_sides_vanishing_at_once_are_not_fills(self):
+        fresh_data(layers=dict(position=dict(state="full"), fatfinger=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        eng.controls.d["truth_mode"] = "book"
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS)
+        now = time.time()
+        for oid, side, px in (("5001", "yes", 0.12), ("5002", "no", 0.115)):
+            eng.ledger.orders[oid] = dict(id=oid, bot=eng.owner[ex].name, layer="fatfinger", ex=ex, side=side, action="buy", price=px, qty=4996, filled=0.0,
+                                          cost=0.0, left=4996, placed=stamp_(), ts=now - 600, closed=None, status="open", sub="fatfinger", note="", ttl=7200)
+        eng.truth_prev = {"5001": 4996.0, "5002": 4996.0}
+        eng.truth_read_t, eng.truth_live_t = now - 10, now - 100
+        eng.open = [o for o in eng.open if o["id"] not in ("5001", "5002")]
+        n0 = len(eng.ledger.fills)
+        booked = eng.order_truth({ex: 0}, {ex: (0, {})}, collections.Counter(), now, False)
+        self.assertEqual(booked, [])
+        self.assertEqual(len(eng.ledger.fills), n0, "SIG pulled both sides at the cash floor: nothing was filled")
+
+    def test_rebuild_sells_engine_lots_at_the_bid_to_15k_free(self):
+        fake, eng = Day4Tests.rig(self)
+        self.addCleanup(setattr, f_engine, "RELEASE_QUIET_HOURS", f_engine.RELEASE_QUIET_HOURS)
+        f_engine.RELEASE_QUIET_HOURS = (0, 0)
+        ex = mid_market(eng)
+        fake.pos[ex] = 2000
+        fake.avg_cost[ex] = 0.30
+        loop(eng, fake)
+        bid = fake.px[ex][0]
+        eng.ledger.subbooks[ex] = {f"dump:{ex}:yes:0": 2000.0}      # an engine tranche: the release never touched these before
+        eng.ledger.tranches[f"dump:{ex}:yes:0"] = dict(ex=ex, side="yes", kind="dump", state="open", ts=time.time(), t="x", avg=round(bid - 0.01, 3))
+        eng.ledger.fills.append(dict(key="r1", order="r1", ex=ex, side="yes", qty=2000.0, price=round(bid - 0.01, 3), action="buy", realized=0.0,
+                                     t="2026-10-05 12:00:00", bot="b", layer="dump", before_engine=False, fair=None, edge=None, sig_edge=None, sig_mid=None))
+        eng.ledger.orders["r1"] = dict(id="r1", bot="b", layer="dump", ex=ex, side="yes", action="buy", price=round(bid - 0.01, 3), qty=2000, filled=2000.0,
+                                       cost=0.0, left=0, placed="x", ts=time.time() - 3600, closed=None, status="done", sub=f"dump:{ex}:yes:0", note="")
+        eng.lots_cache = (None, {})
+        eng.release_t = 0
+        plan = eng.release_plan(a_config.CASH_RESERVE + 3_000, time.time(), eng.bucket_usage())    # free 3k < 15k: rebuild
+        self.assertEqual(plan.get(ex, {}).get("why"), "rebuild", plan)
+        self.assertEqual(sum(plan[ex]["subs"].values()), min(2000, eng.bid_depth(ex, "yes", time.time())))
+        self.assertTrue(any("REBUILD sale" in e["text"] for e in eng.events))
+        eng.ledger.tranches[f"dump:{ex}:yes:0"]["avg"] = round(bid + 0.005, 3)   # entry 0.5c above the bid: rule 0 blocks it...
+        eng.ledger.fills[-1]["price"] = round(bid + 0.005, 3)
+        eng.lots_cache = (None, {})
+        eng.release_t = 0
+        plan = eng.release_plan(a_config.CASH_RESERVE + 3_000, time.time(), eng.bucket_usage())
+        self.assertEqual(plan.get(ex, {}).get("why"), "rebuild", "...unless the lot is <= 5c under fair: Piero's -1c exception applies")
+        self.assertLess(plan[ex]["rule0_margin"], 0)
+        FAIR[ex] = bid + 0.06                                  # 6c under fair: the exception is off, rule 0 holds
+        try:
+            loop(eng, fake)
+            eng.release_t = 0
+            self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 3_000, time.time(), eng.bucket_usage()))
+        finally:
+            FAIR.pop(ex, None)
+        eng.release_t = 0
+        self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage()), "above 15k free: the tiers rule again")
 
 
 class ControlTests(EngineCase):

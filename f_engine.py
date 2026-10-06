@@ -46,7 +46,9 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                       TOUCH_NEWS_FAIR, TOUCH_NEWS_SIG, TOUCH_NEWS_HOLD_S, TOUCH_YIELD_RESERVE, TOUCH_PILOT_S, TOUCH_GATE_FILLS, TOUCH_RATCHET_MAX,
                       RULE0_MARGIN, DAY1_CUTOFF, CASH_T_START, CASH_T_STEP, CASH_T_MIN, CASH_T_MAX, CASH_T_CONSTRAINED_MIN, CASH_T_PEAK_UP,
                       CASH_T_PEAK_DOWN, CASH_T_IDLE_H, RELEASE_TIER0, RELEASE_TIER1, RELEASE_TIER2, RELEASE_TIER2_RETURN,
-                      RI_RACES, RI_ENGINE_CAP, DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP, DUMP_L0_REFILLS, DUMP_L0_WINDOW_S, UNCOVERED_LOG_S)
+                      RI_RACES, RI_ENGINE_CAP, DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP, DUMP_L0_REFILLS, DUMP_L0_WINDOW_S, UNCOVERED_LOG_S,
+                      ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE, DUMP_NEAR_TTL_S, DUMP_NEAR_GAP, DUMP_L0_BUDGET,
+                      REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP)
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
                       RISK_MAX_EXPOSURE, CASH_RESERVE, POSITION_BOTS, POSITION_MAX_ADD, MANUAL_MARKETS, MB_PM_MAX_SPREAD,
                       MB_FOCUS, MB_REFILL_S, MB_QUOTE_TTL_S, PAIR_ENABLED, PAIR_EDGE, PAIR_THIRD_PARTY, PAIR_MAX_QTY,
@@ -1611,7 +1613,7 @@ class Engine:
     def fat_plan(self, now):
         """{ex: [want-spec]} for the fat-finger layer; also refreshes queue reads (<= FAT_BOOK_READS per loop, tier A first,
         every FAT_QUEUE_S) and the news guard; records coverage reasons."""
-        if not self.controls.on("fatfinger"):
+        if not self.controls.on("fatfinger") or self.entry_budget(min(self.cash_hist) if self.cash_hist else 0.0) <= 0:
             self.coverage = None
             return {}
         tier_a = self.fat_tiers()
@@ -1822,7 +1824,12 @@ class Engine:
             exp = sum(s * d for _, d, s in cand.get(ex, []))
             gross = sum(d for _, d, _ in cand.get(ex, []))
             tol = max(1.0, 0.02 * gross)
-            if cand.get(ex) and (abs(dpos - exp) <= tol or abs(dpos + c - exp) <= tol):
+            if cand.get(ex) and abs(abs(exp) - gross) > tol:   # Oct 5 22:50: both sides vanished at once (SIG pulled them): not fills
+                shadow_rows.append(dict(ex=ex, dpos=round(dpos, 2), carry=round(c, 2), orders=round(exp, 2), n=len(cand[ex]), match=False, netted=True))
+                if abs(dpos) >= 1:
+                    self.truth_carry[ex] = dpos
+                continue
+            if cand.get(ex) and abs(dpos) >= 1 and (abs(dpos - exp) <= tol or abs(dpos + c - exp) <= tol):
                 use_carry = abs(dpos - exp) > tol
                 shadow_rows.append(dict(ex=ex, dpos=round(dpos, 2), carry=round(c, 2), orders=round(exp, 2), n=len(cand[ex]), match=True))
                 if book:
@@ -2076,6 +2083,29 @@ class Engine:
         return [(side, fs, rs) for side, fs, rs in (("yes", f, r), ("no", 1 - f, 1 - r))
                 if fs >= DUMP_MIN_FAIR and not (held <= -MIN_QTY if side == "yes" else held >= MIN_QTY)]
 
+    def entry_budget(self, cash):
+        """Oct 5 22:50 hard guard (a)+(b): resting entry bids may cost at most 2 x free cash above the floor (near-touch
+        bids count 3x); below 2k free there are no entry bids at all."""
+        free = cash - CASH_RESERVE
+        return 0.0 if free < ENTRY_MIN_FREE else ENTRY_CASH_MULT * free
+
+    def other_entry_cost(self):
+        """Resting entry bids of the other layers (fat-finger, scalper, longshot) at cost, weighted like the dump levels."""
+        out = 0.0
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"])
+            if not rec or rec.get("layer") not in ("fatfinger", "scalp", "longshot") or o["action"] != "buy":
+                continue
+            best = bots.side_book(*self.px.get(o["ex"], (None, None, None))[:2], o["side"])[0]
+            near = best is not None and o["price"] >= best - ENTRY_NEAR_TOUCH - 1e-9
+            out += o["qty"] * o["price"] * (ENTRY_NEAR_WEIGHT if near else 1.0)
+        return out
+
+    def l0_held(self):
+        """L0 tranches held at cost across all sides (the 8k L0 budget)."""
+        return sum(abs(q) * float((self.ledger.tranches.get(sub) or {}).get("avg") or self.sig_mark(ex, "yes" if q > 0 else "no") or 0)
+                   for ex, books in self.ledger.subbooks.items() for sub, q in books.items() if sub.endswith(":L0") and abs(q) >= 1)
+
     def race_room(self, ex, side, fs):
         """Day 7 §2.2-2.3: the room under the race cap (20k at fair >= 0.95, 15k at 0.90-0.95, 12k below) for new levels on
         (ex, side): the cap minus what every engine layer holds at cost on the race's markets and the dump levels resting
@@ -2118,14 +2148,14 @@ class Engine:
                 cost += o["qty"] * o["price"]
         return cost
 
-    def dump_levels(self, ex, side, fs, rs, cost, room=None):
+    def dump_levels(self, ex, side, fs, rs, cost, room=None, l0_ok=True):
         """[(i, price, shares)]: L1/L2/L3 = ref - 1 / 2 / 3.5c, each <= fair_side - 3c and <= best bid + 1 tick (join or
         improve, never cross the ask); shares by weight 40 / 35 / 25 of `cost`."""
         bid_s, ask_s = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)
         out, used = [], set()
         day = self.day_window(time.time())                  # day 6 §1.3: L4 (ref - 5c) and 45/25/15/15 in the day window
         offs, ws = (DUMP_V3_OFFSETS_DAY, DUMP_V3_WEIGHTS_DAY) if day else (DUMP_V3_OFFSETS, DUMP_V3_WEIGHTS)
-        if fs >= DUMP_L0_MIN_FAIR - 1e-9 and bid_s is not None and bid_s <= fs - DUMP_L0_GAP + 1e-9 and MB_MIN_PX <= bid_s <= MB_MAX_PX:
+        if l0_ok and fs >= DUMP_L0_MIN_FAIR - 1e-9 and bid_s is not None and bid_s <= fs - DUMP_L0_GAP + 1e-9 and MB_MIN_PX <= bid_s <= MB_MAX_PX:
             q0 = min(DUMP_L0_CLIP, int(room / bid_s)) if room is not None else DUMP_L0_CLIP   # day 7 §2.1: L0 joins the best bid
             if q0 >= MIN_QTY:
                 out.append((4, bid_s, q0))
@@ -2152,8 +2182,14 @@ class Engine:
         L1 goes out on every side first, then L2, then L3."""
         if not self.controls.on("dump"):
             return {}
+        if self.entry_budget(cash) <= 0:                    # Oct 5 22:50 guard (b): under 2k free above the floor: no entry bids
+            if now - self.scalp_note.get("nocash", 0) >= 1800:
+                self.scalp_note["nocash"] = now
+                self.event("CASH", f"free cash {cash - CASH_RESERVE:,.0f} < {ENTRY_MIN_FREE:,}: no entry bids (dump, fat-finger, scalper)")
+            return {}
         half = 0.5 if self.controls.state("dump") == "pilot" else 1.0
         arena = self.dump_arena(now)
+        l0_ok = self.l0_held() < DUMP_L0_BUDGET              # L0 holds <= 8k at cost across all sides
         cands = []
         for b in self.bots:
             if b.kind != "market":
@@ -2204,7 +2240,8 @@ class Engine:
                 continue
             sliding = self.dump_ref_v3(ex)[1]
             books = self.ledger.subbooks.get(ex, {})
-            for i, px, q in self.dump_levels(ex, side, fs, rs, cost, room=room):
+            best_s = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
+            for i, px, q in self.dump_levels(ex, side, fs, rs, cost, room=room, l0_ok=l0_ok):
                 sub = f"dump:{ex}:{side}:{'L0' if i == 4 else i}"
                 if abs(books.get(sub, 0)) >= MIN_QTY:
                     if i != 4 or self.l0_refills(sub, now) >= DUMP_L0_REFILLS + 1:   # the first fill + 3 refills per 10 min
@@ -2212,7 +2249,10 @@ class Engine:
                 if sliding and sub in rest_px and px < rest_px[sub] - 1e-9:
                     px = rest_px[sub]                       # a slide in progress: never lower a resting level
                     q = int(cost * DUMP_V3_WEIGHTS[i] / px)
-                rows.append((i, i in resting.get(key, set()), ex, dict(side=side, px=px, qty=q, sub=sub, level=i, edge=fs - px, arena=ex in arena, l0=i == 4)))
+                near = i == 4 or (best_s is not None and px >= best_s - DUMP_NEAR_GAP - 1e-9)
+                rows.append((i, i in resting.get(key, set()), ex, dict(side=side, px=px, qty=q, sub=sub, level=i, edge=fs - px, arena=ex in arena, l0=i == 4,
+                                                                        ttl=DUMP_NEAR_TTL_S if near else DUMP_TTL_S,
+                                                                        weight=ENTRY_NEAR_WEIGHT if (i == 4 or (best_s is not None and px >= best_s - ENTRY_NEAR_TOUCH - 1e-9)) else 1.0)))
         # day 7 §1.3 make-before-break: a level due for its refresh is placed again first, then the old one is cancelled
         # (resting orders lock no cash; the overlap is seconds). A side is never left without its level.
         wanted = {w["sub"]: (ex, w) for _, _, ex, w in rows}
@@ -2221,13 +2261,14 @@ class Engine:
             if not rec or rec.get("layer") != "dump" or o["id"] in self.ex.cancelling or o["id"] in self.refreshed:
                 continue
             age = now - (rec.get("ts") or now)
-            jitter = (hash(rec.get("sub", "")) % (2 * DUMP_REFRESH_JITTER_S)) - DUMP_REFRESH_JITTER_S
-            if age < DUMP_REFRESH_S + jitter or api.writes_left() < DUMP_WRITES_IDLE:
+            ttl = rec.get("ttl") or DUMP_TTL_S
+            jitter = ((hash(rec.get("sub", "")) % (2 * DUMP_REFRESH_JITTER_S)) - DUMP_REFRESH_JITTER_S) * (ttl / DUMP_TTL_S)
+            if age < 0.75 * ttl + jitter or api.writes_left() < DUMP_WRITES_IDLE:
                 continue
             w = wanted.get(rec.get("sub"))
             if w is not None:
                 ex_, spec = w
-                self.ex.place([(self.owner[ex_].name, spec["sub"], "dump", (ex_, spec["side"], "buy", spec["px"], int(spec["qty"])))], ttl_s=DUMP_TTL_S)
+                self.ex.place([(self.owner[ex_].name, spec["sub"], "dump", (ex_, spec["side"], "buy", spec["px"], int(spec["qty"])))], ttl_s=spec.get("ttl") or DUMP_TTL_S)
             self.refreshed[o["id"]] = now
             self.ex.cancel(o, reason="refresh (make-before-break)")
         if len(self.refreshed) > 3000:
@@ -2251,17 +2292,19 @@ class Engine:
         for lvl, is_resting, ex, w in rows:
             if is_resting or lvl in (0, 4) or all(not missing[k] for k in range(lvl)):   # L0 and L1 go out first, everywhere
                 keep.append((lvl, is_resting, ex, w))
-        if self.constrained:                                # day 6 §1.4: cash short -> rest the best edge first; drop the lowest
-            budget = 3.0 * funded                           # (fair - price) levels, then non-arena sides (resting levels stay)
-            keep.sort(key=lambda r: (not r[1], -(r[3]["edge"] + (0.01 if r[3]["arena"] else 0.0))))
-            out, spent = [], 0.0
-            for lvl, is_resting, ex, w in keep:
-                c_ = w["px"] * w["qty"]
-                if is_resting or spent + c_ <= budget:
-                    out.append((lvl, is_resting, ex, w))
-                    spent += c_
-            keep = out
+        # Oct 5 22:50 guard (a): every resting entry bid costs against 2 x free cash above the floor (near-touch and L0 at 3x);
+        # L1-L4 get the cash first, then L0; within a group the best edge first (a resting level keeps a small edge bonus
+        # so the book does not churn). Levels that do not fit are not placed (a resting one is cancelled).
+        budget = max(0.0, self.entry_budget(cash) - self.other_entry_cost())
+        keep.sort(key=lambda r: (r[3]["l0"], -(r[3]["edge"] + (0.005 if r[1] else 0.0) + (0.01 if r[3]["arena"] else 0.0))))
+        out, spent = [], 0.0
         for lvl, is_resting, ex, w in keep:
+            c_ = w["px"] * w["qty"] * w["weight"]
+            if spent + c_ <= budget + 1e-6:
+                out.append((lvl, is_resting, ex, w))
+                spent += c_
+        self.entry_spent = round(spent)
+        for lvl, is_resting, ex, w in out:
             plan.setdefault(ex, []).append(w)
         return plan
 
@@ -2712,6 +2755,8 @@ class Engine:
             return {}
         if SCALP_DAY_OFF and SCALP_DAY_OFF[0] <= time.localtime(now).tm_hour + time.localtime(now).tm_min / 60 < SCALP_DAY_OFF[3]:
             return {}                                       # (day 6 §10.3: no schedule; the scalper runs all day and yields to the catcher)
+        if self.entry_budget(cash) <= 0:
+            return {}                                       # Oct 5 22:50 guard (b)
         funded = self.dump_demand(cash, used)["funded"]
         if funded < SCALP_YIELD_RESERVE:
             if now - self.scalp_note.get("yield", 0) >= 1800:
@@ -2898,6 +2943,31 @@ class Engine:
                 d7["cash_target_v2"] = stamp()
                 c.save()
             self.event("CASH", "DAY 7: cash target reset to 25,000; rises only after >= 15 constrained min or bounded peak use >= 70%")
+        if not d7.get("phantom_1815"):
+            bad = [f for f in self.ledger.fills if f["t"] == "2026-10-05 18:15:04" and f.get("source") == "order_shrink" and f.get("layer") == "fatfinger"]
+            with self.ledger.lock:
+                for f in bad:
+                    order = self.ledger.orders.get(str(f.get("order"))) or {}
+                    delta = (1 if f["action"] == "buy" else -1) * (f["qty"] if f["side"] == "yes" else -f["qty"])
+                    books = self.ledger.subbooks.setdefault(f["ex"], {})
+                    if order.get("sub"):
+                        books[order["sub"]] = books.get(order["sub"], 0) - delta
+                        if abs(books[order["sub"]]) < 1:
+                            books.pop(order["sub"], None)
+                    if order:
+                        order["filled"] = max(0.0, (order.get("filled") or 0) - f["qty"])
+                        order["cost"] = max(0.0, (order.get("cost") or 0) - f["qty"] * f["price"])
+                keys = {f["key"] for f in bad}
+                self.ledger.fills = [f for f in self.ledger.fills if f.get("key") not in keys]
+            with c.lock:
+                d7["phantom_1815"] = stamp()
+                c.save()
+            if bad:
+                msg = ("PHANTOM: the six 18:15:04 fat-finger order_shrink fills removed (both sides of FL-22 D, VA-01 D, NY-17 R vanished at once "
+                       "when SIG pulled them at the cash floor; SIG's position 0, cash unchanged): " + "; ".join(f"{self.name(f['ex'])} {f['side'].upper()} {f['qty']:,.0f}" for f in bad))
+                self.event("AUDIT", msg)
+                self.night.line(msg)
+            self.ledger.save()
         if not d7.get("ratchet_reeval"):
             r = (c.d.get("ratchet") or {}).get("dump") or {}
             hist = r.get("history") or []
@@ -3326,6 +3396,8 @@ class Engine:
         free = cash - CASH_RESERVE
         pending = sum(o["qty"] * (1 - o["price"]) for o in self.open
                       if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "release")
+        if free + pending < REBUILD_FREE:                   # Oct 5 22:50 (Piero): rebuild free cash to 15k first
+            return self.rebuild_plan(cash, now, free, pending)
         self.release_fund_log = [(t_, v) for t_, v in self.release_fund_log if t_ >= now - 3600]
         budget = max(0.0, min(T - free - pending, RELEASE_FUND_PER_H - sum(v for _, v in self.release_fund_log)))   # tiers 1-2: up to T, <= 10k/h
         tier2_ok = self.trading_return_24h(now) >= RELEASE_TIER2_RETURN
@@ -3428,7 +3500,7 @@ class Engine:
             self.lots_cache = (key, book)
         return [tuple(l) for l in self.lots_cache[1].get((ex, side, sub), [])]
 
-    def rule0_allowed(self, ex, side, sub, sale_px, qty):
+    def rule0_allowed(self, ex, side, sub, sale_px, qty, margin=RULE0_MARGIN):
         """How many of `qty` shares of (ex, side) in `sub` may be sold at `sale_px` under rule 0: every day-1 lot, and an
         engine lot only at >= its entry + 0.5c. Shares beyond the lots we can account for are engine lots at SIG's
         average cost (the safe side)."""
@@ -3436,12 +3508,12 @@ class Engine:
             return 0
         lots = self.lots(ex, side, sub)
         known = sum(l[0] for l in lots)
-        ok = sum(l[0] for l in lots if l[2] == "day1" or l[1] + RULE0_MARGIN <= sale_px + 1e-9)
+        ok = sum(l[0] for l in lots if l[2] == "day1" or l[1] + margin <= sale_px + 1e-9)
         if qty > known:                                     # shares the lot history can't place: the tranche's own entry (the
             t = self.ledger.tranches.get(sub) or {}          # engine's record, e.g. a hand-over sub), else SIG's average cost
             avg = float(t.get("avg") or 0) if sub.startswith(("dump:", "touch:", "scalp:")) and t.get("avg") else \
                 float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
-            if avg and avg + RULE0_MARGIN <= sale_px + 1e-9:
+            if avg and avg + margin <= sale_px + 1e-9:
                 ok += qty - known
         return int(max(0, min(qty, ok)))
 
@@ -3460,7 +3532,7 @@ class Engine:
             held_side = ("no" if w["side"] == "yes" else "yes") if w["action"] == "buy" else w["side"]
             sale_px = round(1 - w["px"], 3) if w["action"] == "buy" else w["px"]
             sub = w.get("sub") or "inventory"
-            allowed = self.rule0_allowed(b.ex, held_side, sub, sale_px, int(w["qty"]))
+            allowed = self.rule0_allowed(b.ex, held_side, sub, sale_px, int(w["qty"]), margin=w.get("rule0_margin", RULE0_MARGIN))
             if allowed < w["qty"]:
                 blocked = int(w["qty"]) - allowed
                 self.rule0_blocked.append((time.time(), b.ex, held_side, blocked, sale_px))
@@ -3532,6 +3604,66 @@ class Engine:
                 self.event("CASH", msg)
                 self.night.line(msg)
         return T
+
+    REBUILD_SKIP = ("manual", "pairset:", "recycle:")
+
+    def rebuild_plan(self, cash, now, free, pending):
+        """Oct 5 22:50 (Piero): while free cash above the floor is under 15k, sell engine lots at the SIG bid: lots the bid
+        clears at entry + 0.5c (rule 0), and — Piero's exception — lots <= 5c under fair down to entry - 1c; lowest gap
+        to fair first, <= 7c under fair first, then 7-10c only if still short. Every sub-book but manual, pair sets and
+        recycle lots; no hourly cap, no age rule. Each sale is logged with its gap, origin and EV given up."""
+        need = REBUILD_FREE - free - pending
+        cands = []
+        for ex, b in self.book.items():
+            q = b["pos"]
+            if not q or ex not in self.owner or self.owner[ex].kind != "market" or self.ex.is_frozen(ex):
+                continue
+            side = "yes" if q > 0 else "no"
+            bid = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
+            fs = self.side_fair(ex, side)
+            if bid is None or fs is None:
+                continue
+            gap = fs - bid
+            if gap > REBUILD_GAP2 + 1e-9:
+                continue
+            margin = REBUILD_MARGIN if gap <= REBUILD_MARGIN_GAP + 1e-9 else RULE0_MARGIN
+            split = {}
+            for sub, v in self.ledger.subbooks.get(ex, {}).items():
+                if v * q <= 0 or sub.startswith(self.REBUILD_SKIP):
+                    continue
+                take = self.rule0_allowed(ex, side, sub, bid, int(abs(v)), margin=margin)
+                if take >= MIN_QTY:
+                    split[sub] = take
+            if split:
+                cands.append((0 if gap <= REBUILD_GAP1 + 1e-9 else 1, gap, ex, side, bid, split, margin))
+        plan = {}
+        for band, gap, ex, side, bid, split, margin in sorted(cands):
+            if need <= 0 or len(plan) >= RELEASE_MARKETS:
+                break
+            depth = self.bid_depth(ex, side, now)
+            qty = int(min(sum(split.values()), depth, need / bid))
+            if qty < MIN_QTY:
+                continue
+            left, take = qty, {}
+            for sub, v in sorted(split.items(), key=lambda kv: -kv[1]):
+                t_ = int(min(v, left))
+                if t_ >= MIN_QTY:
+                    take[sub] = t_
+                    left -= t_
+            if not take:
+                continue
+            ev = round(max(gap, 0.0) * sum(take.values()), 2)
+            plan[ex] = dict(side=side, px=bid, cost=round(gap, 4), subs=take, why="rebuild", tier=0, ev=ev, rule0_margin=margin)
+            self.release_why[ex] = (now, "rebuild")
+            need -= sum(take.values()) * bid
+            lots = self.lots(ex, side, next(iter(take)))
+            origin = "day1" if lots and lots[0][2] == "day1" else "engine"
+            msg = (f"REBUILD sale {self.name(ex)} {side.upper()} {sum(take.values()):,} at the bid {bid:.3f}: {gap * 100:.1f}c under fair, "
+                   f"{origin} lots, EV given up {ev:+,.0f}" + (" (rule-0 exception: <= 5c under fair, down to entry - 1c)" if margin < 0 else "")
+                   + f"; free cash {free:,.0f} -> target {REBUILD_FREE:,}")
+            self.event("RELEASE", msg)
+            self.night.line(msg)
+        return plan
 
     def first_fill_t(self, ex):
         """When our current holding on ex was opened (the fill that took the net position away from flat), else 0."""

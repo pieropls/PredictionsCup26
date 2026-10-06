@@ -270,6 +270,8 @@ class MarketBot:
             for sub, q in rel["subs"].items():
                 out.append(want(close, "buy", px, q, px - 0.005, px, 2 * QTY_TOL, "release", qmax=q, sub=sub, ttl=RECYCLE_TAKE_TTL_S,
                                 reduce=True))
+                if rel.get("rule0_margin") is not None:
+                    out[-1]["rule0_margin"] = rel["rule0_margin"]   # the cash rebuild's exception (Piero 23:00)
             subs = {k2: (v - (rel["subs"].get(k2, 0) if v > 0 else -rel["subs"].get(k2, 0))) for k2, v in subs.items()}
         # recycler: every holding sub-book released to it, plus a bid above fair for MM / sniper holdings; only sub-books
         # on the same side as the net position (an audit residue of the other sign is not shares we hold)
@@ -375,7 +377,7 @@ class MarketBot:
                     add_entry(side, px, s.get("take_notional", TAKE_NOTIONAL), "take", px - 0.01, px, TAKE_TTL_S, sub="sniper")
 
         out += fat
-        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"] if x.get("l0") else x["px"] - 0.005, x["px"], QTY_TOL, "dump", sub=x["sub"], ttl=DUMP_TTL_S)
+        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"] if x.get("l0") else x["px"] - 0.005, x["px"], QTY_TOL, "dump", sub=x["sub"], ttl=x.get("ttl") or DUMP_TTL_S)
                 for x in (s.get("dump") or [])]                 # dump v3 (day 4 §2): 1c level spacing -> a 1-tick band
         # day 3 §2 longshot catcher: resting 0.5-1c bids (re-placed only when gone), exits at 3x entry / the SIG 6-h median
         out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], 1.0, "longshot", sub=x["sub"], ttl=LONG_TTL_S)

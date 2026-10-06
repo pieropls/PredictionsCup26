@@ -185,6 +185,12 @@ RI_RACES, RI_ENGINE_CAP = ("Rhode Island Senate", "Rhode Island Governor"), 10_0
 DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP = 0.90, 0.05, 2_000   # day 7 §2.1: L0 joins the SIG best bid when it sits >= 5c under a >= 90% fair
 DUMP_L0_REFILLS, DUMP_L0_WINDOW_S = 3, 600            # sweep follow: at most 3 refills per side per 10 min while the tranche is open
 UNCOVERED_LOG_S = 30            # §1.3: an eligible side without its level for > 30 s is logged
+# Oct 5 22:50 (Piero): hard cash guards after the floor breach
+ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE = 2.0, 0.01, 3.0, 2_000   # resting entries <= 2 x free cash; near-touch bids count 3x; < 2k free: none
+DUMP_NEAR_TTL_S, DUMP_NEAR_GAP = 1200, 0.02      # L0 and levels within 2c of the touch: 20-min TTL (make-before-break); deeper 60 min
+DUMP_L0_BUDGET = 8_000          # L0 holds <= 8k at cost across all sides; refills only under it; L1-L4 get the cash first
+REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2 = 15_000, 0.07, 0.10   # rebuild free cash to 15k: engine lots above entry + 0.5c at the bid, lowest gap first
+REBUILD_MARGIN, REBUILD_MARGIN_GAP = -0.01, 0.05 # Piero 23:00: lots <= 5c under fair may go down to entry - 1c for the rebuild
 DUMP_V3_OFFSETS_DAY, DUMP_V3_WEIGHTS_DAY = [0.01, 0.02, 0.035, 0.05], [0.45, 0.25, 0.15, 0.15]   # §1.3: L4 in the day window (replay: 5c)
 DUMP_RECYCLE_FAST_S = 1800      # §1.5: cash-constrained -> a tranche older than 30 min sells back at fill + 0.5c
 CONSTRAINED_FREE, CONSTRAINED_FILLS_30M = 10_000, 3_000   # §3.3: constrained = free cash < 10k AND dump fills >= 3k cost in 30 min
