@@ -2332,7 +2332,8 @@ class Engine:
                 near = i == 4 or (best_s is not None and px >= best_s - DUMP_NEAR_GAP - 1e-9)
                 rows.append((i, i in resting.get(key, set()), ex, dict(side=side, px=px, qty=q, sub=sub, level=i, edge=fs - px, arena=ex in arena, l0=i == 4,
                                                                         ttl=DUMP_NEAR_TTL_S if near else DUMP_TTL_S,
-                                                                        weight=ENTRY_WEIGHTS["L0" if i == 4 else f"L{i + 1}"], lname="L0" if i == 4 else f"L{i + 1}")))   # day 8 §2
+                                                                        weight=ENTRY_WEIGHTS["L0" if i == 4 else f"L{i + 1}"], lname="L0" if i == 4 else f"L{i + 1}",
+                                                                        px_rest=rest_px.get(sub))))   # day 8 §2 / C72: the resting price, if any
         # day 7 §1.3 make-before-break: a level due for its refresh is placed again first, then the old one is cancelled
         # (resting orders lock no cash; the overlap is seconds). A side is never left without its level.
         wanted = {w["sub"]: (ex, w) for _, _, ex, w in rows}
@@ -2347,7 +2348,11 @@ class Engine:
             due = age >= 0.75 * ttl + jitter
             reprice = (w is not None and not w[1]["l0"] and not (w[1]["px"] - DUMP_WANT_BAND_LO - 1e-9 <= o["price"] <= w[1]["px"] + DUMP_WANT_BAND_HI + 1e-9))
             reprice = reprice or (w is not None and w[1]["l0"] and not (w[1]["px"] - 0.005 - 1e-9 <= o["price"] <= w[1]["px"] + 1e-9))
-            if not (due or reprice) or api.writes_left() < DUMP_WRITES_IDLE:
+            if not (due or reprice):
+                continue
+            if api.writes_left() < DUMP_WRITES_IDLE:        # C72: no writes to spare: the old level stays (the want keeps its price)
+                if reprice:
+                    w[1]["px"] = o["price"]
                 continue
             if w is not None:                               # day 9 §4: a re-price is also make-before-break (place first, then cancel)
                 ex_, spec = w
@@ -2407,7 +2412,17 @@ class Engine:
         weight (+0.5c for arena markets). A level that does not fit is cut (a resting one gets cancelled by the reconcile)."""
         def xe(w):
             return w["edge"] * DUMP_REACH[w["lname"]] / w["weight"] + (0.005 if w.get("arena") else 0.0)
-        order = sorted(rows, key=lambda r: (not r[1], not r[3]["l0"], -xe(r[3])))
+        # C72 (§3 target >= 60 sides): among NEW levels, the best level of a side that has no level yet goes before any
+        # second level of a side that already has one
+        has = {(ex, w["side"]) for _, is_resting, ex, w in rows if is_resting}
+        best_new = {}
+        for lvl, is_resting, ex, w in rows:
+            if not is_resting and (ex, w["side"]) not in has:
+                k_ = (ex, w["side"])
+                if k_ not in best_new or xe(w) > xe(best_new[k_]):
+                    best_new[k_] = w
+        first = {id(w) for w in best_new.values()}
+        order = sorted(rows, key=lambda r: (not r[1], not r[3]["l0"], id(r[3]) not in first, -xe(r[3])))
         out, cut, spent, l0_spent = [], [], 0.0, 0.0
         for lvl, is_resting, ex, w in order:
             c_ = w["px"] * w["qty"] * w["weight"]

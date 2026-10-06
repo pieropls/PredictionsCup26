@@ -3204,6 +3204,12 @@ class CashGuardTests(EngineCase):
         self.assertEqual([r[2] for r in cut], ["n"])
         self.assertIn("k", eng.dump_cov)
         self.assertIn("by_l", eng.dump_cov)
+        # C72 breadth-first: side A has two strong levels, side B one weak level; with room for two, B's level comes before A's second
+        rows = [row("L1", 0.04, ex="A"), row("L2", 0.04, ex="A"), row("L1", 0.01, ex="B")]
+        rows[1][3]["sub"] = "dump:A:yes:L2"
+        out, cut, spent = eng.allocate_levels(rows, budget=2 * 0.90 * 1000 * 0.5 + 1.0, l0_room=1e9)
+        self.assertEqual(sorted(r[2] for r in out), ["A", "B"], out)
+        self.assertEqual([r[2] for r in cut], ["A"])
 
     def test_near_touch_levels_have_a_20_min_ttl_and_l0_stops_at_8k(self):
         fake, eng, favs = self.rig(cash_above_floor=60_000)
