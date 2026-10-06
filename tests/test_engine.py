@@ -1366,7 +1366,7 @@ class FatFingerTests(EngineCase):
         self.assertEqual(c.state("fatfinger"), "full")
 
     def test_full_cap_covers_95_percent(self):
-        fake, eng = self.rig(cash_above_floor=40_000)
+        fake, eng = self.rig(cash_above_floor=400_000)       # under the Oct 5 entry budget (2 x free), 40k free would allow 80k of levels
         eng.controls.layer("fatfinger")["state"] = "full"
         self.settle(eng, fake, 25)
         cov = eng.dash_state()["coverage"]
