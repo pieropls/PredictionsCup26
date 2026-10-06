@@ -1700,9 +1700,17 @@ class Engine:
                                                         qtol=1.0 if key in recent_fill else QTY_TOL))
                 if not resting.get(key) and f"{ex}|{side}" not in cov["reasons"]:
                     cov["reasons"][f"{ex}|{side}"] = "being placed (paced at 30% of SIG capacity)"
-        self.coverage = cov
         if self.entry_budget(min(self.cash_hist) if self.cash_hist else 0.0) <= 0:   # Oct 5 22:50 guard (b): under 2k free, no levels
+            for ex in plan:
+                for w in plan[ex]:
+                    cov["reasons"][f"{ex}|{w['side']}"] = "reserve not funded"
+            for k in list(cov["reasons"]):
+                if cov["reasons"][k].startswith("being placed"):
+                    cov["reasons"][k] = "reserve not funded"
+            cov["covered"] = 0
+            self.coverage = cov
             return {}
+        self.coverage = cov
         return plan
 
     def fat_fill_events(self, fills):
