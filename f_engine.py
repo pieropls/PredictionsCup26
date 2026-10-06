@@ -1613,7 +1613,7 @@ class Engine:
     def fat_plan(self, now):
         """{ex: [want-spec]} for the fat-finger layer; also refreshes queue reads (<= FAT_BOOK_READS per loop, tier A first,
         every FAT_QUEUE_S) and the news guard; records coverage reasons."""
-        if not self.controls.on("fatfinger") or self.entry_budget(min(self.cash_hist) if self.cash_hist else 0.0) <= 0:
+        if not self.controls.on("fatfinger"):
             self.coverage = None
             return {}
         tier_a = self.fat_tiers()
@@ -1701,6 +1701,8 @@ class Engine:
                 if not resting.get(key) and f"{ex}|{side}" not in cov["reasons"]:
                     cov["reasons"][f"{ex}|{side}"] = "being placed (paced at 30% of SIG capacity)"
         self.coverage = cov
+        if self.entry_budget(min(self.cash_hist) if self.cash_hist else 0.0) <= 0:   # Oct 5 22:50 guard (b): under 2k free, no levels
+            return {}
         return plan
 
     def fat_fill_events(self, fills):
