@@ -418,7 +418,7 @@ class MarketBot:
             x = sw["buy"]
             out.append(want(x["side"], "buy", x["px"], int(x["qty"]), x["px"], x["px"], 2 * QTY_TOL, "swing", sub=x["sub"], ttl=x["ttl"]))
         for x in s.get("wall_exits") or []:
-            q = abs(subs.get(x["sub"], 0))
+            q = min(abs(subs.get(x["sub"], 0)), x.get("qty", float("inf")))   # day 10 §3: at most the hold part when the swing owns the slice
             if q >= MIN_QTY:
                 reduce_buy(x["side"], x["sell_px"], int(q), "wallexit", x["sub"], WALL_HOLD_S, band=0.0, a2=False)
         self.orders = out

@@ -3455,7 +3455,12 @@ class Engine:
             exit_yes = float(w["exit_px"])                    # the buy-back price in YES terms
             sell_px = (1 - exit_yes) if side == "no" else exit_yes   # what the held side fetches
             sell_px = max(sell_px, avg + RULE0_MARGIN)        # never below entry + 0.5c (rule 0)
-            self.wall_view.setdefault(ex, []).append(dict(sub=sub, side=side, sell_px=round(sell_px, 3), avg=avg))
+            q_exit = abs(q)
+            if sub in (self.swing_cfg().get("wall_subs") or []) and self.controls.on("swing"):   # day 10 §3: the swing owns the slice; the wall exit covers only the hold part
+                q_exit = max(0.0, abs(q) - self.swing_slice_alloc().get(sub, 0.0))
+            if q_exit < MIN_QTY:
+                continue
+            self.wall_view.setdefault(ex, []).append(dict(sub=sub, side=side, sell_px=round(sell_px, 3), avg=avg, qty=int(q_exit)))
         if changed:
             with c.lock:
                 c.save()
@@ -4202,6 +4207,21 @@ class Engine:
         slice_held = min(float(cfg["slice"]), slice_in_walls + swing_q)
         sold_out = max(0.0, float(cfg["slice"]) - slice_held)
         return slice_held, sold_out, slice_in_walls, swing_q
+
+    def swing_slice_alloc(self):
+        """{wall sub: shares of the slice that sit in it} (largest sub first, like the sell leg) — the rest of each sub is the hold part."""
+        cfg = self.swing_cfg()
+        if not cfg:
+            return {}
+        ex = str(cfg["ex"])
+        books = self.ledger.subbooks.get(ex, {})
+        _, _, slice_in_walls, _ = self.swing_state()
+        out, left = {}, slice_in_walls
+        for sub in sorted(cfg["wall_subs"], key=lambda s: -abs(books.get(s, 0.0))):
+            take = min(abs(books.get(sub, 0.0)), left)
+            out[sub] = take
+            left -= take
+        return out
 
     def swing_plan(self, now):
         """{ex: {sells: [...], buy: {...}}}: the sell leg rests a NO ask at sell_px for the part of the slice we hold (swing lots

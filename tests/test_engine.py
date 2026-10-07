@@ -3503,7 +3503,7 @@ class SwingTests(EngineCase):
         subs = [f"wall:{ex}:no:wA", f"wall:{ex}:no:wB"]
         eng.ledger.subbooks[ex] = {subs[0]: -11_900.0, subs[1]: -10_000.0}
         for s_ in subs:
-            eng.ledger.tranches[s_] = dict(ex=ex, side="no", kind="wall", state="held", ts=time.time(), t="x", avg=0.85)
+            eng.ledger.tranches[s_] = dict(ex=ex, side="no", kind="wall", state="open", ts=time.time(), t="x", avg=0.85)   # open (not "held"): the under-15k buy-back may rest
         fake.pos[ex] = -21_900
         eng.controls.d["swing"] = dict(a_config.SWING, ex=ex, wall_subs=subs, hold_qty=6_900.0, stats=dict(sold=0.0, bought=0.0, realized=0.0, cycles=0, legs=[]))
         loop(eng, fake)
@@ -3543,6 +3543,19 @@ class SwingTests(EngineCase):
         self.assertEqual(held_walls, 6_900.0)
         self.assertEqual(self.legs(eng, fake, ex, "swingsell"), [])
         self.assertEqual(self.legs(eng, fake, ex, "swing")[0]["qty"], 15_000, "all sold: the buy-back rests for the whole slice")
+        # the wall's own under-15k buy-back covers only the hold part (6,900), never the slice the swing owns
+        eng.ledger.subbooks[ex] = {f"wall:{ex}:no:wA": -11_900.0, f"wall:{ex}:no:wB": -10_000.0}
+        fake.pos[ex] = -21_900
+        eng.controls.d["walls"] = [dict(id="wA", ex=ex, side="no", px=0.85, qty=11_900, exit_px=0.13, ttl_s=259200, hold_s=259200, news_c=0.02, t=time.time(), state="active", filled=11_900.0, exit_min_free=15_000, once=True, by="Piero"),
+                                   dict(id="wB", ex=ex, side="no", px=0.85, qty=10_000, exit_px=0.13, ttl_s=259200, hold_s=259200, news_c=0.02, t=time.time(), state="active", filled=10_000.0, exit_min_free=15_000, once=True, by="Piero")]
+        eng.controls.d["layers"]["wall"] = dict(state="full", caps={}, killed=None)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 12_000)   # free 12k < 15k: the wall buy-back rests
+        for _ in range(3):
+            loop(eng, fake)
+        wexits = self.legs(eng, fake, ex, "wallexit")
+        self.assertEqual(sum(o["qty"] for o in wexits), 6_900, wexits)
+        self.assertEqual(sum(o["qty"] for o in self.legs(eng, fake, ex, "swingsell")), 15_000)
         FAIR[ex] = 0.04                                   # fair YES > 0.03: both legs pulled
         loop(eng, fake); loop(eng, fake)
         self.assertEqual(self.legs(eng, fake, ex, "swing"), [])
