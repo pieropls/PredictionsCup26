@@ -49,7 +49,8 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                       RI_RACES, RI_ENGINE_CAP, DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP, DUMP_L0_REFILLS, DUMP_L0_WINDOW_S, UNCOVERED_LOG_S,
                       ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE, DUMP_NEAR_TTL_S, DUMP_NEAR_GAP, DUMP_L0_BUDGET, ENTRY_WEIGHTS, REBUILD_EXC_FREE,
                      DUMP_REACH, BUDGET_K_MAX, BUDGET_K_MIN, BUDGET_K_STEP, BUDGET_K_DOWN_S, BUDGET_K_UP_S, BUDGET_K_PEAK_DOWN, BUDGET_K_PEAK_UP,
-                     DUMP_WANT_BAND_LO, DUMP_WANT_BAND_HI, DUMP_GAP_LOG_S,
+                     DUMP_WANT_BAND_LO, DUMP_WANT_BAND_HI, DUMP_GAP_LOG_S, DUMP_LADDER_FIRST, DUMP_LADDER_STEP_S, DUMP_LADDER_TICK,
+                     BUDGET_K_TABLE, BUDGET_K_TIER_HYST, RI_SENATE_RACE, RI_SENATE_ADD, RI_SENATE_MIN_EDGE,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
@@ -425,6 +426,7 @@ class Engine:
         self.coverage, self.unmapped_new, self.unmapped_markets, self.cov_logged = None, set(), {}, set()
         self.dump_cov = None                                # day 8 §2: dump coverage (sides with >= 1 level / eligible sides)
         self.dump_gap_since, self.dump_gap_log, self.dump_cut_t = {}, {}, {}   # day 9 §4: gaps on funded sides, with cause
+        self.ri_senate_base = None                          # day 9 §9.4: RI Senate holdings at cost when C73 started (set by day9_migrations)
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
         self.wake, self.rt_lock, self.rt_pending = threading.Event(), threading.Lock(), []   # realtime -> planner
@@ -2139,19 +2141,42 @@ class Engine:
         bk = self.controls.d.get("budget_k") or {}
         return float(bk.get("k") or BUDGET_K_MAX)
 
-    def adjust_budget_k(self, now):
-        """Day 9 §2 live auto-adjust: k -0.5 after 30 min with bounded peak use > 70% or any constrained minute; k +0.5 after
-        2 h with peak use < 40%, never above k_max (the replay pick); a new k_max in the config resets k to it. Logged."""
+    def k_max_for(self, free, cur_tier=None):
+        """Day 9 §9.2: k_max from the free-cash table; a tier is entered upward only once free is 1k past its line."""
+        tiers = sorted(BUDGET_K_TABLE, key=lambda t: -t[0])
+        pick = tiers[-1][0]
+        for lo, _ in tiers:
+            if free >= lo + (BUDGET_K_TIER_HYST if (cur_tier is None or lo > cur_tier) and lo > 0 else 0):
+                pick = lo
+                break
+        return pick, dict(BUDGET_K_TABLE)[pick]
+
+    def adjust_budget_k(self, now, free=None):
+        """Day 9 §2 live auto-adjust inside the §9.2 table: k_max = f(free cash); k -0.5 after 30 min with bounded peak use
+        > 70% or any constrained minute; k +0.5 after 2 h with peak use < 40%, never above k_max; every change logged."""
         c = self.controls
         bk = c.d.get("budget_k") or {}
-        if not bk or float(bk.get("k_max") or 0) != float(BUDGET_K_MAX):
-            bk = dict(k=float(BUDGET_K_MAX), k_max=float(BUDGET_K_MAX), t=now, hist=(bk.get("hist") or [])[-48:] + [dict(t=stamp(), k=float(BUDGET_K_MAX), why="k_max from the replay")])
+        if free is None:
+            free = (min(self.cash_hist) if self.cash_hist else 0.0) - CASH_RESERVE
+        tier, kmax = self.k_max_for(free, bk.get("tier"))
+        if not bk or bk.get("tier") is None:
+            bk = dict(k=float(kmax), k_max=float(kmax), tier=tier, t=now, hist=(bk.get("hist") or [])[-48:] + [dict(t=stamp(), k=float(kmax), why=f"k_max table, free {free:,.0f}")])
             with c.lock:
                 c.d["budget_k"] = bk
                 c.save()
-            self.event("CASH", f"BUDGET k = {bk['k']:g} x free cash above the floor (replay pick k_max {BUDGET_K_MAX:g}; -0.5 after 30 min > {BUDGET_K_PEAK_DOWN:.0%} "
+            self.event("CASH", f"BUDGET k = {bk['k']:g} x free cash above the floor (k_max {kmax:g} for free {free:,.0f}; table {BUDGET_K_TABLE}; -0.5 after 30 min > {BUDGET_K_PEAK_DOWN:.0%} "
                                f"peak use or a constrained minute, +0.5 after 2 h < {BUDGET_K_PEAK_UP:.0%})")
             return
+        if tier != bk.get("tier") or float(bk.get("k_max") or 0) != float(kmax):
+            k_old = float(bk["k"])
+            k_new = min(k_old, float(kmax)) if kmax < float(bk.get("k_max") or kmax) else k_old   # a lower tier caps k at once; a higher one lets the +0.5 rule climb
+            with c.lock:
+                bk.update(k=k_new, k_max=float(kmax), tier=tier, hist=(bk.get("hist") or [])[-48:] + [dict(t=stamp(), k=k_new, why=f"k_max {kmax:g} (free {free:,.0f})")])
+                c.d["budget_k"] = bk
+                c.save()
+            msg = f"BUDGET k_max -> {kmax:g} (free cash {free:,.0f}); k {k_old:g} -> {k_new:g}"
+            self.event("CASH", msg)
+            self.night.line(msg)
         k, since = float(bk["k"]), now - float(bk.get("t") or now)
         use30 = max((u for t, u in self.cap_use_hist if t >= now - BUDGET_K_DOWN_S and u is not None), default=0.0)
         use2h = max((u for t, u in self.cap_use_hist if t >= now - BUDGET_K_UP_S and u is not None), default=0.0)
@@ -2192,14 +2217,15 @@ class Engine:
         (the Oct 2 RI Senate R NO book) and the manual position do not count."""
         race = (self.meta.get(ex) or {}).get("race")
         ri = race in RI_RACES
-        cap = RI_ENGINE_CAP if ri else next(c for lo, c in DUMP_CONC_CAPS if fs >= lo - 1e-9)
+        senate = race == RI_SENATE_RACE and self.ri_senate_base is not None   # day 9 §9.4: +10k beyond the Oct 6 holdings, all subs count
+        cap = (self.ri_senate_base + RI_SENATE_ADD) if senate else RI_ENGINE_CAP if ri else next(c for lo, c in DUMP_CONC_CAPS if fs >= lo - 1e-9)
         used = 0.0
         for e, m in self.meta.items():
             if m.get("race") != race:
                 continue
             books = self.ledger.subbooks.get(e, {})
             for sub, q in books.items():
-                if abs(q) < 1 or sub == "manual" or (ri and not sub.startswith(("dump:", "touch:", "scalp:", "sniper"))):
+                if abs(q) < 1 or (not senate and (sub == "manual" or (ri and not sub.startswith(("dump:", "touch:", "scalp:", "sniper"))))):
                     continue
                 sd = "yes" if q > 0 else "no"
                 avg = (self.ledger.tranches.get(sub) or {}).get("avg") or ((self.book.get(e) or {}).get("row") or {}).get("avgCost") or self.sig_mark(e, sd) or 0.0
@@ -2323,6 +2349,8 @@ class Engine:
             books = self.ledger.subbooks.get(ex, {})
             best_s = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
             for i, px, q in self.dump_levels(ex, side, fs, rs, cost, room=room, l0_ok=l0_ok):
+                if self.ri_senate_base is not None and (self.meta.get(ex) or {}).get("race") == RI_SENATE_RACE and px > fs - RI_SENATE_MIN_EDGE + 1e-9:
+                    continue                                # day 9 §9.4: on RI Senate only levels >= 15c under fair
                 sub = f"dump:{ex}:{side}:{'L0' if i == 4 else i}"
                 if abs(books.get(sub, 0)) >= MIN_QTY:
                     if i != 4 or self.l0_refills(sub, now) >= DUMP_L0_REFILLS + 1:   # the first fill + 3 refills per 10 min
@@ -2486,16 +2514,10 @@ class Engine:
             pre, fs = t.get("pre_ref_side"), self.side_fair(ex, t["side"])
             r_now = self.ref(ex)
             ref_side = None if r_now is None else (r_now if t["side"] == "yes" else 1 - r_now)
-            if self.constrained and age > DUMP_RECYCLE_FAST_S:   # day 6 §1.5: cash binds -> a tranche > 30 min old goes at fill + 0.5c
-                target, floor_ = avg + DUMP_STEP2_MIN, avg + DUMP_STEP2_MIN
-            elif sub.endswith(":L0"):                        # day 7 §2.1: L0 tranches sell at entry + 1.5c, after 60 min entry + 0.5c
-                target = floor_ = avg + (DUMP_SELL_MIN if age <= DUMP_STEP2_S else DUMP_STEP2_MIN)
-            elif age <= DUMP_STEP1_S:                        # day 5 §1.4: 0-20 min max(pre-dump ref, fill + 1.5c)
-                target, floor_ = max(avg + DUMP_SELL_MIN, pre or 0.0), avg + DUMP_STEP_MIN
-            elif age <= DUMP_STEP2_S:                        # 20-60 min: max(fill + 1c, ref - 0.5c)
-                target, floor_ = max(avg + DUMP_STEP_MIN, (ref_side - 0.005) if ref_side is not None else 0.0), avg + DUMP_STEP_MIN
-            else:                                            # > 60 min: fill + 0.5c
-                target, floor_ = avg + DUMP_STEP2_MIN, avg + DUMP_STEP2_MIN
+            # day 9 §9.1 (Piero, C73): first ask at fill + 1c, one tick lower every 10 min, floor at entry + 0.5c (rule 0);
+            # the same ladder for every dump tranche (L0 included); never above fair_side - 0.5c (the A2 exception), never under the floor
+            floor_ = avg + RULE0_MARGIN
+            target = max(floor_, avg + DUMP_LADDER_FIRST - DUMP_LADDER_TICK * int(age // DUMP_LADDER_STEP_S))
             if fs is not None:
                 target = min(target, fs - DUMP_SELL_FAIR_GAP)
             rebound = bots.tick_up(round(max(target, floor_), 6))
@@ -3976,6 +3998,31 @@ class Engine:
         """Once: log the day-9 rules (the k budget, expected-edge ranking, hysteresis, re-price make-before-break)."""
         c = self.controls
         d9 = c.d.setdefault("day9", {})
+        if d9.get("ri_senate_base") is None:               # §9.4: the Oct 6 holdings on the RI Senate race at cost (every sub-book)
+            base = 0.0
+            for e, m in self.meta.items():
+                if m.get("race") != RI_SENATE_RACE:
+                    continue
+                for sub, q in self.ledger.subbooks.get(e, {}).items():
+                    if abs(q) < 1:
+                        continue
+                    sd = "yes" if q > 0 else "no"
+                    avg = (self.ledger.tranches.get(sub) or {}).get("avg") or ((self.book.get(e) or {}).get("row") or {}).get("avgCost") or self.sig_mark(e, sd) or 0.0
+                    base += abs(q) * float(avg)
+            with c.lock:
+                d9["ri_senate_base"] = round(base, 2)
+                c.save()
+            self.event("DUMP", f"DAY 9 §9.4: RI Senate holdings at cost {base:,.0f} recorded; the engine may add up to {RI_SENATE_ADD:,} on levels >= {RI_SENATE_MIN_EDGE * 100:.0f}c under fair")
+        self.ri_senate_base = float(d9["ri_senate_base"])
+        if d9.get("c73"):
+            return
+        with c.lock:
+            d9["c73"] = stamp()
+            c.save()
+        msg = (f"DAY 9 (C73): sell-back ladder = fill + {DUMP_LADDER_FIRST * 100:g}c, one tick lower every {DUMP_LADDER_STEP_S // 60} min, floor entry + 0.5c (rule 0); "
+               f"k_max by free cash {BUDGET_K_TABLE}; RI Senate +{RI_SENATE_ADD:,} beyond {self.ri_senate_base:,.0f} on levels >= 15c under fair")
+        self.event("DUMP", msg)
+        self.night.line(msg)
         if d9.get("c71"):
             return
         with c.lock:

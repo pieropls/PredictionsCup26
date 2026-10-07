@@ -183,6 +183,7 @@ RATCHET_MIN_FILLS_DAY, RATCHET_MIN_FILLS_NIGHT = 10, 5   # fewer fills in the ho
 DAY_WINDOW = (6, 15)            # PT hours of the day window (06:00-15:00): 10x the dumps of the night
 DUMP_CONC_CAPS = [(0.95, 20_000), (0.90, 15_000), (0.0, 12_000)]   # day 7 §2.2: cap per RACE by fair_side (position + resting at cost, all engine layers)
 RI_RACES, RI_ENGINE_CAP = ("Rhode Island Senate", "Rhode Island Governor"), 10_000   # day 7 §2.3: engine tranches get their own 10k on RI beyond the old position
+RI_SENATE_RACE, RI_SENATE_ADD, RI_SENATE_MIN_EDGE = "Rhode Island Senate", 10_000, 0.15   # day 9 §9.4 (Piero): +10k at cost on RI Senate beyond the Oct 6 holdings, only on levels >= 15c under fair
 DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP = 0.90, 0.05, 2_000   # day 7 §2.1: L0 joins the SIG best bid when it sits >= 5c under a >= 90% fair
 DUMP_L0_REFILLS, DUMP_L0_WINDOW_S = 3, 600            # sweep follow: at most 3 refills per side per 10 min while the tranche is open
 UNCOVERED_LOG_S = 30            # §1.3: an eligible side without its level for > 30 s is logged
@@ -191,6 +192,8 @@ ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE = 1.5, 0.01
 ENTRY_WEIGHTS = dict(L0=1.0, L1=0.5, L2=0.3, L3=0.15, L4=0.15, scalp=1.0, wall=1.0, fatfinger=0.05, longshot=0.05)
 DUMP_REACH = dict(L0=0.15, L1=0.40, L2=0.25, L3=0.10, L4=0.014)   # day 9 §3: share of dumps that reach the level (L0 = measured fill share)
 BUDGET_K_MAX, BUDGET_K_MIN, BUDGET_K_STEP = 2.0, 1.0, 0.5          # day 9 §2: k x free; k_max from the replay (set before C71's build)
+BUDGET_K_TABLE = [(20_000, 3.0), (15_000, 3.0), (0, 2.0)]          # day 9 §9.2: k_max by free cash above the floor (>= 20k: 3.0; 15-20k: the replay-passing value; below: 2.0)
+BUDGET_K_TIER_HYST = 1_000                                         # move up a tier only once free is 1k past its line (no flapping)
 BUDGET_K_DOWN_S, BUDGET_K_UP_S, BUDGET_K_PEAK_DOWN, BUDGET_K_PEAK_UP = 1800, 7200, 0.70, 0.40   # -0.5 after 30 min > 70% or constrained; +0.5 after 2 h < 40%
 DUMP_WANT_BAND_LO, DUMP_WANT_BAND_HI, DUMP_GAP_LOG_S = 0.01, 0.005, 30   # day 9 §4: a resting level within [px - 1c, px + 0.5c] is kept; gaps > 30 s logged with cause   # day 8 §2 (replay reach 40/25/10/1%; ours since C64: L0 15%, L1 0.1%, L2-L3 0)
 DUMP_NEAR_TTL_S, DUMP_NEAR_GAP = 1200, 0.02      # L0 and levels within 2c of the touch: 20-min TTL (make-before-break); deeper 60 min
@@ -224,6 +227,7 @@ DUMP_CONC_CAP = 12_000                    # position (at cost) + resting dump bi
 DUMP_SELL_MIN, DUMP_SELL_FAIR_GAP = 0.015, 0.005   # sell-back at max(pre-dump ref, fill + 1.5c), <= fair_side - 0.5c
 DUMP_STEP1_S, DUMP_STEP2_S = 1200, 3600   # day 5 §1.4: after 20 min -> max(fill + 1c, ref - 0.5c); after 60 min -> fill + 0.5c
 DUMP_STEP_MIN, DUMP_STEP2_MIN = 0.01, 0.005
+DUMP_LADDER_FIRST, DUMP_LADDER_STEP_S, DUMP_LADDER_TICK = 0.01, 600, 0.005   # day 9 §9.1 (Piero): first ask fill + 1c, one tick lower every 10 min, floor entry + 0.5c (rule 0)
 DUMP_HOLD_S = 6 * 3600                    # unfilled after 6 h: the tranche goes to inventory (held to settlement)
 DUMP_TTL_S, DUMP_QUEUE_S, DUMP_BOOK_READS = 3600, 1800, 2   # day 6 §4.1: dead-man TTL 60 min (was 6 h)
 DUMP_NEWS_DROP = 0.03                     # fair_side -3c in 10 min -> that side's levels pulled 30 min

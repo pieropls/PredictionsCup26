@@ -1595,15 +1595,14 @@ class DumpV3Tests(EngineCase):
         rb = [o for o in self.dump_orders(eng, fake, ex, "dumpexit")]
         self.assertEqual(len(rb), 1)
         sell = round(1 - rb[0]["price"], 3)
-        want = min(max(pre, top["price"] + 0.015), eng.fair[ex] - 0.005)
-        self.assertAlmostEqual(sell, bots.tick_up(max(want, top["price"] + 0.01)), places=3)
+        want = min(top["price"] + 0.01, eng.fair[ex] - 0.005)   # day 9 §9.1 (C73): first ask fill + 1c (<= fair - 0.5c), floor fill + 0.5c
+        self.assertAlmostEqual(sell, bots.tick_up(round(max(want, top["price"] + 0.005), 6)), places=3)
         self.assertLessEqual(sell, eng.fair[ex] - 0.005 + 1e-9)
-        t["ts"] -= 1300                                   # 20 min unfilled (day 5 §1.4): max(fill + 1c, ref - 0.5c)
+        t["ts"] -= 1300                                   # 21 min unfilled: two 10-min steps down -> the floor (fill + 0.5c)
         self.settle(eng, fake, favs, 2)
         rb2 = self.dump_orders(eng, fake, ex, "dumpexit")
-        want2 = min(max(top["price"] + 0.01, eng.ref(ex) - 0.005), eng.fair[ex] - 0.005)
-        self.assertAlmostEqual(round(1 - rb2[0]["price"], 3), bots.tick_up(round(max(want2, top["price"] + 0.01), 6)), places=3)
-        t["ts"] -= 2500                                   # 60 min unfilled: fill + 0.5c
+        self.assertAlmostEqual(round(1 - rb2[0]["price"], 3), bots.tick_up(round(top["price"] + 0.005, 6)), places=3)
+        t["ts"] -= 2500                                   # 60 min more: still the floor, never under entry + 0.5c (rule 0)
         self.settle(eng, fake, favs, 2)
         rb2 = self.dump_orders(eng, fake, ex, "dumpexit")
         self.assertAlmostEqual(round(1 - rb2[0]["price"], 3), bots.tick_up(round(top["price"] + 0.005, 6)), places=3)
@@ -1745,7 +1744,7 @@ class DumpV3Tests(EngineCase):
         self.assertAlmostEqual(t["avg"], bid, places=4)
         xs = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "dumpexit"]
         self.assertEqual(len(xs), 1, xs)
-        self.assertAlmostEqual(1 - xs[0]["price"], bots.tick_up(round(bid + a_config.DUMP_SELL_MIN, 6)), places=3, msg="entry + 1.5c")
+        self.assertAlmostEqual(1 - xs[0]["price"], bots.tick_up(round(min(bid + a_config.DUMP_LADDER_FIRST, eng.fair[ex] - 0.005), 6)), places=3, msg="entry + 1c (C73 ladder)")
         refills = [o for o in self.dump_orders(eng, fake, ex) if abs(o["price"] - bid) < 1e-9]
         self.assertEqual(len(refills), 1, "sweep follow: the level is back at the best bid while the tranche is open")
         t["ts"] -= a_config.DUMP_STEP2_S + 60
@@ -3138,7 +3137,7 @@ class CashGuardTests(EngineCase):
         self.assertEqual(sum(o["qty"] for o in wall), 12_000, "the wall rests in full")
         self.assertAlmostEqual(eng.wall_resting(), 12_000 * 0.88, delta=1.0)
         cov = eng.dump_cov
-        k = a_config.BUDGET_K_MAX
+        k = eng.budget_k()
         self.assertLessEqual(cov["weighted"], k * 20_000 - 12_000 * 0.88 + 1e-6, cov)
         ents = self.entries(eng, fake)
         weighted = sum(o["qty"] * o["price"] * self.weight_of(eng.ledger.orders[o["id"]]) for o in ents) + eng.wall_resting()
@@ -3151,8 +3150,9 @@ class CashGuardTests(EngineCase):
         fake, eng, favs = self.rig(cash_above_floor=20_000)
         now = time.time()
         c = eng.controls
-        self.assertEqual(eng.budget_k(), a_config.BUDGET_K_MAX)
-        self.assertEqual(c.d["budget_k"]["k_max"], a_config.BUDGET_K_MAX)
+        kmax = c.d["budget_k"]["k_max"]
+        self.assertEqual(eng.budget_k(), kmax)
+        self.assertEqual(kmax, eng.k_max_for(20_000)[1])
         k0 = eng.budget_k()
         eng.cap_use_hist.append((round(now), 0.80))              # peak use 80% in the last 30 min
         c.d["budget_k"]["t"] = now - 1000                        # only 17 min since the last step: no change yet
@@ -3175,8 +3175,8 @@ class CashGuardTests(EngineCase):
         for _ in range(5):
             c.d["budget_k"]["t"] = now - 7300
             eng.adjust_budget_k(now)
-        self.assertEqual(eng.budget_k(), a_config.BUDGET_K_MAX, "never above k_max")
-        self.assertLessEqual(eng.entry_budget(a_config.CASH_RESERVE + 10_000), a_config.BUDGET_K_MAX * 10_000 + 1e-6)
+        self.assertEqual(eng.budget_k(), kmax, "never above k_max")
+        self.assertLessEqual(eng.entry_budget(a_config.CASH_RESERVE + 10_000), kmax * 10_000 + 1e-6)
 
     def test_levels_ranked_by_expected_edge_l0_first_resting_kept(self):
         """Day 9 §3-§4: L0 first within its 8k cap, then (fair - price) x reach / weight; a resting level keeps its slot
@@ -3210,6 +3210,51 @@ class CashGuardTests(EngineCase):
         out, cut, spent = eng.allocate_levels(rows, budget=2 * 0.90 * 1000 * 0.5 + 1.0, l0_room=1e9)
         self.assertEqual(sorted(r[2] for r in out), ["A", "B"], out)
         self.assertEqual([r[2] for r in cut], ["A"])
+
+    def test_k_max_table_by_free_cash(self):
+        """Day 9 §9.2: k_max 3.0 at >= 20k free, 3.0 at 15-20k, 2.0 below 15k; a tier is entered upward only 1k past its
+        line; a lower tier caps k at once and every change is logged."""
+        fake, eng, favs = self.rig(cash_above_floor=20_000)
+        c = eng.controls
+        now = time.time()
+        self.assertEqual(eng.k_max_for(25_000)[1], 3.0)
+        self.assertEqual(eng.k_max_for(17_000)[1], 3.0)
+        self.assertEqual(eng.k_max_for(12_000)[1], 2.0)
+        self.assertEqual(eng.k_max_for(20_500, cur_tier=15_000)[1], 3.0)
+        self.assertEqual(eng.k_max_for(15_500, cur_tier=0)[1], 2.0, "15.5k from below: not yet 1k past the 15k line")
+        self.assertEqual(eng.k_max_for(16_100, cur_tier=0)[1], 3.0)
+        c.d["budget_k"] = dict(k=3.0, k_max=3.0, tier=20_000, t=now, hist=[])
+        eng.adjust_budget_k(now, free=12_000)
+        self.assertEqual((c.d["budget_k"]["k"], c.d["budget_k"]["k_max"], c.d["budget_k"]["tier"]), (2.0, 2.0, 0), "a lower tier caps k at once")
+        self.assertTrue(any("BUDGET k_max -> 2" in e["text"] for e in eng.events))
+        eng.adjust_budget_k(now, free=21_500)
+        self.assertEqual((c.d["budget_k"]["k"], c.d["budget_k"]["k_max"]), (2.0, 3.0), "a higher tier raises k_max; k climbs by the +0.5 rule")
+
+    def test_ri_senate_adds_10k_only_on_levels_15c_under_fair(self):
+        """Day 9 §9.4 (Piero): on the RI Senate race the engine may add 10k at cost beyond the recorded base (every sub-book
+        counts), and only levels >= 15c under fair are placed."""
+        fake, eng, favs = self.rig(cash_above_floor=60_000)
+        ex = favs[0]
+        eng.meta[ex]["race"] = a_config.RI_SENATE_RACE
+        eng.ri_senate_base = 15_000.0
+        fs = eng.fair[ex]
+        room0 = eng.race_room(ex, "yes", fs)
+        self.assertLessEqual(room0, 15_000 + a_config.RI_SENATE_ADD + 1e-6)
+        eng.ledger.subbooks.setdefault(ex, {})["inventory"] = 4_000.0   # old inventory counts on RI Senate
+        self.assertLess(eng.race_room(ex, "yes", fs), room0)
+        eng.ledger.subbooks[ex].pop("inventory")
+        for _ in range(3):
+            seed_ref(eng, ex, mid=fs - 0.06)                  # levels 7-10c under fair: none allowed on RI Senate
+            for e_ in favs[1:]:
+                seed_ref(eng, e_, mid=eng.fair[e_] - 0.06)
+            loop(eng, fake)
+        self.assertEqual([o for o in self.entries(eng, fake) if o["ex"] == ex and eng.ledger.orders[o["id"]]["layer"] == "dump"], [], "no level < 15c under fair on RI Senate")
+        for _ in range(3):
+            seed_ref(eng, ex, mid=fs - 0.17)                  # levels >= 15c under fair: allowed
+            loop(eng, fake)
+        lv = [o for o in self.entries(eng, fake) if o["ex"] == ex and eng.ledger.orders[o["id"]]["layer"] == "dump"]
+        self.assertTrue(lv)
+        self.assertTrue(all(o["price"] <= fs - 0.15 + 1e-9 for o in lv), [o["price"] for o in lv])
 
     def test_resting_levels_are_not_resized_for_small_cash_moves(self):
         """C72: a resting level keeps its quantity while the fresh size stays within x0.5..x2 of it (a fill or a sell-back
