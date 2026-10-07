@@ -1518,7 +1518,7 @@ class DumpV3Tests(EngineCase):
         eng.ex.capacity = 6000.0
         loop(eng, fake)
         favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None
-                and eng.fair[b.ex] >= 0.90]
+                and eng.fair[b.ex] >= 0.90 and eng.meta[b.ex].get("race") != a_config.RI_SENATE_RACE]   # C74: RI Senate has its own 15c rule
         self.assertTrue(favs)
         self.gap = ref_gap
         for ex in favs:                                   # SIG trades under Polymarket on favourites (the plan: 5-12c)
@@ -1768,11 +1768,15 @@ class DumpV3Tests(EngineCase):
             self.assertLessEqual(eng.race_room(ex, "yes", eng.fair[ex]), 0)
         ri = next((e_ for e_, m in eng.meta.items() if m.get("race") == "Rhode Island Senate" and m.get("party") == "R"), None)
         if ri:
+            eng.ri_senate_base = None                             # day 7 rule (before the C73 base is recorded): the engine's own 10k
             eng.ledger.subbooks[ri] = {"inventory": -14_401.0}       # the old RI Senate R NO book does not count
             self.assertAlmostEqual(eng.race_room(ri, "no", 0.99), a_config.RI_ENGINE_CAP, delta=1)
             eng.ledger.subbooks[ri]["dump:%s:no:L0" % ri] = -4_000.0
             eng.ledger.tranches["dump:%s:no:L0" % ri] = dict(ex=ri, side="no", kind="dump", state="open", ts=time.time(), t="x", avg=0.9)
             self.assertAlmostEqual(eng.race_room(ri, "no", 0.99), a_config.RI_ENGINE_CAP - 3_600, delta=1)
+            eng.ri_senate_base = 15_000.0                         # day 9 §9.4: base + 10k, every sub-book counts (the inventory at its SIG cost)
+            inv_avg = ((eng.book.get(ri) or {}).get("row") or {}).get("avgCost") or eng.sig_mark(ri, "no")
+            self.assertAlmostEqual(eng.race_room(ri, "no", 0.99), 25_000 - 14_401 * inv_avg - 3_600, delta=1)
 
     def test_touch_book_becomes_l0_tranches_and_the_ratchet_replays_its_history(self):
         fresh_data(layers=dict(position=dict(state="full"), dump=dict(state="full"), touch=dict(state="full")))
@@ -1917,7 +1921,7 @@ class OrderTruthTests(EngineCase):
         eng.ex.capacity = 6000.0
         loop(eng, fake)
         favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None
-                and eng.fair[b.ex] >= 0.93]
+                and eng.fair[b.ex] >= 0.93 and eng.meta[b.ex].get("race") != a_config.RI_SENATE_RACE]   # C74: RI Senate has its own 15c rule
         for _ in range(3):
             for ex in favs:
                 seed_ref(eng, ex, mid=eng.fair[ex] - 0.01)
@@ -2916,7 +2920,8 @@ class TravelTests(EngineCase):
         eng = engine(fake)
         eng.ex.capacity = 6000.0
         loop(eng, fake)
-        favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] >= 0.90]
+        favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] >= 0.90
+                and eng.meta[b.ex].get("race") != a_config.RI_SENATE_RACE]   # C74: RI Senate has its own 15c rule
         for _ in range(4):                                # like DumpV3Tests.settle: SIG trades 6c under fair on the favourites
             eng.ex.capacity = 6000.0
             for ex in favs:
@@ -3066,7 +3071,8 @@ class CashGuardTests(EngineCase):
         eng = engine(fake)
         eng.ex.capacity = 6000.0
         loop(eng, fake)
-        favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] >= 0.90]
+        favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] >= 0.90
+                and eng.meta[b.ex].get("race") != a_config.RI_SENATE_RACE]   # C74: RI Senate has its own 15c rule
         for _ in range(4):
             eng.ex.capacity = 6000.0
             for ex in favs:
@@ -3106,7 +3112,8 @@ class CashGuardTests(EngineCase):
         eng = engine(fake)
         eng.ex.capacity = 6000.0
         loop(eng, fake)
-        favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] >= 0.90]
+        favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] >= 0.90
+                and eng.meta[b.ex].get("race") != a_config.RI_SENATE_RACE]   # C74: RI Senate has its own 15c rule
         for _ in range(4):
             eng.ex.capacity = 6000.0
             for ex in favs:
@@ -3236,6 +3243,13 @@ class CashGuardTests(EngineCase):
         fake, eng, favs = self.rig(cash_above_floor=60_000)
         ex = favs[0]
         eng.meta[ex]["race"] = a_config.RI_SENATE_RACE
+        eng.ri_senate_base = None                             # C74: the base is recorded on a priced loop from every sub-book at cost
+        eng.ledger.subbooks.setdefault(ex, {})["inventory"] = 2_000.0
+        eng.record_ri_base()
+        self.assertIsNotNone(eng.ri_senate_base)
+        self.assertGreater(eng.ri_senate_base, 1_000, "2,000 shares at a real price, not 0")
+        self.assertEqual(eng.controls.d["day9"]["ri_senate_base"], round(eng.ri_senate_base, 2))
+        eng.ledger.subbooks[ex].pop("inventory")
         eng.ri_senate_base = 15_000.0
         fs = eng.fair[ex]
         room0 = eng.race_room(ex, "yes", fs)

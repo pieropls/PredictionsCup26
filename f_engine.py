@@ -2293,6 +2293,8 @@ class Engine:
                 self.event("CASH", f"free cash {cash - CASH_RESERVE:,.0f} < {ENTRY_MIN_FREE:,}: no entry bids (dump, fat-finger, scalper)")
             return {}
         self.adjust_budget_k(now)                           # day 9 §2
+        if self.ri_senate_base is None:
+            self.record_ri_base()                           # day 9 §9.4 (C74): once, on the first loop with prices and positions in
         half = 0.5 if self.controls.state("dump") == "pilot" else 1.0
         arena = self.dump_arena(now)
         l0_ok = self.l0_held() < DUMP_L0_BUDGET              # L0 holds <= 8k at cost across all sides
@@ -2436,6 +2438,35 @@ class Engine:
                 self.uncovered_n.append((now, ex, side, round(now - t0)))
                 self.event("DUMP", f"{self.name(ex)} {side.upper()}: funded but no level resting for {now - t0:.0f} s: {why}")
         return plan
+
+    def record_ri_base(self):
+        """Day 9 §9.4 (C74): record the RI Senate holdings at cost (every sub-book) once every held sub has a price; until
+        then the race keeps the day-7 10k engine cap and the 15c filter does not apply."""
+        base, ok = 0.0, True
+        for e, m in self.meta.items():
+            if m.get("race") != RI_SENATE_RACE:
+                continue
+            for sub, q in self.ledger.subbooks.get(e, {}).items():
+                if abs(q) < 1:
+                    continue
+                sd = "yes" if q > 0 else "no"
+                avg = (self.ledger.tranches.get(sub) or {}).get("avg") or ((self.book.get(e) or {}).get("row") or {}).get("avgCost") or self.sig_mark(e, sd)
+                if not avg:
+                    ok = False
+                    break
+                base += abs(q) * float(avg)
+            if not ok:
+                break
+        if not ok or not self.book:
+            return
+        c = self.controls
+        with c.lock:
+            c.d.setdefault("day9", {})["ri_senate_base"] = round(base, 2)
+            c.save()
+        self.ri_senate_base = base
+        msg = f"DAY 9 §9.4: RI Senate holdings at cost {base:,.0f} recorded; the engine may add up to {RI_SENATE_ADD:,} beyond that, on levels >= {RI_SENATE_MIN_EDGE * 100:.0f}c under fair"
+        self.event("DUMP", msg)
+        self.night.line(msg)
 
     def allocate_levels(self, rows, budget, l0_room):
         """Day 9 §3 allocation: -> (out, cut, spent). rows = (lvl, is_resting, ex, spec). Resting levels first (hysteresis),
@@ -3998,29 +4029,18 @@ class Engine:
         """Once: log the day-9 rules (the k budget, expected-edge ranking, hysteresis, re-price make-before-break)."""
         c = self.controls
         d9 = c.d.setdefault("day9", {})
-        if d9.get("ri_senate_base") is None:               # §9.4: the Oct 6 holdings on the RI Senate race at cost (every sub-book)
-            base = 0.0
-            for e, m in self.meta.items():
-                if m.get("race") != RI_SENATE_RACE:
-                    continue
-                for sub, q in self.ledger.subbooks.get(e, {}).items():
-                    if abs(q) < 1:
-                        continue
-                    sd = "yes" if q > 0 else "no"
-                    avg = (self.ledger.tranches.get(sub) or {}).get("avg") or ((self.book.get(e) or {}).get("row") or {}).get("avgCost") or self.sig_mark(e, sd) or 0.0
-                    base += abs(q) * float(avg)
+        if d9.get("ri_senate_base") is not None and float(d9["ri_senate_base"]) < 1_000:   # C74: C73 recorded 4 at startup (no prices yet)
             with c.lock:
-                d9["ri_senate_base"] = round(base, 2)
+                d9.pop("ri_senate_base", None)
                 c.save()
-            self.event("DUMP", f"DAY 9 §9.4: RI Senate holdings at cost {base:,.0f} recorded; the engine may add up to {RI_SENATE_ADD:,} on levels >= {RI_SENATE_MIN_EDGE * 100:.0f}c under fair")
-        self.ri_senate_base = float(d9["ri_senate_base"])
+        self.ri_senate_base = None if d9.get("ri_senate_base") is None else float(d9["ri_senate_base"])   # else recorded by record_ri_base() once prices are in
         if d9.get("c73"):
             return
         with c.lock:
             d9["c73"] = stamp()
             c.save()
         msg = (f"DAY 9 (C73): sell-back ladder = fill + {DUMP_LADDER_FIRST * 100:g}c, one tick lower every {DUMP_LADDER_STEP_S // 60} min, floor entry + 0.5c (rule 0); "
-               f"k_max by free cash {BUDGET_K_TABLE}; RI Senate +{RI_SENATE_ADD:,} beyond {self.ri_senate_base:,.0f} on levels >= 15c under fair")
+               f"k_max by free cash {BUDGET_K_TABLE}; RI Senate +{RI_SENATE_ADD:,} beyond the holdings recorded at the first priced loop, on levels >= 15c under fair")
         self.event("DUMP", msg)
         self.night.line(msg)
         if d9.get("c71"):
