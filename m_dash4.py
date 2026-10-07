@@ -182,7 +182,7 @@ def feed_view(eng, limit=60):
         k = e.get("kind")
         if k in ("EVENT",):
             out.append(dict(id=f"e{e.get('id', e['t'])}", t=e["t"], kind="market", layer="", text=e["text"]))
-        elif k in ("PAUSE", "STOP", "CASHSHORT", "BLIND", "BREAKER", "NEWS", "RATCHET", "CONTROL", "WALL") or (k == "DUMP" and "BREAKER" in e["text"]):
+        elif k in ("PAUSE", "STOP", "CASHSHORT", "BLIND", "BREAKER", "NEWS", "RATCHET", "CONTROL", "WALL", "SLEEVE") or (k == "DUMP" and "BREAKER" in e["text"]):
             out.append(dict(id=f"e{e.get('id', e['t'])}", t=e["t"], kind="alert", layer="", text=e["text"]))
     out.sort(key=lambda r: str(r["t"]), reverse=True)
     return out[:limit]
@@ -205,7 +205,7 @@ def strategies_v4(eng, now, sigday, since_oct1_fills):
             last[l].append(dict(t=f["t"], text=eng.fill_sentence(f)))
     hold = bool(c.d.get("hold_gates"))
     rows = []
-    for key in ["dump", "wall", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"]:
+    for key in ["dump", "sleeve", "wall", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"]:
         st = c.state(key)
         v = c.layer(key)
         status = "PAUSED" if c.paused and key not in ("recycler", "release", "position") else "HELD" if (key == "mm" and (v.get("caps") or {}).get("inventory") == 0) \
@@ -214,7 +214,7 @@ def strategies_v4(eng, now, sigday, since_oct1_fills):
                                                                         else "inventory cap 0" if status == "HELD" else "")
         t_ = sigday["strategies"].get(key, {})
         rows.append(dict(key=key, label=eng.LABELS.get(key, (key,))[0], what=eng.LABELS.get(key, ("", ""))[1], status=status, why=why,
-                         resting=resting.get(key, 0), cash_in_use=round(eng.scalp_cost() if key == "scalp" else eng.touch_cost() if key == "touch" else eng.wall_cost() if key == "wall" else cap.get("manual" if key == "position" else key, 0.0), 2),
+                         resting=resting.get(key, 0), cash_in_use=round(eng.scalp_cost() if key == "scalp" else eng.touch_cost() if key == "touch" else eng.wall_cost() if key == "wall" else eng.sleeve_cost() if key == "sleeve" else cap.get("manual" if key == "position" else key, 0.0), 2),
                          trades_today=t_.get("trades", 0), pnl_today=t_.get("pnl", 0.0),
                          pnl_since=round(all_strat.get(key, {}).get("pnl", 0.0), 2), last=last.get(key, [])))
     return rows
@@ -225,8 +225,8 @@ def party_exposure(eng):
     out = {"D": 0.0, "R": 0.0, "other": 0.0}
     for ex, books in eng.ledger.subbooks.items():
         for sub, q in books.items():
-            if not (sub.startswith("dump:") or sub.startswith("touch:")) or abs(q) < 1:
-                continue                                    # day 6 §2: the touch book shares the 40k party cap
+            if not (sub.startswith("dump:") or sub.startswith("touch:") or sub.startswith("sleeve:")) or abs(q) < 1:
+                continue                                    # day 6 §2: the touch book shares the 40k party cap; day 9: the sleeve too
             side = "yes" if q > 0 else "no"
             t = eng.ledger.tranches.get(sub) or {}
             avg = t.get("avg") or eng.sig_mark(ex, side) or 0.5

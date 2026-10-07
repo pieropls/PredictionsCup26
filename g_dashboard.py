@@ -351,10 +351,10 @@ try { S = JSON.parse(document.getElementById("data").textContent || "{}") || {};
 const ui = {tab: "live", shown: null, cache: {}, basis: "sig", hsort: {k: "value_sig", dir: -1}, hq: "", hl: "", hr: false, hall: false, al: "", aq: "", aall: false, feed: "", hf: "", sopen: null, zoomId: null, zoomWin: null, range: 0, dropped: 0,
   page: 0, q: "", layer: "", haspos: false, mis: "", ev: "", evq: "", open: null, detail: null, updated: Date.now(), connected: false, errors: [], theme: "auto"};
 const TABS = {live: "Live", strategies: "Strategies", capital: "Capital", holdings: "Holdings", leaders: "Leaders", admin: "Admin"};   // dashboard_v4.md
-const LAYERS = ["recycler", "release", "mm", "scalp", "touch", "wall", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "position", "leaders"];   // controls
-const ORDER = ["position", "mm", "scalp", "touch", "wall", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "recycler", "release"];  // colour slots, fixed per layer
-const SLOT = {position: 1, manual: 1, mm: 2, scalp: 2, touch: 9, wall: 8, ladder: 3, pairs: 4, sniper: 5, fatfinger: 6, recycler: 7, inventory: 7, release: 8, dump: 9, longshot: 6};
-const NAMES = {position: "Position exits (AK, RI)", manual: "AK / RI manual positions", scalp: "Scalper", touch: "Touch (big sellers)", wall: "Wall (manual pilot)", recycler: "Recycler", inventory: "Older inventory (recycler)",
+const LAYERS = ["recycler", "release", "mm", "scalp", "touch", "wall", "sleeve", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "position", "leaders"];   // controls
+const ORDER = ["position", "mm", "scalp", "touch", "wall", "sleeve", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "recycler", "release"];  // colour slots, fixed per layer
+const SLOT = {position: 1, manual: 1, mm: 2, scalp: 2, touch: 9, wall: 8, sleeve: 5, ladder: 3, pairs: 4, sniper: 5, fatfinger: 6, recycler: 7, inventory: 7, release: 8, dump: 9, longshot: 6};
+const NAMES = {position: "Position exits (AK, RI)", manual: "AK / RI manual positions", scalp: "Scalper", touch: "Touch (big sellers)", wall: "Wall (manual pilot)", sleeve: "Sleeve (settlement holds)", recycler: "Recycler", inventory: "Older inventory (recycler)",
   release: "Capital release", mm: "Market maker", ladder: "Deep ladders", pairs: "Pair sets", sniper: "Sniper", fatfinger: "Fat-finger catcher", dump: "Dump catcher", longshot: "Longshot catcher",
   leaders: "Leaderboard logger", cash: "Cash", "old engine": "Old engine"};
 const FILTERS = new Set(["hq", "b-hlopts", "hr", "b-alopts", "aq", "b-evkinds", "evq", "q", "lf", "hp", "mis"]);

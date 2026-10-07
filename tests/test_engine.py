@@ -2646,7 +2646,7 @@ class DashV4PayloadTests(EngineCase):
         sd = s["sigday"]
         self.assertTrue(sd["ok"])
         rows = s["strategies4"]
-        self.assertEqual([r["key"] for r in rows], ["dump", "wall", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])
+        self.assertEqual([r["key"] for r in rows], ["dump", "sleeve", "wall", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])
         self.assertEqual(next(r for r in rows if r["key"] == "mm")["trades_today"], 1)
         self.assertAlmostEqual(sum(r["pnl_today"] for r in rows) + sd["drift"], sd["today"], delta=25, msg="Strategies total = Live today")
         self.assertAlmostEqual(sum(h["value_sig"] for h in s["holdings4"]), s["capital4"]["holdings"], places=2, msg="Holdings total = Capital in holdings")
@@ -3367,6 +3367,99 @@ class CashGuardTests(EngineCase):
             FAIR.pop(ex, None)
         eng.release_t = 0
         self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage()), "above 15k free: the tiers rule again")
+
+
+class SleeveTests(EngineCase):
+    """Day 9 (Piero 18:50): the sleeve takes resting liquidity with limit clips (<= 1,500 shares, >= 2 min apart, never past
+    the limit) only when our side's fair >= 0.98 and the edge >= 10c, only with cash above 20k free, 10k at cost in total
+    and per-target caps; a 2c / 10 min fall of fair pauses it; the lots are held to settlement (never sold by the rebuild)."""
+
+    def rig(self, cash_above_floor=30_000):
+        fresh_data(layers=dict(position=dict(state="full"), sleeve=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + cash_above_floor)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] <= 0.10
+                  and eng.meta[b.ex].get("race") != a_config.RI_SENATE_RACE)
+        FAIR[ex] = 0.01                                   # fair NO 0.99 (the fixture's fairs; the test pins it)
+        self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = (0.14, 0.145, 0.14)                 # YES 0.14 / 0.145 -> the NO ask is 0.86 (<= the 0.865 limit; fair NO >= 0.985)
+        loop(eng, fake)
+        eng.controls.d["sleeve_targets"] = [dict(ex=ex, side="no", limit=0.865, cap=5_000, name="target")]
+        return fake, eng, ex
+
+    def clips(self, eng, fake, ex):
+        return [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "sleeve"]
+
+    def test_clip_rules_caps_and_hold(self):
+        fake, eng, ex = self.rig()
+        loop(eng, fake)
+        c = self.clips(eng, fake, ex)
+        self.assertEqual(len(c), 1, c)
+        self.assertEqual((c[0]["side"], c[0]["action"]), ("no", "buy"))
+        self.assertAlmostEqual(c[0]["price"], 0.86, places=3, msg="a limit at the touch, never past 0.865")
+        self.assertLessEqual(c[0]["qty"], a_config.SLEEVE_CLIP)
+        self.assertTrue(any(e["kind"] == "SLEEVE" and "clip" in e["text"] for e in eng.events))
+        fake.fill(c[0]["id"], c[0]["qty"])
+        loop(eng, fake)                                   # within 2 min of the first clip: no second one
+        self.assertEqual(self.clips(eng, fake, ex), [])
+        self.assertEqual(eng.ledger.subbooks[ex].get(f"sleeve:{ex}:no"), -float(c[0]["qty"]))
+        self.assertTrue(any("SLEEVE FILL" in e["text"] for e in eng.events))
+        eng.sleeve_last[(ex, "no")] -= 130
+        loop(eng, fake)
+        self.assertEqual(len(self.clips(eng, fake, ex)), 1, "2 min later: the next clip")
+        view = eng.sleeve_view()[0]
+        self.assertEqual(view["shares"], c[0]["qty"])
+        self.assertGreater(view["ev"], 0)
+        # the per-target cap: 5k at cost held -> no clip
+        for o in self.clips(eng, fake, ex):
+            fake.cancel(o["id"]) if hasattr(fake, "cancel") else None
+        eng.ledger.subbooks[ex][f"sleeve:{ex}:no"] = -6_000.0
+        eng.ledger.tranches[f"sleeve:{ex}:no"] = dict(ex=ex, side="no", kind="sleeve", state="held", ts=time.time(), t="x", avg=0.86)
+        eng.sleeve_last[(ex, "no")] -= 130
+        loop(eng, fake)
+        self.assertEqual([o for o in self.clips(eng, fake, ex) if eng.ledger.orders[o["id"]].get("ts", 0) >= time.time() - 2], [], "5k at cost: capped")
+        # settlement hold: the rebuild never sells sleeve lots, even far under 15k free
+        eng.release_t = 0
+        self.addCleanup(setattr, f_engine, "RELEASE_QUIET_HOURS", f_engine.RELEASE_QUIET_HOURS)
+        f_engine.RELEASE_QUIET_HOURS = (0, 0)
+        fake.pos[ex] = -6000
+        plan = eng.release_plan(a_config.CASH_RESERVE + 3_000, time.time(), eng.bucket_usage())
+        self.assertNotIn(ex, plan, plan)
+
+    def test_only_cash_above_20k_free_and_the_gates(self):
+        fake, eng, ex = self.rig(cash_above_floor=21_000)
+        loop(eng, fake)
+        c = self.clips(eng, fake, ex)
+        self.assertEqual(len(c), 1)
+        self.assertLessEqual(c[0]["qty"] * c[0]["price"], 1_000 + 1, "only the 1k above 20k free")
+        fake, eng, ex = self.rig(cash_above_floor=19_000)
+        loop(eng, fake)
+        self.assertEqual(self.clips(eng, fake, ex), [], "under 20k free: nothing")
+        fake, eng, ex = self.rig()
+        fake.px[ex] = (0.13, 0.135, 0.13)                 # NO ask 0.87 > the 0.865 limit: wait, never walk past the limit
+        loop(eng, fake)
+        self.assertEqual(self.clips(eng, fake, ex), [])
+        fake.px[ex] = (0.14, 0.145, 0.14)
+        FAIR[ex] = 0.03                                   # fair NO 0.97 < 0.98: no clip
+        try:
+            loop(eng, fake)
+            loop(eng, fake)
+            self.assertEqual(self.clips(eng, fake, ex), [])
+        finally:
+            FAIR.pop(ex, None)
+        loop(eng, fake)
+        now = time.time()
+        eng.fair_hist[ex] = [(now - 300, 0.005)]          # our side's fair fell from 0.995 toward 0.97+: >= 2c in 10 min -> paused
+        FAIR[ex] = 0.03
+        try:
+            loop(eng, fake)
+        finally:
+            FAIR.pop(ex, None)
+        self.assertGreater(eng.sleeve_block.get((ex, "no"), 0), now)
 
 
 class WallTests(EngineCase):

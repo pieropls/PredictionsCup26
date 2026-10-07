@@ -51,6 +51,8 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      DUMP_REACH, BUDGET_K_MAX, BUDGET_K_MIN, BUDGET_K_STEP, BUDGET_K_DOWN_S, BUDGET_K_UP_S, BUDGET_K_PEAK_DOWN, BUDGET_K_PEAK_UP,
                      DUMP_WANT_BAND_LO, DUMP_WANT_BAND_HI, DUMP_GAP_LOG_S, DUMP_LADDER_FIRST, DUMP_LADDER_STEP_S, DUMP_LADDER_TICK,
                      BUDGET_K_TABLE, BUDGET_K_TIER_HYST, RI_SENATE_RACE, RI_SENATE_ADD, RI_SENATE_MIN_EDGE,
+                     SLEEVE_CAP, SLEEVE_MIN_FREE, SLEEVE_CLIP, SLEEVE_GAP_S, SLEEVE_TTL_S, SLEEVE_MIN_FAIR, SLEEVE_MIN_EDGE, SLEEVE_NEWS_C, SLEEVE_NEWS_WINDOW_S,
+                     SLEEVE_NEWS_HOLD_S, SLEEVE_TARGETS,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
@@ -115,7 +117,7 @@ def host_id():
 
 
 # ====================================================================================================== controls
-LAYERS = ["position", "recycler", "release", "mm", "scalp", "touch", "wall", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
+LAYERS = ["position", "recycler", "release", "mm", "scalp", "touch", "wall", "sleeve", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
 TMM_ENABLED = True              # afternoon D-C: the engine's MM is the turnover MM (False: classic MM v2, tests only)
 LAYER_STATES = ("off", "pilot", "full")
 
@@ -380,6 +382,7 @@ class Engine:
         self.release_why = {}                               # ex -> (t, branch) of the last release plan (fill labels)
         self.touch_now, self.touch_view, self.touch_block, self.touch_note = {}, {}, {}, {}   # day 6 §2
         self.wall_now, self.wall_view = {}, {}               # Piero's manual walls (control `wall`)
+        self.sleeve_now, self.sleeve_last, self.sleeve_block, self.sleeve_log = {}, {}, {}, []   # day 9 sleeve (settlement holds)
         self.in_use_hist, self.use_peak, self.rule0_log, self.rule0_blocked, self.lots_cache = collections.deque(maxlen=3000), 0.0, {}, collections.deque(maxlen=5000), (None, {})   # §9
         self.uncovered_since, self.uncovered_log, self.uncovered_n, self.refreshed = {}, {}, collections.deque(maxlen=2000), {}   # day 7 §1.3
         try:
@@ -487,7 +490,7 @@ class Engine:
     MARKET_LAYERS = {"exit": "recycler", "recycle": "recycler", "take": "sniper", "mm": "mm",   # "touch" is the day-6 layer (the old MM touch quote is gone)
                      "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs",
                      "release": "release", "fatfinger": "fatfinger", "dump": "dump", "dumpexit": "dump",
-                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall"}
+                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall", "sleeve": "sleeve"}
     REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit", "touchexit", "wallexit"}
 
     def gate(self, b, wants):
@@ -646,6 +649,7 @@ class Engine:
                 self.scalp_fill_events(new_f)
                 self.touch_fill_events(new_f)
                 self.wall_fill_events(new_f)
+                self.sleeve_fill_events(new_f)
                 for f in new_f:                             # an order filled out before any snapshot showed it: no longer "acked, resting"
                     rec = self.ledger.orders.get(str(f.get("order") or ""))
                     if rec and rec.get("filled", 0) >= rec.get("qty", 0) - QTY_TOL:
@@ -720,6 +724,7 @@ class Engine:
         try:
             self.track_walls(now)
             self.wall_now = self.wall_plan(now, cash)
+            self.sleeve_now = self.sleeve_plan(now, cash)
         except Exception as err:
             self.wall_now = {}
             self.event("ERR", f"wall plan: {err!r}")
@@ -1177,7 +1182,7 @@ class Engine:
                     longshot=self.long_now.get(b.ex) or [], long_exits=self.long_view.get(b.ex, []),
                     scalp=self.scalp_now.get(b.ex) or [], scalp_exits=self.scalp_view.get(b.ex, []),
                     touch=self.touch_now.get(b.ex) or [], touch_exits=self.touch_view.get(b.ex, []),
-                    wall=self.wall_now.get(b.ex) or [], wall_exits=self.wall_view.get(b.ex, []),
+                    wall=self.wall_now.get(b.ex) or [], wall_exits=self.wall_view.get(b.ex, []), sleeve=self.sleeve_now.get(b.ex) or [],
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
                     room={sd: max(0.0, MARKET_MAX_POS - held[sd]) for sd in ("yes", "no")},
@@ -1812,7 +1817,7 @@ class Engine:
     LAYER_TTL = {"mm": TMM_TTL_S, "fatfinger": FAT_TTL_S, "dump": DUMP_TTL_S, "dumpexit": DUMP_TTL_S, "ladder": LADDER_TTL_S,
                  "rebound": LADDER_TTL_S, "release": RECYCLE_TAKE_TTL_S, "take": TAKE_TTL_S, "recycle": RECYCLE_REST_TTL_S,
                  "set": PAIR_TTL_S, "unwind": PAIR_TTL_S, "repair": PAIR_TTL_S,
-                 "longshot": LONG_TTL_S, "longexit": LONG_EXIT_TTL_S, "scalp": SCALP_TTL_S, "scalpexit": SCALP_TTL_S, "touch": TOUCH_TTL_S, "touchexit": TOUCH_TTL_S, "wall": WALL_TTL_S, "wallexit": WALL_HOLD_S}
+                 "longshot": LONG_TTL_S, "longexit": LONG_EXIT_TTL_S, "scalp": SCALP_TTL_S, "scalpexit": SCALP_TTL_S, "touch": TOUCH_TTL_S, "touchexit": TOUCH_TTL_S, "wall": WALL_TTL_S, "wallexit": WALL_HOLD_S, "sleeve": SLEEVE_TTL_S}
 
     def vanished_fill(self, oid, rec, q0, now):
         """Shares an order filled since the previous snapshot: it shrank, or it left the book while we didn't cancel it
@@ -2467,6 +2472,114 @@ class Engine:
         msg = f"DAY 9 §9.4: RI Senate holdings at cost {base:,.0f} recorded; the engine may add up to {RI_SENATE_ADD:,} beyond that, on levels >= {RI_SENATE_MIN_EDGE * 100:.0f}c under fair"
         self.event("DUMP", msg)
         self.night.line(msg)
+
+    # ------------------------------------------------------------------------------------------------ day 9 sleeve (settlement holds)
+    def sleeve_targets(self):
+        return self.controls.d.get("sleeve_targets") or SLEEVE_TARGETS
+
+    def sleeve_held(self, ex=None, side=None):
+        """Sleeve holdings at cost (all, or one target's)."""
+        out = 0.0
+        for e, books in self.ledger.subbooks.items():
+            for sub, q in books.items():
+                if not sub.startswith("sleeve:") or abs(q) < 1:
+                    continue
+                sd = "yes" if q > 0 else "no"
+                if ex is not None and (e != ex or sd != side):
+                    continue
+                avg = (self.ledger.tranches.get(sub) or {}).get("avg") or self.sig_mark(e, sd) or 0.0
+                out += abs(q) * float(avg)
+        return out
+
+    def sleeve_cost(self):
+        return self.sleeve_held()
+
+    def sleeve_plan(self, now, cash):
+        """{ex: [want-spec]}: one limit clip per target when the touch is at or under the limit, our side's Polymarket fair
+        >= 0.98 and the edge >= 10c; clips <= 1,500 shares, >= 2 min apart, never past the limit; only cash above 20k free
+        (the catcher keeps its k x free budget on >= 20k); 10k at cost in total and per-target caps; party and race caps;
+        a 2c / 10 min fall of our side's fair pauses new clips 30 min; held to settlement (rule 0: never sold at a loss)."""
+        c = self.controls
+        if not c.on("sleeve") or c.paused or self.fills_blind:
+            return {}
+        free = cash - CASH_RESERVE
+        held_all = self.sleeve_held()
+        plan, pending = {}, 0.0
+        for o in self.open:                                 # a clip in flight stays wanted until it fills or its TTL ends
+            rec = self.ledger.orders.get(o["id"])
+            if rec and rec.get("layer") == "sleeve" and o["id"] not in self.ex.cancelling:
+                plan.setdefault(o["ex"], []).append(dict(side=o["side"], px=o["price"], qty=int(o["qty"]), sub=rec.get("sub"), ttl=SLEEVE_TTL_S))
+                pending += o["qty"] * o["price"]
+        pending += sum((p.get("qty") or 0) * (p.get("price") or 0) for p in self.ex.pending() if p.get("layer") == "sleeve")
+        for t in self.sleeve_targets():
+            ex, side, limit = str(t["ex"]), t["side"], float(t["limit"])
+            key = (ex, side)
+            if ex not in self.owner or self.ex.is_frozen(ex) or pending > 0:
+                continue                                        # one clip in flight at a time
+            fs = self.side_fair(ex, side)
+            if fs is None:
+                continue
+            h = [x for x in self.fair_hist.get(ex, []) if x[0] >= now - SLEEVE_NEWS_WINDOW_S]
+            f = self.fair.get(ex)
+            if f is not None and (not h or now - h[-1][0] >= 5):
+                h.append((now, f))
+                self.fair_hist[ex] = h
+            top = max(((v if side == "yes" else 1 - v) for _, v in h), default=fs)
+            if top - fs >= SLEEVE_NEWS_C - 1e-9:
+                if self.sleeve_block.get(key, 0) < now:
+                    self.event("SLEEVE", f"SLEEVE {t.get('name', ex)}: fair fell {(top - fs) * 100:.1f}c in 10 min: clips paused 30 min")
+                self.sleeve_block[key] = now + SLEEVE_NEWS_HOLD_S
+            if self.sleeve_block.get(key, 0) > now or now - self.sleeve_last.get(key, 0) < SLEEVE_GAP_S:
+                continue
+            ask = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[1]
+            if ask is None or ask > limit + 1e-9:
+                continue                                        # take only: the touch must be at or under the limit
+            if fs < SLEEVE_MIN_FAIR - 1e-9 or fs - ask < SLEEVE_MIN_EDGE - 1e-9:
+                continue
+            room = min(float(t["cap"]) - self.sleeve_held(ex, side), SLEEVE_CAP - held_all, free - SLEEVE_MIN_FREE,
+                       self.race_room(ex, side, fs), DUMP_PARTY_CAP - dash4.party_exposure(self).get(self.pol(ex, side), 0.0))
+            q = int(min(SLEEVE_CLIP, room / ask))
+            if q < MIN_QTY:
+                continue
+            if any(o["ex"] == ex and jx.reduces(o["side"], o["action"], self.book.get(ex, {}).get("pos", 0)) and o["side"] == side and o["action"] == "sell" and o["price"] <= ask + 1e-9
+                   for o in self.open):
+                continue                                        # never cross our own resting sell on that side (I4)
+            self.sleeve_last[key] = now
+            sub = f"sleeve:{ex}:{side}"
+            plan.setdefault(ex, []).append(dict(side=side, px=ask, qty=q, sub=sub, ttl=SLEEVE_TTL_S))
+            msg = f"SLEEVE clip {t.get('name', self.name(ex))}: buy {q:,} {side.upper()} at {ask:.3f} (limit {limit:.3f}, fair {fs:.3f}, edge {(fs - ask) * 100:.1f}c; held {held_all:,.0f} of {SLEEVE_CAP:,}, free {free:,.0f})"
+            self.event("SLEEVE", msg)
+            self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+            self.night.line(msg)
+            pending += q * ask
+        return plan
+
+    def sleeve_fill_events(self, fills):
+        for f in fills:
+            if f["layer"] != "sleeve":
+                continue
+            sub = f"sleeve:{f['ex']}:{f['side']}"
+            t = self.ledger.tranches.setdefault(sub, dict(ex=f["ex"], side=f["side"], kind="sleeve", t=stamp(), ts=time.time(), state="held", avg=f["price"]))
+            avg = self.ledger.tranche_avg(sub, "sleeve", ex=f["ex"], side=f["side"], since="2026-10-06 00:00:00") or f["price"]
+            t["avg"] = round(avg, 5)
+            fs = self.side_fair(f["ex"], f["side"])
+            msg = (f"SLEEVE FILL {self.name(f['ex'])}: bought {f['qty']:,.0f} {f['side'].upper()} at {f['price']:.3f}"
+                   + ("" if fs is None else f" (fair {fs:.3f}, EV at settlement {(fs - f['price']) * f['qty']:+,.0f})") + f"; sleeve held {self.sleeve_held():,.0f} at cost")
+            self.event("SLEEVE", msg)
+            self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+            self.night.line(msg)
+
+    def sleeve_view(self):
+        """Fills, average price and EV at settlement per target (the report)."""
+        out = []
+        for t in self.sleeve_targets():
+            ex, side = str(t["ex"]), t["side"]
+            q = self.ledger.subbooks.get(ex, {}).get(f"sleeve:{ex}:{side}", 0.0)
+            avg = (self.ledger.tranches.get(f"sleeve:{ex}:{side}") or {}).get("avg")
+            fs = self.side_fair(ex, side)
+            out.append(dict(name=t.get("name", self.name(ex)), ex=ex, side=side, limit=t["limit"], cap=t["cap"], shares=abs(q), avg=avg, cost=round(abs(q) * (avg or 0), 2),
+                            fair=fs, ev=None if (fs is None or avg is None) else round(abs(q) * (fs - avg), 2)))
+        return out
 
     def allocate_levels(self, rows, budget, l0_room):
         """Day 9 §3 allocation: -> (out, cut, spent). rows = (lvl, is_resting, ex, spec). Resting levels first (hysteresis),
@@ -3938,7 +4051,7 @@ class Engine:
                 self.night.line(msg)
         return T
 
-    REBUILD_SKIP = ("manual", "pairset:", "recycle:")
+    REBUILD_SKIP = ("manual", "pairset:", "recycle:", "sleeve:")   # day 9: sleeve lots are settlement holds
 
     def rebuild_plan(self, cash, now, free, pending):
         """Oct 5 22:50 (Piero): while free cash above the floor is under 15k, sell engine lots at the SIG bid: lots the bid
@@ -4034,6 +4147,13 @@ class Engine:
                 d9.pop("ri_senate_base", None)
                 c.save()
         self.ri_senate_base = None if d9.get("ri_senate_base") is None else float(d9["ri_senate_base"])   # else recorded by record_ri_base() once prices are in
+        if not d9.get("sleeve"):                             # day 9 (Piero 18:50): the sleeve layer starts on
+            with c.lock:
+                c.d["layers"].setdefault("sleeve", dict(state="full", caps={}, killed=None))["state"] = "full"
+                d9["sleeve"] = stamp()
+                c.save()
+            self.event("SLEEVE", f"DAY 9: sleeve layer on (settlement holds): {', '.join(f'{t['name']} <= {t['limit']:.3f} up to {t['cap']:,}' for t in SLEEVE_TARGETS)}; "
+                                 f"{SLEEVE_CAP:,} at cost in total, only cash above {SLEEVE_MIN_FREE:,} free, clips <= {SLEEVE_CLIP:,} every {SLEEVE_GAP_S // 60} min, fair >= {SLEEVE_MIN_FAIR} and edge >= {SLEEVE_MIN_EDGE * 100:.0f}c")
         if d9.get("c73"):
             return
         with c.lock:
@@ -4113,7 +4233,7 @@ class Engine:
     def reserve_ok(self, ex, w):
         """Day 2 §3.2: only these may spend the opportunity reserve (down to the floor): fat-finger levels, sniper takes on
         a new market (< 30 min old), and takes >= 8c through fair."""
-        if w.get("layer") in ("fatfinger", "dump", "longshot", "wall"):   # a manual wall is bounded by its own cash cut (>= 2k free)
+        if w.get("layer") in ("fatfinger", "dump", "longshot", "wall", "sleeve"):   # a manual wall is bounded by its own cash cut (>= 2k free); the sleeve by its 20k-free rule
             return True
         if w.get("layer") != "take":
             return False

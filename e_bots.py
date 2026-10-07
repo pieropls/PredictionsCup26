@@ -409,6 +409,8 @@ class MarketBot:
         # manual walls (Piero's pilot): one resting order per wall, exact price, its own TTL; the buy-back for what filled
         out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], 2 * QTY_TOL, "wall", sub=x["sub"], ttl=x.get("ttl") or WALL_TTL_S)
                 for x in (s.get("wall") or [])]
+        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], 2 * QTY_TOL, "sleeve", sub=x["sub"], ttl=x["ttl"])   # day 9 sleeve: a limit clip at the touch
+                for x in (s.get("sleeve") or [])]
         for x in s.get("wall_exits") or []:
             q = abs(subs.get(x["sub"], 0))
             if q >= MIN_QTY:

@@ -151,6 +151,7 @@ LAYER_CAPS = {
     "scalp": {"inventory": (10_000, 10_000, 20_000)},         # day 5 §2: the slice at cost (3k per market); ratchet / idle rule up to 20k
     "touch": {"budget": (7_500, 15_000, 30_000)},             # day 6 §2: the layer budget at cost (pilot half); ratchet up to 30k
     "wall": {"notional": (50_000, 50_000, 100_000)},          # manual walls (control): bounded by the cash guard, not by this
+    "sleeve": {"notional": (10_000, 10_000, 10_000)},         # day 9 (Piero 18:50): settlement holds, 10k at cost in total
 }
 # fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
 FAT_LEVELS = [0.12]             # Oct 3 (Piero): only the 0.12 level on each side (0.08 / 0.05: 0 fills since day 1)
@@ -183,7 +184,12 @@ RATCHET_MIN_FILLS_DAY, RATCHET_MIN_FILLS_NIGHT = 10, 5   # fewer fills in the ho
 DAY_WINDOW = (6, 15)            # PT hours of the day window (06:00-15:00): 10x the dumps of the night
 DUMP_CONC_CAPS = [(0.95, 20_000), (0.90, 15_000), (0.0, 12_000)]   # day 7 §2.2: cap per RACE by fair_side (position + resting at cost, all engine layers)
 RI_RACES, RI_ENGINE_CAP = ("Rhode Island Senate", "Rhode Island Governor"), 10_000   # day 7 §2.3: engine tranches get their own 10k on RI beyond the old position
-RI_SENATE_RACE, RI_SENATE_ADD, RI_SENATE_MIN_EDGE = "Rhode Island Senate", 10_000, 0.15   # day 9 §9.4 (Piero): +10k at cost on RI Senate beyond the Oct 6 holdings, only on levels >= 15c under fair
+RI_SENATE_RACE, RI_SENATE_ADD, RI_SENATE_MIN_EDGE = "Rhode Island Senate", 10_000, 0.15
+# day 9 (Piero 18:50) sleeve = settlement holds: take resting liquidity with limit clips, held to settlement under rule 0
+SLEEVE_CAP, SLEEVE_MIN_FREE, SLEEVE_CLIP, SLEEVE_GAP_S, SLEEVE_TTL_S = 10_000, 20_000, 1_500, 120, 110   # 10k at cost; only cash above 20k free; clips <= 1,500, >= 2 min apart
+SLEEVE_MIN_FAIR, SLEEVE_MIN_EDGE, SLEEVE_NEWS_C, SLEEVE_NEWS_WINDOW_S, SLEEVE_NEWS_HOLD_S = 0.98, 0.10, 0.02, 600, 1800   # our side's fair >= 0.98 and edge >= 10c; news guard 2c / 10 min
+SLEEVE_TARGETS = [dict(ex="1075", side="no", limit=0.865, cap=5_000, name="Delaware Senate R NO"),   # buy NO <= 0.865, 5k at cost
+                  dict(ex="963", side="no", limit=0.890, cap=5_000, name="Montana Senate D NO")]     # buy NO <= 0.89, 5k at cost   # day 9 §9.4 (Piero): +10k at cost on RI Senate beyond the Oct 6 holdings, only on levels >= 15c under fair
 DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP = 0.90, 0.05, 2_000   # day 7 §2.1: L0 joins the SIG best bid when it sits >= 5c under a >= 90% fair
 DUMP_L0_REFILLS, DUMP_L0_WINDOW_S = 3, 600            # sweep follow: at most 3 refills per side per 10 min while the tranche is open
 UNCOVERED_LOG_S = 30            # §1.3: an eligible side without its level for > 30 s is logged
