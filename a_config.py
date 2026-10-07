@@ -152,6 +152,7 @@ LAYER_CAPS = {
     "touch": {"budget": (7_500, 15_000, 30_000)},             # day 6 §2: the layer budget at cost (pilot half); ratchet up to 30k
     "wall": {"notional": (50_000, 50_000, 100_000)},          # manual walls (control): bounded by the cash guard, not by this
     "sleeve": {"notional": (10_000, 10_000, 10_000)},         # day 9 (Piero 18:50): settlement holds, 10k at cost in total
+    "swing": {"notional": (15_000, 15_000, 15_000)},          # day 10 §3: the RI swing slice
 }
 # fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
 FAT_LEVELS = [0.12]             # Oct 3 (Piero): only the 0.12 level on each side (0.08 / 0.05: 0 fills since day 1)
@@ -188,6 +189,10 @@ RI_SENATE_RACE, RI_SENATE_ADD, RI_SENATE_MIN_EDGE = "Rhode Island Senate", 10_00
 # day 9 (Piero 18:50) sleeve = settlement holds: take resting liquidity with limit clips, held to settlement under rule 0
 SLEEVE_CAP, SLEEVE_MIN_FREE, SLEEVE_CLIP, SLEEVE_GAP_S, SLEEVE_TTL_S = 10_000, 20_000, 1_500, 120, 110   # 10k at cost; only cash above 20k free; clips <= 1,500, >= 2 min apart
 SLEEVE_MIN_FAIR, SLEEVE_MIN_EDGE, SLEEVE_NEWS_C, SLEEVE_NEWS_WINDOW_S, SLEEVE_NEWS_HOLD_S = 0.98, 0.10, 0.02, 600, 1800   # our side's fair >= 0.98 and edge >= 10c; news guard 2c / 10 min
+# day 10 §3 (Piero D2): the RI swing — a 15k slice of the RI Senate R wall lots cycles with the ring
+SWING = dict(ex="1077", side="no", slice=15_000, wall_subs=["wall:1077:no:w1791342782", "wall:1077:no:w1791342929"], sell_px=0.865, buy_px=0.845,
+             min_edge=0.14, max_fair_yes=0.03, news_c=0.02, news_window_s=600, news_hold_s=1800)
+SWING_TTL_S, WALL_HOLD_MIN_FREE, WALL_RECYCLE_EXIT_C = 3600, 30_000, 0.02   # day 10 §4.1: a hold-to-settlement wall needs free >= 30k after it (netted); a recycling wall (exit <= entry + 2c) rests under the 15k rule
 SLEEVE_TARGETS = [dict(ex="1075", side="no", limit=0.865, cap=5_000, name="Delaware Senate R NO"),   # buy NO <= 0.865, 5k at cost
                   dict(ex="963", side="no", limit=0.890, cap=5_000, name="Montana Senate D NO")]     # buy NO <= 0.89, 5k at cost   # day 9 §9.4 (Piero): +10k at cost on RI Senate beyond the Oct 6 holdings, only on levels >= 15c under fair
 DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP = 0.90, 0.05, 2_000   # day 7 §2.1: L0 joins the SIG best bid when it sits >= 5c under a >= 90% fair

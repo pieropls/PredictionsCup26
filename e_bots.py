@@ -411,6 +411,12 @@ class MarketBot:
                 for x in (s.get("wall") or [])]
         out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], 2 * QTY_TOL, "sleeve", sub=x["sub"], ttl=x["ttl"])   # day 9 sleeve: a limit clip at the touch
                 for x in (s.get("sleeve") or [])]
+        sw = s.get("swing") or {}                            # day 10 §3: the RI swing legs (sell leg = reduce from the wall / swing subs, buy leg = entry)
+        for x in sw.get("sells") or []:
+            reduce_buy(x["side"], x["px"], int(x["qty"]), "swingsell", x["sub"], x["ttl"], band=0.0, a2=False)
+        if sw.get("buy"):
+            x = sw["buy"]
+            out.append(want(x["side"], "buy", x["px"], int(x["qty"]), x["px"], x["px"], 2 * QTY_TOL, "swing", sub=x["sub"], ttl=x["ttl"]))
         for x in s.get("wall_exits") or []:
             q = abs(subs.get(x["sub"], 0))
             if q >= MIN_QTY:

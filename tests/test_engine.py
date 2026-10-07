@@ -2646,7 +2646,7 @@ class DashV4PayloadTests(EngineCase):
         sd = s["sigday"]
         self.assertTrue(sd["ok"])
         rows = s["strategies4"]
-        self.assertEqual([r["key"] for r in rows], ["dump", "sleeve", "wall", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])
+        self.assertEqual([r["key"] for r in rows], ["dump", "swing", "sleeve", "wall", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])
         self.assertEqual(next(r for r in rows if r["key"] == "mm")["trades_today"], 1)
         self.assertAlmostEqual(sum(r["pnl_today"] for r in rows) + sd["drift"], sd["today"], delta=25, msg="Strategies total = Live today")
         self.assertAlmostEqual(sum(h["value_sig"] for h in s["holdings4"]), s["capital4"]["holdings"], places=2, msg="Holdings total = Capital in holdings")
@@ -3397,7 +3397,7 @@ class WallRulesC76Tests(EngineCase):
     def test_min_free_cut_edge_floor_and_race_room(self):
         fake, eng, ex = self.rig(cash_above_floor=20_000)
         ctl = f_engine.EngineControls(eng)
-        ctl._apply("wall", dict(ex=ex, side="no", price=0.85, qty=11_900, exit_px=0.14, ttl_h=72, hold_h=72, news_c=0.02, min_free=15_000, min_edge=0.14))
+        ctl._apply("wall", dict(ex=ex, side="no", price=0.85, qty=11_900, exit_px=0.14, ttl_h=72, hold_h=6, news_c=0.02, min_free=15_000, min_edge=0.14))   # a recycling wall (exit +1c): the day-10 30k rule does not apply
         loop(eng, fake); loop(eng, fake)
         w = self.walls(eng, fake, ex)
         self.assertEqual(len(w), 1, w)
@@ -3450,12 +3450,20 @@ class WallC77Tests(WallRulesC76Tests):
             loop(eng, fake)
         self.assertEqual(exits(), [], "free back above 15k: buy-back pulled, held again")
 
+    def test_hold_wall_needs_30k_free_recycling_wall_does_not(self):
+        fake, eng, ex = self.rig(cash_above_floor=20_000)
+        ctl = f_engine.EngineControls(eng)
+        with self.assertRaises(ValueError):               # day 10 §4.1: a settlement hold needs free >= 30k after it
+            ctl._apply("wall", dict(ex=ex, side="no", price=0.85, qty=5_000, exit_px=0.05, ttl_h=72, hold_h=72, exit_min_free=15_000, once=True))
+        ctl._apply("wall", dict(ex=ex, side="no", price=0.85, qty=5_000, exit_px=0.14, ttl_h=72, hold_h=6, once=True))   # recycling: exit NO 0.86 = +1c
+        self.assertEqual(len(eng.walls()), 1)
+
     def test_rebuild_never_sells_wall_lots_and_the_cut_is_netted(self):
         fake, eng, ex = self.rig(cash_above_floor=30_000)
         ctl = f_engine.EngineControls(eng)
-        ctl._apply("wall", dict(ex=ex, side="no", price=0.85, qty=10_000, exit_px=0.05, ttl_h=72, hold_h=72, news_c=0.02, min_free=15_000, min_edge=0.14, once=True))
+        ctl._apply("wall", dict(ex=ex, side="no", price=0.85, qty=10_000, exit_px=0.14, ttl_h=72, hold_h=6, news_c=0.02, min_free=15_000, min_edge=0.14, once=True))   # recycling walls (exit +1c)
         time.sleep(1.1)
-        ctl._apply("wall", dict(ex=ex, side="no", price=0.85, qty=10_000, exit_px=0.05, ttl_h=72, hold_h=72, news_c=0.02, min_free=15_000, min_edge=0.14, once=True))
+        ctl._apply("wall", dict(ex=ex, side="no", price=0.85, qty=10_000, exit_px=0.14, ttl_h=72, hold_h=6, news_c=0.02, min_free=15_000, min_edge=0.14, once=True))
         loop(eng, fake); loop(eng, fake)
         w = sorted(self.walls(eng, fake, ex), key=lambda o: -o["qty"])
         self.assertEqual(len(w), 2, w)
@@ -3472,6 +3480,73 @@ class WallC77Tests(WallRulesC76Tests):
         eng.release_t = 0
         plan = eng.release_plan(a_config.CASH_RESERVE + 3_000, time.time(), eng.bucket_usage())
         self.assertNotIn(ex, plan, plan)
+
+
+class SwingTests(EngineCase):
+    """Day 10 §3 (Piero D2): a 15k slice of the RI Senate R wall lots cycles: a sell leg at NO 0.865 for what is held, a
+    buy-back at NO 0.845 for what was sold (only >= 14c under fair, never more than sold); the other wall lots are never
+    sold; both legs pulled while fair YES > 0.03 or after a 2c rise in 10 min; rule 0 on every sale."""
+
+    def rig(self):
+        fresh_data(layers=dict(position=dict(state="full"), swing=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 30_000)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] <= 0.10
+                  and eng.meta[b.ex].get("race") != a_config.RI_SENATE_RACE)
+        FAIR[ex] = 0.0065
+        self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = (0.135, 0.14, 0.135)                # NO bid/ask 0.86 / 0.865
+        subs = [f"wall:{ex}:no:wA", f"wall:{ex}:no:wB"]
+        eng.ledger.subbooks[ex] = {subs[0]: -11_900.0, subs[1]: -10_000.0}
+        for s_ in subs:
+            eng.ledger.tranches[s_] = dict(ex=ex, side="no", kind="wall", state="held", ts=time.time(), t="x", avg=0.85)
+        fake.pos[ex] = -21_900
+        eng.controls.d["swing"] = dict(a_config.SWING, ex=ex, wall_subs=subs, hold_qty=6_900.0, stats=dict(sold=0.0, bought=0.0, realized=0.0, cycles=0, legs=[]))
+        loop(eng, fake)
+        return fake, eng, ex
+
+    def legs(self, eng, fake, ex, layer):
+        return [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == layer]
+
+    def test_sell_leg_buy_leg_hold_part_and_guards(self):
+        fake, eng, ex = self.rig()
+        loop(eng, fake)
+        sells = self.legs(eng, fake, ex, "swingsell")
+        self.assertEqual(sum(o["qty"] for o in sells), 15_000, sells)
+        self.assertTrue(all(abs(1 - o["price"] - 0.865) < 1e-9 for o in sells), "sell NO at 0.865 = buy YES at 0.135")
+        self.assertEqual(self.legs(eng, fake, ex, "swing"), [], "nothing sold yet: no buy-back")
+        big = max(sells, key=lambda o: o["qty"])
+        fake.fill(big["id"], 5_000)
+        loop(eng, fake); loop(eng, fake)
+        buy = self.legs(eng, fake, ex, "swing")
+        self.assertEqual(len(buy), 1, buy)
+        self.assertEqual((buy[0]["qty"], buy[0]["side"], buy[0]["action"]), (5_000, "no", "buy"))
+        self.assertAlmostEqual(buy[0]["price"], 0.845, places=3)
+        self.assertEqual(sum(o["qty"] for o in self.legs(eng, fake, ex, "swingsell")), 10_000, "the sell leg shrinks to what is still held of the slice")
+        self.assertTrue(any("SWING sell leg" in e["text"] for e in eng.events))
+        fake.fill(buy[0]["id"], 5_000)
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(eng.ledger.subbooks[ex].get(f"swing:{ex}:no"), -5_000.0)
+        sells = self.legs(eng, fake, ex, "swingsell")
+        self.assertEqual(sum(o["qty"] for o in sells), 15_000, "bought back: the whole slice is for sale again (swing lots first)")
+        self.assertEqual(self.legs(eng, fake, ex, "swing"), [])
+        self.assertEqual(eng.swing_view()["cycles"], 1)
+        # the hold part (6,900) is never sold: sell everything of the slice, nothing more rests
+        for o in sells:
+            fake.fill(o["id"], o["qty"])
+        loop(eng, fake); loop(eng, fake)
+        held_walls = sum(abs(q) for s_, q in eng.ledger.subbooks[ex].items() if s_.startswith("wall:"))
+        self.assertEqual(held_walls, 6_900.0)
+        self.assertEqual(self.legs(eng, fake, ex, "swingsell"), [])
+        self.assertEqual(self.legs(eng, fake, ex, "swing")[0]["qty"], 15_000, "all sold: the buy-back rests for the whole slice")
+        FAIR[ex] = 0.04                                   # fair YES > 0.03: both legs pulled
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(self.legs(eng, fake, ex, "swing"), [])
+        self.assertTrue(any("legs pulled" in e["text"] for e in eng.events))
 
 
 class SleeveTests(EngineCase):
