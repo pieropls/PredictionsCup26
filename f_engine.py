@@ -3379,6 +3379,11 @@ class Engine:
                 if w.get("edge_off"):
                     w["edge_off"], changed = None, True
                     self.event("WALL", f"WALL {w['id']} {self.name(ex)}: edge {(fs_w - w['px']) * 100:.1f}c >= {w['min_edge'] * 100:.0f}c again: re-placed")
+            if w.get("once") and (w.get("filled") or 0) >= 1:
+                if not w.get("once_done"):
+                    w["once_done"], changed = now, True
+                    self.event("WALL", f"WALL {w['id']} {self.name(ex)}: filled {w['filled']:,.0f} of {w['qty']:,} — one fill only, not re-rested")
+                continue
             min_free = float(w.get("min_free") or WALL_MIN_FREE)
             left_q = int(w["qty"] - (w.get("filled") or 0))
             cap_q = int(max(0.0, free - min_free) / w["px"])
@@ -3425,8 +3430,19 @@ class Engine:
                     self.event("WALL", f"WALL {w['id']} {self.name(ex)}: {abs(q):,.0f} {side.upper()} not bought back within {w.get('hold_s', WALL_HOLD_S) / 3600:.0f} h: held to settlement")
                     self.night.line(f"WALL {w['id']}: {abs(q):,.0f} {side.upper()} held to settlement (fair {self.side_fair(ex, side)})")
                 continue
+            if w.get("exit_min_free") is not None:            # C77 (Piero): held to settlement while free >= exit_min_free
+                free_now = (min(self.cash_hist) if self.cash_hist else 0.0) - CASH_RESERVE
+                if free_now >= float(w["exit_min_free"]):
+                    if w.get("exit_on"):
+                        w["exit_on"], changed = False, True
+                        self.event("WALL", f"WALL {w['id']} {self.name(ex)}: free {free_now:,.0f} >= {w['exit_min_free']:,.0f}: buy-back pulled, {abs(q):,.0f} {side.upper()} held")
+                    continue
+                if not w.get("exit_on"):
+                    w["exit_on"], changed = True, True
+                    self.event("WALL", f"WALL {w['id']} {self.name(ex)}: free {free_now:,.0f} < {w['exit_min_free']:,.0f}: buy-back at YES {float(w['exit_px']):.3f} rests for {abs(q):,.0f} {side.upper()}")
             exit_yes = float(w["exit_px"])                    # the buy-back price in YES terms
             sell_px = (1 - exit_yes) if side == "no" else exit_yes   # what the held side fetches
+            sell_px = max(sell_px, avg + RULE0_MARGIN)        # never below entry + 0.5c (rule 0)
             self.wall_view.setdefault(ex, []).append(dict(sub=sub, side=side, sell_px=round(sell_px, 3), avg=avg))
         if changed:
             with c.lock:
@@ -5809,7 +5825,9 @@ class EngineControls:
             w = dict(id=wid, ex=ex, side=side, px=round(px, 3), qty=qty, exit_px=round(exit_px, 3), ttl_s=int(float(args.get("ttl_h", 24)) * 3600),
                      hold_s=int(float(args.get("hold_h", 6)) * 3600), news_c=float(args.get("news_c", WALL_NEWS_C)), t=time.time(), state="active",
                      filled=0.0, fill_t=None, by=str(args.get("by", "Piero")),
-                     min_free=float(args.get("min_free", WALL_MIN_FREE)), min_edge=(None if args.get("min_edge") is None else float(args["min_edge"])))   # C76: per-wall cut and edge floor
+                     min_free=float(args.get("min_free", WALL_MIN_FREE)), min_edge=(None if args.get("min_edge") is None else float(args["min_edge"])),   # C76: per-wall cut and edge floor
+                     exit_min_free=(None if args.get("exit_min_free") is None else float(args["exit_min_free"])),   # C77: buy-back rests only while free < this (else held)
+                     once=bool(args.get("once", False)))                                                            # C77: one fill only: never re-rested after a fill
             with c.lock:
                 c.d.setdefault("walls", []).append(w)
                 if c.state("wall") == "off":
@@ -5817,7 +5835,8 @@ class EngineControls:
                 c.save()
             msg = (f"WALL {wid} placed by {w['by']}: {self.eng.name(ex)} buy {qty:,} {side.upper()} at {px:.3f} (= sell {'YES' if side == 'no' else 'NO'} at {1 - px:.3f}), "
                    f"TTL {w['ttl_s'] / 3600:.0f} h; buy-back YES bid {exit_px:.3f} for what fills, held after {w['hold_s'] / 3600:.0f} h; pulled if Polymarket moves {w['news_c'] * 100:.0f}c against it in 10 min; "
-                   f"cut so a full fill leaves >= {w['min_free']:,.0f} free" + ("" if w["min_edge"] is None else f"; rests only while the edge vs fair >= {w['min_edge'] * 100:.0f}c"))
+                   f"cut so a full fill leaves >= {w['min_free']:,.0f} free" + ("" if w["min_edge"] is None else f"; rests only while the edge vs fair >= {w['min_edge'] * 100:.0f}c")
+                   + ("" if w["exit_min_free"] is None else f"; fills held to settlement, the buy-back rests only while free < {w['exit_min_free']:,.0f}") + ("; one fill only" if w["once"] else ""))
             self.eng.event("WALL", msg)
             self.eng.night.line(msg)
             return msg

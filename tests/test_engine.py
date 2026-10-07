@@ -3418,6 +3418,37 @@ class WallRulesC76Tests(EngineCase):
         self.assertLess(eng.race_room(ex, "no", 0.995), eng.race_room(ex, "no", 0.995) + self.walls(eng, fake, ex)[0]["qty"] * 0.85 - 1, "a resting wall counts")
 
 
+class WallC77Tests(WallRulesC76Tests):
+    """C77 (Piero 20:10): a wall whose fills are held to settlement while free >= exit_min_free (the buy-back rests only
+    below it, never under entry + 0.5c) and that is never re-rested after its first fill (once)."""
+
+    def test_conditional_buyback_and_one_fill(self):
+        fake, eng, ex = self.rig(cash_above_floor=40_000)
+        ctl = f_engine.EngineControls(eng)
+        ctl._apply("wall", dict(ex=ex, side="no", price=0.85, qty=4_000, exit_px=0.13, ttl_h=72, hold_h=72, news_c=0.02, min_free=15_000, min_edge=0.14, exit_min_free=15_000, once=True))
+        loop(eng, fake); loop(eng, fake)
+        w = self.walls(eng, fake, ex)
+        self.assertEqual(len(w), 1)
+        fake.fill(w[0]["id"], 1_000)                      # a partial fill: one fill only -> the rest is not re-rested
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(self.walls(eng, fake, ex), [], "once: not re-rested after a fill")
+        self.assertTrue(any("one fill only" in e["text"] for e in eng.events))
+        exits = lambda: [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "wallexit"]
+        self.assertEqual(exits(), [], "free 40k >= 15k: held, no buy-back")
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 12_000)   # free 12k < 15k
+        for _ in range(3):
+            loop(eng, fake)
+        x = exits()
+        self.assertEqual(len(x), 1, "free under 15k: the buy-back rests")
+        self.assertAlmostEqual(1 - x[0]["price"], 0.87, places=3, msg="sell the NO at 0.870 (YES bid 0.130)")
+        self.assertTrue(any("buy-back at YES 0.130 rests" in e["text"] for e in eng.events))
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 20_000)
+        for _ in range(3):
+            loop(eng, fake)
+        self.assertEqual(exits(), [], "free back above 15k: buy-back pulled, held again")
+
+
 class SleeveTests(EngineCase):
     """Day 9 (Piero 18:50): the sleeve takes resting liquidity with limit clips (<= 1,500 shares, >= 2 min apart, never past
     the limit) only when our side's fair >= 0.98 and the edge >= 10c, only with cash above 20k free, 10k at cost in total
