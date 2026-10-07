@@ -3369,6 +3369,55 @@ class CashGuardTests(EngineCase):
         self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage()), "above 15k free: the tiers rule again")
 
 
+class WallRulesC76Tests(EngineCase):
+    """C76 (Piero's RI Senate R wall): a per-wall cut (full fill leaves >= min_free), an edge floor (rests only while
+    fair_side - price >= min_edge, re-placed when it returns), and a resting wall uses the race's cap room."""
+
+    def rig(self, cash_above_floor=20_000):
+        fresh_data(layers=dict(position=dict(state="full"), wall=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + cash_above_floor)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] <= 0.10
+                  and eng.meta[b.ex].get("race") != a_config.RI_SENATE_RACE)
+        FAIR[ex] = 0.005                                  # fair NO 0.995
+        self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = (0.13, 0.135, 0.13)
+        loop(eng, fake)
+        return fake, eng, ex
+
+    def walls(self, eng, fake, ex):
+        return [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "wall"]
+
+    def test_min_free_cut_edge_floor_and_race_room(self):
+        fake, eng, ex = self.rig(cash_above_floor=20_000)
+        ctl = f_engine.EngineControls(eng)
+        ctl._apply("wall", dict(ex=ex, side="no", price=0.85, qty=11_900, exit_px=0.14, ttl_h=72, hold_h=72, news_c=0.02, min_free=15_000, min_edge=0.14))
+        loop(eng, fake); loop(eng, fake)
+        w = self.walls(eng, fake, ex)
+        self.assertEqual(len(w), 1, w)
+        self.assertEqual(w[0]["qty"], int(5_000 / 0.85), "cut so a full fill leaves >= 15k free (free 20k)")
+        room0 = eng.race_room(ex, "no", 0.995)
+        self.assertLessEqual(room0, eng.race_room(ex, "yes", 0.995) + 1e-6)
+        self.assertTrue(any("cut to" in e["text"] for e in eng.events))
+        # the resting wall uses the race room
+        used_before = eng.race_room(ex, "no", 0.995)
+        for o in w:
+            fake.open.pop(o["id"], None) if hasattr(fake, "open") else None
+        FAIR[ex] = 0.03                                    # fair NO 0.97: edge 12c < 14c floor -> pulled
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(self.walls(eng, fake, ex), [], "edge under the floor: not resting")
+        self.assertTrue(any("floor: pulled" in e["text"] for e in eng.events))
+        FAIR[ex] = 0.005                                   # edge back to 14.5c: re-placed
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(len(self.walls(eng, fake, ex)), 1)
+        self.assertTrue(any("again: re-placed" in e["text"] for e in eng.events))
+        self.assertLess(eng.race_room(ex, "no", 0.995), eng.race_room(ex, "no", 0.995) + self.walls(eng, fake, ex)[0]["qty"] * 0.85 - 1, "a resting wall counts")
+
+
 class SleeveTests(EngineCase):
     """Day 9 (Piero 18:50): the sleeve takes resting liquidity with limit clips (<= 1,500 shares, >= 2 min apart, never past
     the limit) only when our side's fair >= 0.98 and the edge >= 10c, only with cash above 20k free, 10k at cost in total

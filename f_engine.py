@@ -2239,6 +2239,8 @@ class Engine:
                 rec = self.ledger.orders.get(o["id"])
                 if o["ex"] == e and rec and rec.get("layer") == "dump" and not (e == ex and o["side"] == side):
                     used += o["qty"] * o["price"]
+                elif o["ex"] == e and rec and rec.get("layer") == "wall" and o["action"] == "buy":   # C76: a resting wall uses the race's room
+                    used += o["qty"] * o["price"]
         return cap - used
 
     def l0_refills(self, sub, now):
@@ -3367,17 +3369,28 @@ class Engine:
                     self.event("WALL", f"WALL {w['id']} {self.name(ex)}: Polymarket {sold.upper()} rose {(cur - low) * 100:.1f}c in 10 min: wall pulled")
                     self.night.line(f"WALL {w['id']} pulled by the news guard ({sold.upper()} +{(cur - low) * 100:.1f}c in 10 min); filled {w.get('filled', 0):,.0f}")
                     continue
+            fs_w = self.side_fair(ex, side)
+            if w.get("min_edge") is not None and fs_w is not None:   # C76 (Piero): rests only while the edge vs fair >= the wall's floor
+                if fs_w - w["px"] < w["min_edge"] - 1e-9:
+                    if not w.get("edge_off"):
+                        w["edge_off"], changed = now, True
+                        self.event("WALL", f"WALL {w['id']} {self.name(ex)}: edge {(fs_w - w['px']) * 100:.1f}c < {w['min_edge'] * 100:.0f}c floor: pulled until it returns")
+                    continue
+                if w.get("edge_off"):
+                    w["edge_off"], changed = None, True
+                    self.event("WALL", f"WALL {w['id']} {self.name(ex)}: edge {(fs_w - w['px']) * 100:.1f}c >= {w['min_edge'] * 100:.0f}c again: re-placed")
+            min_free = float(w.get("min_free") or WALL_MIN_FREE)
             left_q = int(w["qty"] - (w.get("filled") or 0))
-            cap_q = int(max(0.0, free - WALL_MIN_FREE) / w["px"])
+            cap_q = int(max(0.0, free - min_free) / w["px"])
             q = min(left_q, cap_q)
             if q < MIN_QTY:
                 if now - w.get("nocash_t", 0) >= 1800:
                     w["nocash_t"], changed = now, True
-                    self.event("WALL", f"WALL {w['id']} {self.name(ex)}: a full fill would leave < {WALL_MIN_FREE:,} free (free {free:,.0f}): not resting")
+                    self.event("WALL", f"WALL {w['id']} {self.name(ex)}: a full fill would leave < {min_free:,.0f} free (free {free:,.0f}): not resting")
                 continue
             if q < left_q and now - w.get("cut_t", 0) >= 1800:
                 w["cut_t"], changed = now, True
-                self.event("WALL", f"WALL {w['id']} {self.name(ex)}: cut to {q:,} of {left_q:,} so a full fill leaves >= {WALL_MIN_FREE:,} free")
+                self.event("WALL", f"WALL {w['id']} {self.name(ex)}: cut to {q:,} of {left_q:,} so a full fill leaves >= {min_free:,.0f} free")
             plan.setdefault(ex, []).append(dict(side=side, px=w["px"], qty=q, sub=f"wall:{ex}:{side}:{w['id']}", ttl=w.get("ttl_s", WALL_TTL_S)))
             self.entry_left = max(0.0, getattr(self, "entry_left", float("inf")) - q * w["px"] * ENTRY_WEIGHTS["wall"])
         if changed:
@@ -5795,7 +5808,8 @@ class EngineControls:
             wid = f"w{int(time.time())}"
             w = dict(id=wid, ex=ex, side=side, px=round(px, 3), qty=qty, exit_px=round(exit_px, 3), ttl_s=int(float(args.get("ttl_h", 24)) * 3600),
                      hold_s=int(float(args.get("hold_h", 6)) * 3600), news_c=float(args.get("news_c", WALL_NEWS_C)), t=time.time(), state="active",
-                     filled=0.0, fill_t=None, by=str(args.get("by", "Piero")))
+                     filled=0.0, fill_t=None, by=str(args.get("by", "Piero")),
+                     min_free=float(args.get("min_free", WALL_MIN_FREE)), min_edge=(None if args.get("min_edge") is None else float(args["min_edge"])))   # C76: per-wall cut and edge floor
             with c.lock:
                 c.d.setdefault("walls", []).append(w)
                 if c.state("wall") == "off":
@@ -5803,7 +5817,7 @@ class EngineControls:
                 c.save()
             msg = (f"WALL {wid} placed by {w['by']}: {self.eng.name(ex)} buy {qty:,} {side.upper()} at {px:.3f} (= sell {'YES' if side == 'no' else 'NO'} at {1 - px:.3f}), "
                    f"TTL {w['ttl_s'] / 3600:.0f} h; buy-back YES bid {exit_px:.3f} for what fills, held after {w['hold_s'] / 3600:.0f} h; pulled if Polymarket moves {w['news_c'] * 100:.0f}c against it in 10 min; "
-                   f"cut so a full fill leaves >= {WALL_MIN_FREE:,} free")
+                   f"cut so a full fill leaves >= {w['min_free']:,.0f} free" + ("" if w["min_edge"] is None else f"; rests only while the edge vs fair >= {w['min_edge'] * 100:.0f}c"))
             self.eng.event("WALL", msg)
             self.eng.night.line(msg)
             return msg
