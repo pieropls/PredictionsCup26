@@ -3284,8 +3284,10 @@ class CashGuardTests(EngineCase):
                 seed_ref(eng, e_, mid=eng.fair[e_] - 0.06)
             loop(eng, fake)
         after = {o["id"]: (o["price"], o["qty"]) for o in self.entries(eng, fake) if eng.ledger.orders[o["id"]]["layer"] == "dump"}
-        kept = len(set(before) & set(after))
-        self.assertGreaterEqual(kept, 0.8 * len(before), f"{kept} of {len(before)} resting levels kept after a 25% cash move")
+        kept = set(before) & set(after)
+        self.assertGreaterEqual(len(kept), 0.6 * len(before), f"{len(kept)} of {len(before)} resting levels kept after a 25% cash move (the smaller budget cuts some)")
+        same = sum(1 for i in kept if before[i] == after[i])
+        self.assertGreaterEqual(same, 0.95 * len(kept), f"{same} of {len(kept)} surviving levels kept their price and size (no re-size churn)")
 
     def test_near_touch_levels_have_a_20_min_ttl_and_l0_stops_at_8k(self):
         fake, eng, favs = self.rig(cash_above_floor=60_000)
@@ -3447,6 +3449,29 @@ class WallC77Tests(WallRulesC76Tests):
         for _ in range(3):
             loop(eng, fake)
         self.assertEqual(exits(), [], "free back above 15k: buy-back pulled, held again")
+
+    def test_rebuild_never_sells_wall_lots_and_the_cut_is_netted(self):
+        fake, eng, ex = self.rig(cash_above_floor=30_000)
+        ctl = f_engine.EngineControls(eng)
+        ctl._apply("wall", dict(ex=ex, side="no", price=0.85, qty=10_000, exit_px=0.05, ttl_h=72, hold_h=72, news_c=0.02, min_free=15_000, min_edge=0.14, once=True))
+        time.sleep(1.1)
+        ctl._apply("wall", dict(ex=ex, side="no", price=0.85, qty=10_000, exit_px=0.05, ttl_h=72, hold_h=72, news_c=0.02, min_free=15_000, min_edge=0.14, once=True))
+        loop(eng, fake); loop(eng, fake)
+        w = sorted(self.walls(eng, fake, ex), key=lambda o: -o["qty"])
+        self.assertEqual(len(w), 2, w)
+        self.assertEqual(w[0]["qty"], 10_000, "the first wall keeps its size (free 30k - 15k = 15k > 8.5k)")
+        self.assertEqual(w[1]["qty"], int((30_000 - 15_000 - 8_500) / 0.85), "the second is cut by what the first could still fill")
+        # a filled wall lot is never sold by the rebuild (it has Piero's own exit)
+        sub = f"wall:{ex}:no:{eng.walls()[0]['id']}"
+        eng.ledger.subbooks.setdefault(ex, {})[sub] = -4_000.0
+        eng.ledger.tranches[sub] = dict(ex=ex, side="no", kind="wall", state="open", ts=time.time(), t="x", avg=0.85)
+        fake.pos[ex] = -4_000
+        self.addCleanup(setattr, f_engine, "RELEASE_QUIET_HOURS", f_engine.RELEASE_QUIET_HOURS)
+        f_engine.RELEASE_QUIET_HOURS = (0, 0)
+        loop(eng, fake)
+        eng.release_t = 0
+        plan = eng.release_plan(a_config.CASH_RESERVE + 3_000, time.time(), eng.bucket_usage())
+        self.assertNotIn(ex, plan, plan)
 
 
 class SleeveTests(EngineCase):

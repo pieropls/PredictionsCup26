@@ -3386,7 +3386,10 @@ class Engine:
                 continue
             min_free = float(w.get("min_free") or WALL_MIN_FREE)
             left_q = int(w["qty"] - (w.get("filled") or 0))
-            cap_q = int(max(0.0, free - min_free) / w["px"])
+            others = sum((x["qty"] - (x.get("filled") or 0)) * x["px"] for x in self.walls()   # C78: the cut is netted across the resting walls
+                         if x is not w and x.get("state") == "active" and not (x.get("once") and (x.get("filled") or 0) >= 1) and not x.get("edge_off")
+                         and x["id"] < w["id"])                 # earlier walls keep their size; later ones are cut by what the earlier could still fill
+            cap_q = int(max(0.0, free - min_free - others) / w["px"])
             q = min(left_q, cap_q)
             if q < MIN_QTY:
                 if now - w.get("nocash_t", 0) >= 1800:
@@ -4080,7 +4083,7 @@ class Engine:
                 self.night.line(msg)
         return T
 
-    REBUILD_SKIP = ("manual", "pairset:", "recycle:", "sleeve:")   # day 9: sleeve lots are settlement holds
+    REBUILD_SKIP = ("manual", "pairset:", "recycle:", "sleeve:", "wall:")   # day 9: sleeve lots and Piero's wall lots have their own exits (C78)
 
     def rebuild_plan(self, cash, now, free, pending):
         """Oct 5 22:50 (Piero): while free cash above the floor is under 15k, sell engine lots at the SIG bid: lots the bid
