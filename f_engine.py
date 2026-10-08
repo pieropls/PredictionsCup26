@@ -55,7 +55,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      TM_E_MIN, TM_IMPROVE_SPREAD, TM_CLIP, TM_CLIP_PILOT, TM_DEPTH_SHARE, TM_MIN_QTY, TM_INV_MARKET, TM_INV_MARKET_PILOT, TM_CAP_COST, TM_CAP_COST_PILOT,
                      TM_SIDES_PILOT, TM_TTL_S, TM_REPEG_TICKS, TM_EXIT_FIRST, TM_EXIT_STEP_S, TM_EXIT_LATE, TM_WRITES_PER_MIN, TM_NEWS_C, TM_NEWS_WINDOW_S, TM_REQUOTE_S,
                      TM_GLIDE_START, TM_DEPTH_CACHE_S, TM_GATE_MIN_FILLS, TM_E_MIN_LOW, TM_CAP_LOG_STEP, TM_RT_HI, TM_RT_LO, TM_RT_GRACE_S, TM_CLIP_HI, TM_INV_HI, TM_INV_LO,
-                     ROTATION_EDGE_LEFT, ROTATION_FUND_EDGE, ROTATION_MARKETS,
+                     ROTATION_EDGE_LEFT, ROTATION_FUND_EDGE, ROTATION_MARKETS, ROTATION_RET_LEFT, ROTATION_STOP_ABOVE,
                      SM_CLIP, SM_CLIP_PILOT, SM_DEPTH_SHARE, SM_MIN_QTY, SM_CAP_SH, SM_CAP_SH_PILOT, SM_CAP_COST, SM_CAP_COST_PILOT, SM_MARKETS, SM_MARKETS_PILOT,
                      SM_FAIR_LO, SM_FAIR_HI, SM_TTL_S, SM_REPEG_TICKS, SM_WRITES_PER_MIN, SM_NEWS_C, SM_NEWS_WINDOW_S, SM_REQUOTE_S, SM_SWEEP_C, SM_SWEEP_HOLD_S,
                      SM_GLIDE_START, SM_DEPTH_CACHE_S, SM_GATE_RT, SM_GATE_PER_RT, SM_GATE_MO30, SWING_BAND,
@@ -79,7 +79,7 @@ from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TI
                       OPPORTUNITY_RESERVE, ROC_MIN, ROC_MIN_TIGHT, RELEASE_EVERY_S, RELEASE_MARKETS, RELEASE_PILOT_TARGET,
                       FAT_LEVELS, FAT_SIZES, FAT_MIN_FAIR, FAT_UNMAPPED_REF, FAT_FAIR_CAP, FAT_TTL_S, FAT_QUEUE_S, FAT_REARM_S,
                       FAT_NEWS_DROP, FAT_NEWS_WINDOW_S, FAT_NEWS_HOLD_S, FAT_MOVE, FAT_CAPACITY_SHARE, FAT_BOOK_READS, QTY_TOL,
-                      FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, RELEASE_QUIET_HOURS, LIQUIDATE, PNL_READ_S, ORDERS_READ_S, PRICE_ROTATE, LEADERS_EVERY_S, TAPE_MIN_PER_MIN, FILLS_READ_S, POSITIONS_READ_S, SAMPLER_EVERY_S, SAMPLER_PER_LOOP, SAMPLER_DEPTH, LIFECYCLE_LAYERS, LIFECYCLE_MARKS_S,
+                      FAT_REFRESH_MAX_H, FILL_POLL_S, SETTLE_DATE, ROC_HOLD_MIN, RELEASE_QUIET_HOURS, LIQUIDATE, PNL_READ_S, ORDERS_READ_S, PRICE_ROTATE, LEADERS_EVERY_S, TAPE_MIN_PER_MIN, FILLS_READ_S, POSITIONS_READ_S, SAMPLER_EVERY_S, SAMPLER_PER_LOOP, SAMPLER_DEPTH, LIFECYCLE_LAYERS, LIFECYCLE_MARKS_S, SPARE_KEEP,
                       BACKOFF_429_S, BACKOFF_LOOP_S, TMM_TTL_S, LADDER_TTL_S, RECYCLE_TAKE_TTL_S, TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_TTL_S, DUMP_TTL_S, DUMP_MIN_FAIR, DUMP_V3_OFFSETS, DUMP_V3_WEIGHTS, DUMP_FAIR_GAP, DUMP_SLIDE, DUMP_SIDE_DIV, DUMP_SIDE_MIN,
                       DUMP_SIDE_MAX, DUMP_ARENA_MULT, DUMP_ARENA_N, DUMP_SELL_MIN, DUMP_SELL_FAIR_GAP, DUMP_STEP1_S, DUMP_STEP2_S, DUMP_STEP_MIN,
                       DUMP_STEP2_MIN, DUMP_ARENA_MAX, DUMP_SIDE_HARD_MAX, DUMP_PARTY_CAP, RATCHET_STEP, RATCHET_EVERY_S,
@@ -383,7 +383,7 @@ class Engine:
         self.release_now, self.release_t, self.depth_cache = {}, 0.0, {}
         self.px_rot, self.open_read_t, self.open_wsig, self.pnl_read_t, self.last_fill_exs = 0, None, None, 0.0, set()   # day 4 §4
         self.fills_read_t, self.pos_read_t, self.last_pos_raw, self.reads_report_t = None, None, [], time.time()   # ideas_backlog Oct 8: polling cuts + the hourly reads-by-purpose line
-        self.sample_t, self.lifecycle, self.lifecycle_seen_ts, self.lifecycle_done = {}, {}, 0.0, collections.deque(maxlen=20000)   # the book sampler and the order-lifecycle log
+        self.sample_t, self.lifecycle, self.lifecycle_seen_ts, self.lifecycle_done = {}, {}, time.time(), collections.deque(maxlen=20000)   # the book sampler and the order-lifecycle log (orders placed from now on; C84 backfilled the old ones with wrong marks)
         self.release_demand = None
         self.loop_end_t, self.cap_use_hist = None, collections.deque(maxlen=2000)   # dashboard v4
         self.release_name = os.path.basename(os.path.realpath(os.path.join(os.path.dirname(DATA), "run"))) if os.path.exists(os.path.join(os.path.dirname(DATA), "run")) else ""
@@ -401,7 +401,7 @@ class Engine:
         self.big_sweep, self.big_sweep_t = set(), 0.0                    # day 10 §4.2: big-sweep sides (clips to 4k)
         self.fm_now, self.fm_block, self.fm_fills, self.fm_note, self.fm_poll = {}, {}, collections.deque(maxlen=5000), {}, None   # mm_plan §1: the fair maker
         self.tm_now, self.tm_view, self.tm_block, self.tm_fills, self.tm_note, self.tm_depth, self.off24, self.tm_cov, self.tm_wpeak = {}, {}, {}, collections.deque(maxlen=5000), {}, {}, {}, {}, 0   # day 11 §2: the touch maker
-        self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged = None, [], [], [], {}   # Piero 22:15 Oct 7 (C82): dynamic TM cap, rotation demand
+        self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
         self.fast_seen, self.fast_rearms, self.fast_slow, self.fast_orders, self.fast_stats = set(), collections.defaultdict(list), {}, {}, collections.Counter()   # mm_plan §2: the fast path
         self.in_use_hist, self.use_peak, self.rule0_log, self.rule0_blocked, self.lots_cache = collections.deque(maxlen=3000), 0.0, {}, collections.deque(maxlen=5000), (None, {})   # §9
@@ -442,6 +442,10 @@ class Engine:
             self.sm_migrations()
         except Exception as err:
             print(f"spread maker migrations: {err!r}")
+        try:
+            self.band_credit_migration()
+        except Exception as err:
+            print(f"band credit migration: {err!r}")
         try:                                                # Oct 5 02:30: undo synthetic fills that duplicated a SIG fill
             fixed = self.ledger.dedup_synthetic()          # booked <= quantity per order + phantom netting (no time-window pairing)
             if fixed["removed"] or fixed["netted"]:
@@ -624,8 +628,8 @@ class Engine:
             self.pos_read_t, self.last_pos_raw = now, list(got["pos"])
         if now - self.reads_report_t >= 3600:               # the hourly reads-by-purpose line (before / after the polling cuts)
             self.reads_report_t = now
-            rb = api.reads_by_purpose(3600) if hasattr(api, "reads_by_purpose") else {}
-            msg = f"READS last 60 min: {sum(rb.values()):.0f}/min of the {getattr(api, 'READ_BUDGET', 95)} budget — " + (", ".join(f"{k} {v:g}" for k, v in rb.items()) or "n/a")
+            rb = api.reads_by_purpose(600) if hasattr(api, "reads_by_purpose") else {}   # a 10-min window: the call log holds ~2,000 entries, under an hour at 77/min
+            msg = f"READS last 10 min: {sum(rb.values()):.0f}/min of the {getattr(api, 'READ_BUDGET', 95)} budget — " + (", ".join(f"{k} {v:g}" for k, v in rb.items()) or "n/a")
             self.event("READS", msg)
             self.night.line(msg)
         got["px"] = {**{ex: v for ex, v in self.px.items() if ex not in got["px"]}, **got["px"]}   # rotated markets keep their last price
@@ -997,7 +1001,7 @@ class Engine:
         due = sorted((ex for ex in self.sampler_targets() if now - self.sample_t.get(ex, 0) >= SAMPLER_EVERY_S), key=lambda e: self.sample_t.get(e, 0))
         n = 0
         for ex in due[:SAMPLER_PER_LOOP]:
-            if not api.spare_reads():
+            if not api.spare_reads(keep=max(1, SPARE_KEEP // 2)):   # the sampler is the freed budget's first consumer: it runs to READ_BUDGET - 10
                 break
             try:
                 bids, asks = api.orderbook(ex, depth=SAMPLER_DEPTH)
@@ -4667,11 +4671,24 @@ class Engine:
                 left -= take
                 if left < MIN_QTY:
                     break
-        if held < band["hi"] - MIN_QTY and no_bid is not None and fs is not None:
+        free = self.free_cash()
+        cash = (min(self.cash_hist) if getattr(self, "cash_hist", None) else 0.0)
+        credit = float(band.get("credit") or 0.0)
+        sold_q, sold_val = float(band.get("sold_q") or 0.0), float(band.get("sold_val") or 0.0)
+        sell_avg = (sold_val / sold_q) if sold_q >= 1 else None
+        if held < band["hi"] - MIN_QTY and no_bid is not None and fs is not None and self.entry_budget(cash) > 0:   # the 2k guard stops every entry
             p = keep("swing", no_bid)
-            if fs - p >= band["buy_min_edge"] - 1e-9 and p < (no_ask if no_ask is not None else 1.0) - 1e-9:
+            if no_ask is not None and p >= no_ask - 1e-9:
+                p = no_bid                                  # a kept price that now meets our own ask is re-pegged to the touch
+            if sell_avg is not None:
+                p = min(p, round(sell_avg - band.get("buy_under_sell", 0.01), 3))   # C84b (Piero 06:35): each buy at most the cycle's sell price - 1c
+            if fs - p >= band["buy_min_edge"] - 1e-9 and p < (no_ask if no_ask is not None else 1.0) - 1e-9 and p >= MB_MIN_PX:
                 room = self.race_room(ex, side, fs)
                 q = int(min(band["clip"], band["hi"] - held, room / p if room > 0 else 0))
+                if credit < p * MIN_QTY and free < self.buffer():
+                    q = 0                                   # no band credit and no idle cash: the buy leg waits (cash-neutral band)
+                elif free < self.buffer():
+                    q = int(min(q, credit / p))             # within the band's own sale proceeds
                 if q >= MIN_QTY:
                     plan["buy"] = dict(side=side, px=round(p, 3), qty=q, sub=swing_sub, ttl=SWING_TTL_S)
         return {ex: plan} if (plan["sells"] or plan.get("buy")) else {}
@@ -4751,6 +4768,22 @@ class Engine:
             if f["layer"] not in ("swing", "swingsell"):
                 continue
             changed = True
+            band = cfg.get("band")
+            if band is not None:                            # C84b: the band's cash-neutral credit and its cycle log
+                if f["layer"] == "swingsell":
+                    sale_px = round(1 - f["price"], 3) if f["side"] != cfg["side"] else f["price"]
+                    band["credit"] = float(band.get("credit") or 0.0) + f["qty"] * sale_px
+                    band["sold_q"] = float(band.get("sold_q") or 0.0) + f["qty"]; band["sold_val"] = float(band.get("sold_val") or 0.0) + f["qty"] * sale_px
+                else:
+                    band["credit"] = float(band.get("credit") or 0.0) - f["qty"] * f["price"]
+                    band["bought_q"] = float(band.get("bought_q") or 0.0) + f["qty"]; band["bought_val"] = float(band.get("bought_val") or 0.0) + f["qty"] * f["price"]
+                    if band["bought_q"] >= float(band.get("sold_q") or 0.0) - 1 and float(band.get("sold_q") or 0.0) >= 1:
+                        sq, sv, bq, bv = float(band["sold_q"]), float(band["sold_val"]), band["bought_q"], band["bought_val"]
+                        cyc = (f"BAND cycle {self.name(f['ex'])}: sold {sq:,.0f} NO at {sv / sq:.3f}, bought back {bq:,.0f} at {bv / bq:.3f} = {(sv / sq - bv / bq) * 100:+.2f}c per share "
+                               f"({sv - bv * (sq / bq):+,.0f} on the cycle); credit left {band['credit']:,.0f}")
+                        self.event("SWING", cyc); self.night.line(cyc)
+                        band["cycles"] = int(band.get("cycles") or 0) + 1
+                        band.update(sold_q=0.0, sold_val=0.0, bought_q=0.0, bought_val=0.0)
             if f["layer"] == "swingsell":
                 st["sold"] += f["qty"]; st["realized"] += f.get("realized") or 0.0
                 msg = f"SWING sell leg {self.name(f['ex'])}: {f['qty']:,.0f} {cfg['side'].upper()} sold at {1 - f['price'] if f['side'] != cfg['side'] else f['price']:.3f}, realized {(f.get('realized') or 0):+,.0f}"
@@ -5456,7 +5489,7 @@ class Engine:
                     round_trips=st.get("round_trips", 0), inventory=inv, cost=round(self.tm_cost(), 2), mo30=self.tm_markout(1800), cov=self.tm_cov,
                     writes_last_min=self.tm_writes_last_min(time.time()), on=self.controls.on("tm"), state=self.controls.state("tm"))
 
-    ROTATION_SKIP = ("manual", "pairset:", "recycle:", "sleeve:", "wall:", "swing:", "fm:")   # Piero 22:15: never manual, wall, sleeve or pair-set lots; swing / fm / recycle have their own exits
+    ROTATION_SKIP = ("manual", "pairset:", "recycle:", "sleeve:", "wall:", "swing:", "fm:", "tm:", "sm:")   # Piero 22:15: never manual, wall, sleeve or pair-set lots; swing / fm / recycle / tm / sm have their own exits (the TM's and SM's already sit at the touch ask)
 
     def rotation_plan(self, cash, now):
         """Piero 22:15 Oct 7 (C82 item 4): while free cash < BUFFER, sell holdings with < 4c of edge left to settlement at the SIG
@@ -5464,12 +5497,20 @@ class Engine:
         entries with >= 8c edge that were cut for budget (dump levels and TM sides). Each sale is logged with the edge
         given up vs the edge bought. Sales flow through the release path (a limit at the bid, sized to the top of book)."""
         free = cash - CASH_RESERVE
-        if free >= self.buffer() or self.controls.paused or self.fills_blind:
+        B = self.buffer()
+        if self.controls.paused or self.fills_blind:
             return {}
+        if free < B:
+            if not self.rotation_on:
+                self.rotation_on = True
+                self.event("RELEASE", f"ROTATION on: free {free:,.0f} < BUFFER {B:,.0f} — lots with < {ROTATION_RET_LEFT:.0%} return left to settlement rest asks at the touch, lowest return first, until free >= {B + ROTATION_STOP_ABOVE:,.0f}")
+        elif free >= B + ROTATION_STOP_ABOVE and self.rotation_on:
+            self.rotation_on = False
+            self.event("RELEASE", f"ROTATION off: free {free:,.0f} >= BUFFER + {ROTATION_STOP_ABOVE:,}")
+        if not self.rotation_on:
+            return {}
+        need = B + ROTATION_STOP_ABOVE - free              # Piero 06:35 Oct 8: run while free < BUFFER, stop once free >= BUFFER + 5k
         demand_rows = sorted([(e, c, px) for e, c, px in self.dump_cut_rows + self.tm_unfunded if e >= ROTATION_FUND_EDGE - 1e-9], reverse=True)
-        need = sum(c for _, c, _ in demand_rows)
-        if need < MIN_QTY:
-            return {}
         cands = []
         for ex, b in self.book.items():
             q = b["pos"]
@@ -5482,8 +5523,9 @@ class Engine:
                 continue
             bid = ask                                       # turnover_plan §2.2: a resting ask at the touch (joins the best ask of the held side), never a market order
             left = fs - bid
-            if left >= ROTATION_EDGE_LEFT - 1e-9:
-                continue                                    # still >= 6c to settlement: kept
+            ret = left / bid if bid > 0 else 1.0
+            if ret >= ROTATION_RET_LEFT - 1e-9:
+                continue                                    # still >= 8% return left to settlement: kept (C84b: by return, not by cents)
             split = {}
             for sub, v in self.ledger.subbooks.get(ex, {}).items():
                 if v * q <= 0 or sub.startswith(self.ROTATION_SKIP):
@@ -5497,7 +5539,7 @@ class Engine:
             if split:
                 cands.append((left, ex, side, bid, split))
         plan, raised = {}, 0.0
-        for left, ex, side, bid, split in sorted(cands):   # lowest edge first
+        for left, ex, side, bid, split in sorted(cands, key=lambda c_: (c_[0] / c_[3] if c_[3] > 0 else 1.0)):   # lowest return left first
             if raised >= need or len(plan) >= ROTATION_MARKETS:
                 break
             qty = int(min(sum(split.values()), (need - raised) / bid))   # a resting ask: no depth cap
@@ -5527,8 +5569,8 @@ class Engine:
             if self.rotation_logged.get(ex) == key:
                 continue                                    # the same ask as last loop: already logged (C84: no line per loop)
             self.rotation_logged[ex] = key
-            msg = (f"ROTATION ask {self.name(ex)} {side.upper()} {n:,} at the touch {bid:.3f}: {left * 100:.1f}c left to settlement, free {free:,.0f} < BUFFER {self.buffer():,.0f}; "
-                   f"edge given up {given:+,.0f} vs cash freed {n * bid:,.0f} (edge bought {bought:+,.0f} on {min(n * bid, need):,.0f} of {need:,.0f} cut entries with >= {ROTATION_FUND_EDGE * 100:.0f}c edge)")
+            msg = (f"ROTATION ask {self.name(ex)} {side.upper()} {n:,} at the touch {bid:.3f}: {left / bid:.1%} return left to settlement ({left * 100:.1f}c), free {free:,.0f}, target {B + ROTATION_STOP_ABOVE:,.0f}; "
+                   f"edge given up {given:+,.0f}, cash freed {n * bid:,.0f}" + (f" (cut entries with >= {ROTATION_FUND_EDGE * 100:.0f}c edge waiting: {sum(c for _, c, _ in demand_rows):,.0f})" if demand_rows else ""))
             self.rotation_log.append((now, msg))
             self.event("RELEASE", msg)
             self.night.line(msg)
@@ -5868,6 +5910,22 @@ class Engine:
         self.fast_stats["sm_refills"] += 1
         self.event("FAST", f"FAST SM refill {self.name(ex)} {side_filled.upper()}: {len(items)} quote(s), {time.time() - t_ev:.2f} s after the fill event")
         return n
+
+    def band_credit_migration(self):
+        """Once (C84b, Piero 06:35 Oct 8): the band credit starts at 0 at the deploy; the band's own sale proceeds fund its buys."""
+        c = self.controls
+        sw = c.d.get("swing") or {}
+        band = sw.get("band")
+        if not band or "credit" in band:
+            return
+        with c.lock:
+            band.update(credit=0.0, sold_q=0.0, sold_val=0.0, bought_q=0.0, bought_val=0.0, cycles=0)
+            c.d["swing"] = sw
+            c.save()
+        msg = (f"BAND credit starts at 0 (C84b): RI Senate R NO sold by the band adds its proceeds, buys spend it at <= the cycle's sell price - {band.get('buy_under_sell', 0.01) * 100:.0f}c; "
+               f"buys beyond the credit only while free >= BUFFER; the 2k guard stops every entry; sells unchanged (rule 0)")
+        self.event("SWING", msg)
+        self.night.line(msg)
 
     def sm_migrations(self):
         """Once (C84): the spread-maker pilot on (20 markets, +/- 1k, 10k, <= 10 writes/min) and the RI band replacing the fixed swing legs."""

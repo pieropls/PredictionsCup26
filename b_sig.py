@@ -42,6 +42,8 @@ def _req(method, path, timeout=None, **kw):
             _writes.append(time.time())
     kind = "read" if method == "GET" else "write"
     purpose = _purpose(path)
+    if purpose == "book":
+        purpose = f"book{(kw.get('params') or {}).get('depth', '')}"   # book1 = TM / SM touch sizes, book5 = the sampler and the fast path, book50 = pair books
     for attempt in range(3 if method == "GET" else 1):          # reads retry; writes are reconciled next loop instead
         t0 = time.time()
         try:

@@ -969,6 +969,8 @@ class ReleaseTests(EngineCase):
         self.assertTrue(any(e["kind"] == "RELEASE" for e in eng.events))
 
     def test_release_off_does_nothing(self):
+        self.addCleanup(setattr, f_engine, "RULES_V2", f_engine.RULES_V2)
+        f_engine.RULES_V2 = False                              # day 11 rules v2 add the rotation, which rides the release path by design (RulesV2Tests)
         fresh_data(layers=dict(position=dict(state="full"), recycler=dict(state="full")))
         fake = new_fake(writes_per_min=10_000)
         base = fake.pnl()
@@ -3648,19 +3650,17 @@ class RulesV2Tests(EngineCase):
         eng.ledger.tranches[f"wall:{ex}:yes:w1"] = dict(ex=ex, side="yes", kind="wall", state="open", ts=time.time(), t="x", avg=round(bid - 0.02, 3))
         eng.lots_cache = (None, {})
         now = time.time()
-        # no cut entries with >= 8c edge: nothing is rotated
-        eng.dump_cut_rows, eng.tm_unfunded = [(0.05, 5_000.0, 0.85)], []
-        self.assertEqual(eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now), {})
-        # 8c-edge entries cut for budget: the dump lot sells at the bid, the wall lot never
-        eng.dump_cut_rows = [(0.09, 1_000.0, 0.85)]
+        # C84b (Piero 06:35): the rotation runs while free < BUFFER (no demand coupling), lowest return left first; the wall lot never
+        eng.dump_cut_rows, eng.tm_unfunded = [], []
         plan = eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now)
+        self.assertTrue(eng.rotation_on)
         self.assertIn(ex, plan, plan)
         self.assertEqual(plan[ex]["why"], "rotation")
         self.assertEqual(set(plan[ex]["subs"]), {f"dump:{ex}:yes:1"}, "never a wall lot")
-        self.assertLessEqual(sum(plan[ex]["subs"].values()) * bid, 1_000.0 + bid * a_config.MIN_QTY, "only up to the cut entries' cost")
+        self.assertTrue(any("ROTATION on:" in e["text"] for e in eng.events))
         self.assertAlmostEqual(plan[ex]["px"], round(bid + 0.005, 3), places=3, msg="a resting ask at the touch ask (turnover_plan §2.2), not the bid")
         line = next(e["text"] for e in eng.events if e["text"].startswith("ROTATION ask"))
-        self.assertIn("edge given up", line); self.assertIn("cash freed", line)
+        self.assertIn("return left", line); self.assertIn("edge given up", line); self.assertIn("cash freed", line)
         # rule 0: entry 0.5c above the ask -> this lot is not sold (the fixture's other holdings may still rotate)
         eng.ledger.tranches[f"dump:{ex}:yes:1"]["avg"] = round(bid + 0.010, 3)
         eng.lots_cache = (None, {})
@@ -3671,9 +3671,13 @@ class RulesV2Tests(EngineCase):
         self.assertNotIn(ex, eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now))
         eng.ledger.tranches[f"dump:{ex}:yes:1"]["avg"] = round(bid - 0.02, 3)
         eng.lots_cache = (None, {})
-        self.assertEqual(eng.rotation_plan(a_config.CASH_RESERVE + 30_000, now), {}, "free >= BUFFER: no rotation")
-        fake.px[ex] = eng.px[ex] = (round(fs - 0.07, 3), round(fs - 0.065, 3), fs - 0.07)
-        self.assertNotIn(ex, eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now), "6.5c left to settlement at the ask: kept")
+        self.assertEqual(eng.rotation_plan(a_config.CASH_RESERVE + 30_000, now), {}, "free >= BUFFER + 5k: the rotation switches off")
+        self.assertFalse(eng.rotation_on)
+        eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now)
+        self.assertTrue(eng.rotation_on)
+        self.assertNotEqual(eng.rotation_plan(a_config.CASH_RESERVE + 22_000, now), {}, "between BUFFER and BUFFER + 5k it keeps running (hysteresis)")
+        fake.px[ex] = eng.px[ex] = (round(fs - 0.10, 3), round(fs - 0.095, 3), fs - 0.10)
+        self.assertNotIn(ex, eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now), ">= 8% return left at the ask: kept")
 
     def test_ri_unfrozen_for_turnover_with_a_held_cap_and_the_15c_rule(self):
         fake, eng, favs = self.rig(cash_above_floor=60_000)
@@ -4176,7 +4180,7 @@ class ReadBudgetTests(EngineCase):
         self.assertEqual(b_sig._purpose("/tournaments/x/portfolio/fills"), "fills"); self.assertEqual(b_sig._purpose("/exchanges/12/orderbook"), "book")
         eng.reads_report_t = time.time() - 3601
         loop(eng, fake)
-        self.assertTrue(any(e["text"].startswith("READS last 60 min") for e in eng.events))
+        self.assertTrue(any(e["text"].startswith("READS last 10 min") for e in eng.events))
 
     def test_book_sampler_writes_samples_and_feeds_the_depth_caches(self):
         fake, eng = self.rig()
@@ -4469,15 +4473,42 @@ class SwingTests(EngineCase):
         self.assertEqual(sells[0]["qty"], a_config.SWING_BAND["clip"])
         self.assertEqual(self.legs(eng, fake, ex, "swing"), [], "NO bid 0.86 is 13.35c under fair NO: no buy")
         FAIR[ex] = 0.0
+        band = eng.controls.d["swing"]["band"]
+        band.update(credit=0.0, sold_q=0.0, sold_val=0.0, bought_q=0.0, bought_val=0.0)
+        eng.controls.d["buffer"] = dict(value=40_000, day=time.strftime("%Y-%m-%d"))   # C84b: free 30k < BUFFER 40k and credit 0 -> no band buys (the sells stay)
         loop(eng, fake); loop(eng, fake)
+        self.assertEqual(self.legs(eng, fake, ex, "swing"), [], "credit 0 and no idle cash: the band does not buy")
+        self.assertTrue(self.legs(eng, fake, ex, "swingsell"))
+        # a sell fills: the credit funds a buy-back at <= the sell price - 1c, sized within the credit
+        sells = self.legs(eng, fake, ex, "swingsell")
+        fake.fill(sells[0]["id"], sells[0]["qty"])
+        loop(eng, fake); loop(eng, fake)
+        self.assertAlmostEqual(band["credit"], 1000 * 0.865, delta=1.0, msg="the sale's proceeds are the band's credit")
         buys = self.legs(eng, fake, ex, "swing")
         self.assertEqual(len(buys), 1, buys)
-        self.assertAlmostEqual(buys[0]["price"], 0.86, places=3, msg="NO bid at the NO touch bid, 14c under fair")
+        self.assertLessEqual(buys[0]["price"], 0.865 - 0.01 + 1e-9, "at most the sell price - 1c")
+        self.assertLessEqual(buys[0]["price"] * buys[0]["qty"], band["credit"] + 1.0, "within the credit")
+        # the 2k guard stops every entry, credit or not
+        cash_was = eng.cash_hist; eng.cash_hist = [a_config.CASH_RESERVE + 1_000]
+        plan = eng.swing_plan(time.time())
+        self.assertNotIn("buy", plan.get(ex, {}), "free < 2k: no band buy")
+        eng.cash_hist = cash_was
+        # idle cash (free >= BUFFER): buys beyond the credit
+        eng.controls.d["buffer"] = dict(value=10_000, day=time.strftime("%Y-%m-%d"))
+        band.update(credit=0.0, sold_q=0.0, sold_val=0.0, bought_q=0.0, bought_val=0.0)
+        loop(eng, fake); loop(eng, fake)
+        buys = self.legs(eng, fake, ex, "swing")
+        self.assertEqual(len(buys), 1, (buys, eng.swing_plan(time.time()), dict(band), eng.free_cash(), eng.buffer(), eng.race_room(ex, "no", eng.side_fair(ex, "no")), eng.ledger.subbooks.get(ex), fake.pos.get(ex)))
+        self.assertIn(round(buys[0]["price"], 3), (0.855, 0.86), "at the NO touch bid (0.86), or the kept 0.855 order one tick behind it")
+        sells = self.legs(eng, fake, ex, "swingsell")
+        self.assertTrue(sells)
         self.assertLess(buys[0]["price"], 1 - sells[0]["price"], "the bid stays under our ask")
-        fake.px[ex] = (0.13, 0.135, 0.1325)                   # NO touch 0.865 / 0.87: one tick: both legs keep their place
+        fake.px[ex] = (0.14, 0.145, 0.1425)                   # NO touch 0.855 / 0.86, one tick down: the sell keeps its place (one tick behind), the buy re-pegs off our own ask
         loop(eng, fake); loop(eng, fake)
         self.assertEqual({o["id"] for o in self.legs(eng, fake, ex, "swingsell")}, {sells[0]["id"]})
-        self.assertEqual({o["id"] for o in self.legs(eng, fake, ex, "swing")}, {buys[0]["id"]})
+        buys = self.legs(eng, fake, ex, "swing")
+        self.assertEqual(len(buys), 1, buys)
+        self.assertAlmostEqual(buys[0]["price"], 0.855, places=3, msg="the kept 0.86 would meet our own 0.86 ask: re-pegged to the touch bid")
         # under lo: no sells; at hi: no buys
         eng.controls.d["swing"]["band"] = dict(a_config.SWING_BAND, lo=25_000, hi=25_000)
         loop(eng, fake); loop(eng, fake)

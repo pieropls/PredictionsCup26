@@ -259,7 +259,8 @@ TM_E_MIN_LOW = 0.04             # e_min 2c while free cash >= BUFFER, 4c below i
 TM_CAP_LOG_STEP = 500           # TM cap = base (8k pilot / 20k full) + max(0, free - BUFFER), recomputed each loop, logged when it moves by a 500 step
 TM_RT_HI, TM_RT_LO, TM_RT_GRACE_S = 0.50, 0.20, 1800   # per-market 24-h round-trip share (shares sold / bought, buys older than 30 min): >= 50% -> clip 1k & cap 3k; < 20% -> cap 1k
 TM_CLIP_HI, TM_INV_HI, TM_INV_LO = 1_000, 3_000, 1_000
-ROTATION_EDGE_LEFT, ROTATION_FUND_EDGE, ROTATION_MARKETS = 0.06, 0.08, 3   # turnover_plan §2.2: under BUFFER, lots with < 6c left to settlement rest an ask AT THE TOUCH (not a market order) at >= entry + 0.5c (never >= 8c under fair; never manual / wall / sleeve / pair-set / swing / fm / recycle lots), lowest edge first, only to fund cut entries with >= 8c edge
+ROTATION_EDGE_LEFT, ROTATION_FUND_EDGE, ROTATION_MARKETS = 0.06, 0.08, 3   # (C82) turnover_plan §2.2; superseded by the return rule below (C84b)
+ROTATION_RET_LEFT, ROTATION_STOP_ABOVE = 0.08, 5_000   # Piero 06:35 Oct 8 (C84b): rotation by return, all day — lots with < 8% return left to settlement ((fair - ask) / ask), lowest first, an ask at the touch, while free < BUFFER; stops once free >= BUFFER + 5k (never >= 8c under fair; never manual / wall / sleeve / pair-set / swing / fm / recycle lots), lowest edge first, only to fund cut entries with >= 8c edge
 
 # turnover_plan §1 (C84): the spread maker (SM) — two-sided quoting at the touch on the bounciest markets, queue kept, refilled on fill
 SM_CLIP, SM_CLIP_PILOT = 1_000, 500            # clip = min(this, 30% of the touch level's size)
@@ -276,7 +277,7 @@ SM_GLIDE_START = FM_GLIDE_START                # inventory -> 0 from Nov 2 17:00
 SM_DEPTH_CACHE_S = 300
 SM_GATE_RT, SM_GATE_PER_RT, SM_GATE_MO30 = 0.40, 0.003, -0.005   # gates: round-trip share >= 40% of filled shares, realized > 0 and >= +0.3c per round-trip share, 30-min mark-out vs the SIG mid >= -0.5c, writes within budget, no I2 trims
 # turnover_plan §2.1: the RI Senate R band replaces the fixed swing legs — trade the NO inventory inside [27k, 42k] shares at the touch
-SWING_BAND = dict(lo=27_000, hi=42_000, sell_over_entry=0.01, buy_min_edge=0.14, clip=1_000)
+SWING_BAND = dict(lo=27_000, hi=42_000, sell_over_entry=0.01, buy_min_edge=0.14, clip=1_000, buy_under_sell=0.01)   # C84b: the buy leg is cash-neutral — a band credit (the band's own sale proceeds) funds buys at <= the cycle's sell price - 1c; beyond the credit only while free >= BUFFER
 DUMP_BIG_SWEEP_SH, DUMP_BIG_CLIP = 50_000, 4_000   # day 10 §4.2: sides whose 72-h median sweep >= 50k shares get L0/L1/L2 clips up to 4,000 (from 2,000)
 DUMP_V3_WEIGHTS_DAY_BIG = [0.45, 0.30, 0.05, 0.20]   # on those sides L3's share is trimmed to pay for it (L1 0.45, L2 0.30, L3 0.05, L4 0.20)
 # wall layer (Piero's manual pilot, Oct 5 23:40): one big resting order placed by control, with its buy-back, hold and news guard
