@@ -4287,6 +4287,14 @@ class ReservoirTests(EngineCase):
         plan = eng.reservoir_plan(time.time(), r)
         self.assertEqual(sum(x["qty"] for x in plan["sells"] if x["sub"] == "inventory"), 4_000)
 
+    def test_an_ask_never_crosses_the_bid(self):
+        fake, eng, ex, subs = self.rig()
+        fake.px[ex] = eng.px[ex] = (0.10, 0.105, 0.1025)       # NO bid 0.895 / ask 0.90: the 0.850 / 0.855 levels would cross
+        r = eng.controls.d["reservoirs"][ex]
+        plan = eng.reservoir_plan(time.time(), r)
+        self.assertTrue(plan["sells"])
+        self.assertTrue(all(x["px"] >= 0.90 - 1e-9 for x in plan["sells"]), [x["px"] for x in plan["sells"]])
+
     def test_rebuy_only_what_was_sold_3c_under_and_the_2k_guard(self):
         fake, eng, ex, subs = self.rig()
         sell = next(o for o in self.legs(eng, fake, ex, "swingsell") if eng.ledger.orders[o["id"]]["sub"] == subs[0])

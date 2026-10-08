@@ -4792,9 +4792,12 @@ class Engine:
                     continue                                # rule 0 per lot: this lot waits for a higher price
                 if sub == "inventory" or not t_avg:
                     q = min(q, self.rule0_allowed(ex, side, sub, float(sp), q))
+                ask_px = float(sp)
+                if no_bid is not None and ask_px <= no_bid + 1e-9:
+                    ask_px = round(no_bid + TICK, 3)        # C84h: never cross — a level under the market's bid rests one tick above the bid (a better price)
                 while q >= MIN_QTY:
                     take = int(min(q, r["clip"]))
-                    plan["sells"].append(dict(side=side, px=float(sp), qty=take, sub=sub, ttl=SWING_TTL_S))
+                    plan["sells"].append(dict(side=side, px=ask_px, qty=take, sub=sub, ttl=SWING_TTL_S))
                     q -= take
             out_sh = self.reservoir_out(r)
             cap_px = (float(r["last_sell_px"]) - r["rebuy_under_sell"]) if r.get("last_sell_px") else 1.0
