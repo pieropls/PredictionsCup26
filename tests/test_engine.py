@@ -597,14 +597,14 @@ class DashboardWiringTests(EngineCase):
                     f_engine.main()
             return str(cm.exception)
 
-        self.assertEqual(main_with("MacBookPino"), "engine would start", "the Wi-Fi hostname changed; the machine did not")
+        self.assertEqual(main_with(a_config.ENGINE_HOST), "engine would start", "the Wi-Fi hostname changed; the machine did not (the configured engine host: the server since the Oct 7 cutover)")
         os.remove(a_config.PID_FILE)
         msg = main_with("someone-elses-mac")
         self.assertIn("refusing --live", msg)
         self.assertFalse(os.path.exists(a_config.PID_FILE), "no pid file, no lock taken")
         self.assertIn("refusing --live", main_with(None), "no scutil and no data/host_id: refuse")
         with open(a_config.HOST_ID_FILE, "w") as fh:
-            fh.write("MacBookPino\n")
+            fh.write(a_config.ENGINE_HOST + "\n")
         self.assertEqual(main_with(None), "engine would start", "a VM identifies itself with data/host_id")
 
 
@@ -3200,7 +3200,8 @@ class CashGuardTests(EngineCase):
         xe = lambda w: w["edge"] * a_config.DUMP_REACH[w["lname"]] / w["weight"]
         rest = [xe(r[3]) for r in out[2:]]
         self.assertEqual(rest, sorted(rest, reverse=True), "then by expected edge")
-        self.assertEqual([r[3]["lname"] for r in out[2:]], ["L3", "L2", "L1"], "5c x 0.10 / 0.15 > 3c x 0.25 / 0.3 > 2c x 0.40 / 0.5")
+        exp = sorted(["L3", "L2", "L1"], key=lambda n: -{"L3": 0.05, "L2": 0.03, "L1": 0.02}[n] * a_config.DUMP_REACH[n] / a_config.ENTRY_WEIGHTS[n])
+        self.assertEqual([r[3]["lname"] for r in out[2:]], exp, "ranked by edge x reach / weight with the configured reach")
         out, cut, spent = eng.allocate_levels(rows, budget=1e9, l0_room=1_500)   # 8k cap: one L0 (900) fits, the second (900 more) does not
         self.assertEqual(sum(1 for r in out if r[3]["l0"]), 1)
         self.assertEqual(sum(1 for r in cut if r[3]["l0"]), 1)

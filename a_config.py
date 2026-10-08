@@ -26,7 +26,7 @@ def _api_key():
 API_KEY = _api_key()                                        # My Profile -> API Keys (read + trade)
 TOURNAMENT = "midterm-elections"
 DRY_RUN = True                  # f_engine.py --live switches this off
-ENGINE_HOST = os.environ.get("SIG_ENGINE_HOST", "MacBookPino")   # the ONE machine allowed to run --live, compared
+ENGINE_HOST = os.environ.get("SIG_ENGINE_HOST", "engine-host")   # the ONE machine allowed to run --live, compared
                                 # with `scutil --get LocalHostName` (or data/host_id), never the Wi-Fi-derived hostname
 
 # A2. engine loop and SIG limits (100 reads + 30 writes / min per account; SIG processes orders slowly under load) ----
@@ -201,7 +201,7 @@ UNCOVERED_LOG_S = 30            # §1.3: an eligible side without its level for 
 # Oct 5 22:50 (Piero): hard cash guards after the floor breach
 ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE = 1.5, 0.01, 3.0, 2_000   # day 8 §2: sum(resting cost x weight) <= 1.5 x free cash above the floor; < 2k free: none
 ENTRY_WEIGHTS = dict(L0=1.0, L1=0.5, L2=0.3, L3=0.15, L4=0.15, scalp=1.0, wall=1.0, fatfinger=0.05, longshot=0.05)
-DUMP_REACH = dict(L0=0.15, L1=0.40, L2=0.25, L3=0.10, L4=0.014)   # day 9 §3: share of dumps that reach the level (L0 = measured fill share)
+DUMP_REACH = dict(L0=1.0, L1=0.40, L2=0.05, L3=0.10, L4=0.014)    # day 10 §4.2 (C80): re-weighted from 24 h of live fills — L0 1.47 fills per level-hour (160x the assumption: it rests only during sweeps), L2 5x below its assumption, L3 and L1 within 2x (kept)
 BUDGET_K_MAX, BUDGET_K_MIN, BUDGET_K_STEP = 2.0, 1.0, 0.5          # day 9 §2: k x free; k_max from the replay (set before C71's build)
 BUDGET_K_TABLE = [(20_000, 3.0), (15_000, 3.0), (0, 2.0)]          # day 9 §9.2: k_max by free cash above the floor (>= 20k: 3.0; 15-20k: the replay-passing value; below: 2.0)
 BUDGET_K_TIER_HYST = 1_000                                         # move up a tier only once free is 1k past its line (no flapping)
@@ -212,6 +212,9 @@ DUMP_L0_BUDGET = 8_000          # L0 holds <= 8k at cost across all sides; refil
 REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2 = 15_000, 0.07, 0.10   # rebuild free cash to 15k: engine lots above entry + 0.5c at the bid, lowest gap first
 REBUILD_MARGIN, REBUILD_MARGIN_GAP = -0.01, 0.05 # Piero 23:00: lots <= 5c under fair may go down to entry - 1c for the rebuild
 REBUILD_EXC_FREE = 10_000       # day 8 §1.5: that exception runs only while free cash above the floor is under 10k
+REBUILD_MAX_GAP = 0.08          # day 10 §9.4: the rebuild never sells a lot >= 8c under fair; below the 15k line the catcher shrinks (k falls) instead
+DUMP_BIG_SWEEP_SH, DUMP_BIG_CLIP = 50_000, 4_000   # day 10 §4.2: sides whose 72-h median sweep >= 50k shares get L0/L1/L2 clips up to 4,000 (from 2,000)
+DUMP_V3_WEIGHTS_DAY_BIG = [0.45, 0.30, 0.05, 0.20]   # on those sides L3's share is trimmed to pay for it (L1 0.45, L2 0.30, L3 0.05, L4 0.20)
 # wall layer (Piero's manual pilot, Oct 5 23:40): one big resting order placed by control, with its buy-back, hold and news guard
 WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE = 24 * 3600, 6 * 3600, 0.02, 600, 2_000
 DUMP_V3_OFFSETS_DAY, DUMP_V3_WEIGHTS_DAY = [0.01, 0.02, 0.035, 0.05], [0.45, 0.25, 0.15, 0.15]   # §1.3: L4 in the day window (replay: 5c)

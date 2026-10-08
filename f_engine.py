@@ -53,6 +53,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      BUDGET_K_TABLE, BUDGET_K_TIER_HYST, RI_SENATE_RACE, RI_SENATE_ADD, RI_SENATE_MIN_EDGE,
                      SLEEVE_CAP, SLEEVE_MIN_FREE, SLEEVE_CLIP, SLEEVE_GAP_S, SLEEVE_TTL_S, SLEEVE_MIN_FAIR, SLEEVE_MIN_EDGE, SLEEVE_NEWS_C, SLEEVE_NEWS_WINDOW_S,
                      SLEEVE_NEWS_HOLD_S, SLEEVE_TARGETS, SWING, SWING_TTL_S, WALL_HOLD_MIN_FREE, WALL_RECYCLE_EXIT_C,
+                     REBUILD_MAX_GAP, DUMP_BIG_SWEEP_SH, DUMP_BIG_CLIP, DUMP_V3_WEIGHTS_DAY_BIG,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
@@ -384,6 +385,7 @@ class Engine:
         self.wall_now, self.wall_view = {}, {}               # Piero's manual walls (control `wall`)
         self.sleeve_now, self.sleeve_last, self.sleeve_block, self.sleeve_log = {}, {}, {}, []   # day 9 sleeve (settlement holds)
         self.swing_now, self.swing_block, self.swing_note = {}, 0.0, {}   # day 10 §3: the RI swing
+        self.big_sweep, self.big_sweep_t = set(), 0.0                    # day 10 §4.2: big-sweep sides (clips to 4k)
         self.in_use_hist, self.use_peak, self.rule0_log, self.rule0_blocked, self.lots_cache = collections.deque(maxlen=3000), 0.0, {}, collections.deque(maxlen=5000), (None, {})   # §9
         self.uncovered_since, self.uncovered_log, self.uncovered_n, self.refreshed = {}, {}, collections.deque(maxlen=2000), {}   # day 7 §1.3
         try:
@@ -656,6 +658,7 @@ class Engine:
                 self.wall_fill_events(new_f)
                 self.sleeve_fill_events(new_f)
                 self.swing_fill_events(new_f)
+                self.rule0_fill_check(new_f)
                 for f in new_f:                             # an order filled out before any snapshot showed it: no longer "acked, resting"
                     rec = self.ledger.orders.get(str(f.get("order") or ""))
                     if rec and rec.get("filled", 0) >= rec.get("qty", 0) - QTY_TOL:
@@ -2275,9 +2278,11 @@ class Engine:
         bid_s, ask_s = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)
         out, used = [], set()
         day = self.day_window(time.time())                  # day 6 §1.3: L4 (ref - 5c) and 45/25/15/15 in the day window
-        offs, ws = (DUMP_V3_OFFSETS_DAY, DUMP_V3_WEIGHTS_DAY) if day else (DUMP_V3_OFFSETS, DUMP_V3_WEIGHTS)
+        big = (ex, side) in self.big_sweep_sides(time.time())   # day 10 §4.2: 72-h median sweep >= 50k shares
+        offs, ws = (DUMP_V3_OFFSETS_DAY, (DUMP_V3_WEIGHTS_DAY_BIG if big else DUMP_V3_WEIGHTS_DAY)) if day else (DUMP_V3_OFFSETS, DUMP_V3_WEIGHTS)
+        clip = DUMP_BIG_CLIP if big else DUMP_L0_CLIP
         if l0_ok and fs >= DUMP_L0_MIN_FAIR - 1e-9 and bid_s is not None and bid_s <= fs - DUMP_L0_GAP + 1e-9 and MB_MIN_PX <= bid_s <= MB_MAX_PX:
-            q0 = min(DUMP_L0_CLIP, int(room / bid_s)) if room is not None else DUMP_L0_CLIP   # day 7 §2.1: L0 joins the best bid
+            q0 = min(clip, int(room / bid_s)) if room is not None else clip   # day 7 §2.1: L0 joins the best bid (4k on big-sweep sides)
             if q0 >= MIN_QTY:
                 out.append((4, bid_s, q0))
                 used.add(bid_s)
@@ -2292,6 +2297,8 @@ class Engine:
                 continue
             used.add(px)
             q = int(cost * w / px)
+            if big and i in (0, 1):
+                q = max(q, min(DUMP_BIG_CLIP, int(room / px) if room is not None else DUMP_BIG_CLIP))   # L1/L2 clips up to 4k on big-sweep sides
             if q >= MIN_QTY:
                 out.append((i, px, q))
         return out
@@ -4000,9 +4007,11 @@ class Engine:
         known = sum(l[0] for l in lots)
         ok = sum(l[0] for l in lots if l[2] == "day1" or l[1] + margin <= sale_px + 1e-9)
         if qty > known:                                     # shares the lot history can't place: the tranche's own entry (the
-            t = self.ledger.tranches.get(sub) or {}          # engine's record, e.g. a hand-over sub), else SIG's average cost
+            t = self.ledger.tranches.get(sub) or {}          # engine's record, e.g. a hand-over sub), else SIG's average cost —
             avg = float(t.get("avg") or 0) if sub.startswith(("dump:", "touch:", "scalp:", "wall:")) and t.get("avg") else \
                 float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
+            top = max((l[1] for l in lots if l[2] == "engine"), default=0.0)   # C80 (§9.4 b): never below the highest known engine entry of the sub
+            avg = max(avg, top)
             if avg and avg + margin <= sale_px + 1e-9:
                 ok += qty - known
         return int(max(0, min(qty, ok)))
@@ -4116,6 +4125,8 @@ class Engine:
             if bid is None or fs is None:
                 continue
             gap = fs - bid
+            if gap >= REBUILD_MAX_GAP - 1e-9:
+                continue                                    # day 10 §9.4: never sell a lot >= 8c under fair; the catcher shrinks instead
             margin = REBUILD_MARGIN if (gap <= REBUILD_MARGIN_GAP + 1e-9 and free < REBUILD_EXC_FREE) else RULE0_MARGIN   # day 8 §1.5: the -1c exception only under 10k free
             split = {}
             for sub, v in self.ledger.subbooks.get(ex, {}).items():
@@ -4275,6 +4286,70 @@ class Engine:
         if sold_out >= MIN_QTY and fs is not None and fs - float(cfg["buy_px"]) >= float(cfg["min_edge"]) - 1e-9:
             plan["buy"] = dict(side=side, px=float(cfg["buy_px"]), qty=int(sold_out), sub=f"swing:{ex}:{side}", ttl=SWING_TTL_S)
         return {ex: plan}
+
+    def rule0_fill_check(self, fills):
+        """C80 (§9.4 b): after every reducing fill of the engine's layers, compare the sale price with the FIFO lot entries it
+        consumed (day-1 lots exempt); a sale under entry + 0.5c is logged as RULE0 BROKEN with the shares and the gap."""
+        for f in fills:
+            if f["layer"] not in self.REDUCING and f["layer"] not in self.ledger.EXIT_LAYERS:
+                continue
+            if f["action"] != "buy":
+                continue
+            held = "no" if f["side"] == "yes" else "yes"
+            sub = (self.ledger.orders.get(str(f.get("order") or "")) or {}).get("sub") or "inventory"
+            sale = round(1 - f["price"], 3)
+            bad = 0
+            try:
+                for q, entry, origin in self.lots_before(f["ex"], held, sub, f):
+                    if origin == "engine" and sale < entry + RULE0_MARGIN - 1e-9:
+                        bad += q
+            except Exception:
+                continue
+            if bad >= MIN_QTY:
+                msg = f"RULE0 BROKEN {self.name(f['ex'])} {held.upper()} {sub}: {bad:,.0f} of {f['qty']:,.0f} sold at {sale:.3f} under their lot entry + 0.5c ({f['layer']})"
+                self.event("RULE0", msg)
+                self.night.line(msg)
+
+    def lots_before(self, ex, side, sub, fill):
+        """The FIFO lots of (ex, side, sub) that `fill` (a reducing fill) consumed: lots as of just before it."""
+        key_t = fill["t"]
+        book = collections.deque()
+        for g in sorted(self.ledger.fills, key=lambda x: x["t"]):
+            if g["ex"] != ex or g["t"] > key_t or g is fill:
+                continue
+            gsub = (self.ledger.orders.get(str(g.get("order") or "")) or {}).get("sub") or ("manual" if g.get("bot") in self.position_names else "inventory")
+            if gsub != sub:
+                continue
+            if g["action"] == "buy" and g["side"] == side:
+                book.append([g["qty"], g["price"], "day1" if g["t"] < DAY1_CUTOFF else "engine"])
+            elif g["action"] == "buy" and g["side"] != side:
+                q = g["qty"]
+                while q > 1e-9 and book:
+                    lot = book[0]; take = min(q, lot[0]); lot[0] -= take; q -= take
+                    if lot[0] <= 1e-9:
+                        book.popleft()
+        out, q = [], fill["qty"]
+        for lot in book:
+            if q <= 1e-9:
+                break
+            take = min(q, lot[0]); out.append((take, lot[1], lot[2])); q -= take
+        return out
+
+    def big_sweep_sides(self, now):
+        """Day 10 §4.2: (ex, side) whose median sweep in the last 72 h is >= 50k shares (from the intel events)."""
+        if now - self.big_sweep_t < 1800:
+            return self.big_sweep
+        self.big_sweep_t = now
+        by = collections.defaultdict(list)
+        try:
+            for e in intel._jsonl(os.path.join(DATA, "intel", "events.jsonl"), now - 72 * 3600):
+                if (e.get("value") or 0) >= 1000:
+                    side = "no" if e.get("wrong") == "YES buyer" else "yes"
+                    by[(str(e["ex"]), side)].append(float(e.get("shares") or 0))
+        except Exception:
+            return self.big_sweep
+        self.big_sweep = {k for k, v in by.items() if len(v) >= 3 and statistics.median(v) >= DUMP_BIG_SWEEP_SH}
+        return self.big_sweep
 
     def swing_fill_events(self, fills):
         cfg = self.swing_cfg()
