@@ -58,7 +58,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      ROTATION_EDGE_LEFT, ROTATION_FUND_EDGE, ROTATION_MARKETS, ROTATION_RET_LEFT, ROTATION_STOP_ABOVE,
                      SM_CLIP, SM_CLIP_PILOT, SM_DEPTH_SHARE, SM_MIN_QTY, SM_CAP_SH, SM_CAP_SH_PILOT, SM_CAP_COST, SM_CAP_COST_PILOT, SM_MARKETS, SM_MARKETS_PILOT,
                      SM_FAIR_LO, SM_FAIR_HI, SM_TTL_S, SM_REPEG_TICKS, SM_WRITES_PER_MIN, SM_NEWS_C, SM_NEWS_WINDOW_S, SM_REQUOTE_S, SM_SWEEP_C, SM_SWEEP_HOLD_S,
-                     SM_GLIDE_START, SM_DEPTH_CACHE_S, SM_GATE_RT, SM_GATE_PER_RT, SM_GATE_MO30, SWING_BAND, RESERVOIR, ENTRY_RESUME_FREE, RING_WINDOWS,
+                     SM_GLIDE_START, SM_DEPTH_CACHE_S, SM_GATE_RT, SM_GATE_PER_RT, SM_GATE_MO30, SWING_BAND, RESERVOIRS, ENTRY_RESUME_FREE, RING_WINDOWS,
                      SLEEVE_CAP, SLEEVE_MIN_FREE, SLEEVE_CLIP, SLEEVE_GAP_S, SLEEVE_TTL_S, SLEEVE_MIN_FAIR, SLEEVE_MIN_EDGE, SLEEVE_NEWS_C, SLEEVE_NEWS_WINDOW_S,
                      SLEEVE_NEWS_HOLD_S, SLEEVE_TARGETS, SWING, SWING_TTL_S, WALL_HOLD_MIN_FREE, WALL_RECYCLE_EXIT_C,
                      REBUILD_MAX_GAP, DUMP_BIG_SWEEP_SH, DUMP_BIG_CLIP, DUMP_V3_WEIGHTS_DAY_BIG,
@@ -403,7 +403,7 @@ class Engine:
         self.tm_now, self.tm_view, self.tm_block, self.tm_fills, self.tm_note, self.tm_depth, self.off24, self.tm_cov, self.tm_wpeak = {}, {}, {}, collections.deque(maxlen=5000), {}, {}, {}, {}, 0   # day 11 §2: the touch maker
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
-        self.entries_off, self.res_p10, self.res_p10_t, self.boot_t, self.ring_on = False, None, 0.0, time.time(), None   # C84c: the entry guard's hysteresis; the reservoir's 24-h p10 of RI NO prints; the start time (optional reads wait 2 min)
+        self.entries_off, self.res_p10, self.res_p10_t, self.boot_t, self.ring_on = False, {}, {}, time.time(), None   # C84c: the entry guard's hysteresis; the reservoir's 24-h p10 of RI NO prints; the start time (optional reads wait 2 min)
         self.fast_seen, self.fast_rearms, self.fast_slow, self.fast_orders, self.fast_stats = set(), collections.defaultdict(list), {}, {}, collections.Counter()   # mm_plan §2: the fast path
         self.in_use_hist, self.use_peak, self.rule0_log, self.rule0_blocked, self.lots_cache = collections.deque(maxlen=3000), 0.0, {}, collections.deque(maxlen=5000), (None, {})   # §9
         self.uncovered_since, self.uncovered_log, self.uncovered_n, self.refreshed = {}, {}, collections.deque(maxlen=2000), {}   # day 7 §1.3
@@ -3811,8 +3811,8 @@ class Engine:
             sell_px = (1 - exit_yes) if side == "no" else exit_yes   # what the held side fetches
             sell_px = max(sell_px, avg + RULE0_MARGIN)        # never below entry + 0.5c (rule 0)
             q_exit = abs(q)
-            if self.reservoir_cfg() and sub in self.reservoir_cfg()["tradable_subs"] and self.controls.on("swing"):
-                q_exit = 0.0                                # C84c: the reservoir owns these lots (its 0.860 asks replace the wall buy-backs)
+            if sub in self.reservoir_subs(ex) and self.controls.on("swing"):
+                q_exit = 0.0                                # C84c/g: a reservoir owns these lots (its asks replace the wall buy-backs)
             elif sub in (self.swing_cfg().get("wall_subs") or []) and self.controls.on("swing"):   # day 10 §3: the swing owns the slice; the wall exit covers only the hold part
                 q_exit = max(0.0, abs(q) - self.swing_slice_alloc().get(sub, 0.0))
             if q_exit < MIN_QTY:
@@ -4611,6 +4611,10 @@ class Engine:
         only while >= min_edge under fair and never more than was sold (race-cap neutral). Both legs are pulled while fair YES
         > max_fair_yes or after a >= 2c Polymarket rise in 10 min (30 min)."""
         c = self.controls
+        if self.reservoirs():
+            if not c.on("swing") or c.paused or self.fills_blind:
+                return {}
+            return self.reservoirs_plan(now)                # C84g: the reservoirs replace the swing legs and the band
         cfg = self.swing_cfg()
         if not cfg or not c.on("swing") or c.paused or self.fills_blind:
             return {}
@@ -4636,8 +4640,6 @@ class Engine:
             return {}
         if self.swing_block > now:
             return {}
-        if self.reservoir_cfg():
-            return self.reservoir_plan(now, f)
         if cfg.get("band"):
             return self.swing_band_plan(now, cfg, f)
         slice_held, sold_out, slice_in_walls, swing_q = self.swing_state()
@@ -4662,21 +4664,35 @@ class Engine:
             plan["buy"] = dict(side=side, px=float(cfg["buy_px"]), qty=int(sold_out), sub=f"swing:{ex}:{side}", ttl=SWING_TTL_S)
         return {ex: plan}
 
-    def reservoir_cfg(self):
-        return self.controls.d.get("reservoir") or None
+    def reservoirs(self):
+        return self.controls.d.get("reservoirs") or {}
 
-    def reservoir_held(self):
-        """(core shares, tradable shares by sub, total) of the RI reservoir."""
-        r = self.reservoir_cfg(); books = self.ledger.subbooks.get(str(r["ex"]), {})
-        core = abs(books.get(r["core_sub"], 0.0))
-        trad = {s_: abs(books.get(s_, 0.0)) for s_ in r["tradable_subs"]}
-        return core, trad, core + sum(trad.values())
+    def reservoir_subs(self, ex):
+        r = self.reservoirs().get(str(ex))
+        return {sub for sub, _ in r["offers"]} if r else set()
 
-    def reservoir_p10(self, now):
-        """The 24-h p10 of RI NO print prices from our own tape (1 - YES price), refreshed every 10 min."""
-        if now - self.res_p10_t < 600:
-            return self.res_p10
-        r = self.reservoir_cfg(); ex = str(r["ex"]); cut = now - 86400; vals = []
+    def reservoir_avail(self, r):
+        """{sub: shares offerable} — the core_sub keeps core_qty back (the highest-cost lots stay; rule 0 picks the cheap ones)."""
+        books = self.ledger.subbooks.get(str(r["ex"]), {})
+        out = {}
+        for sub, _ in r["offers"]:
+            q = abs(books.get(sub, 0.0)) if (books.get(sub, 0.0) < 0) == (r["side"] == "no") else 0.0
+            if sub == r["core_sub"]:
+                q = max(0.0, q - float(r.get("core_qty") or 0))
+            out[sub] = q
+        return out
+
+    def reservoir_total(self, r):
+        books = self.ledger.subbooks.get(str(r["ex"]), {})
+        subs = {sub for sub, _ in r["offers"]} | {r["core_sub"]}
+        return sum(abs(books.get(sub, 0.0)) for sub in subs)
+
+    def reservoir_p10(self, now, r):
+        """The 24-h p10 of the market's NO (held-side) print prices from our own tape, share-weighted, refreshed every 10 min."""
+        ex = str(r["ex"])
+        if now - self.res_p10_t.get(ex, 0.0) < 600:
+            return self.res_p10.get(ex)
+        cut, vals = now - 86400, []
         for day in (cut, now):
             path = os.path.join(DATA, "intel", "trades", time.strftime("%Y-%m-%d", time.localtime(day)) + ".jsonl")
             if not os.path.exists(path):
@@ -4688,138 +4704,156 @@ class Engine:
                     except ValueError:
                         continue
                     if str(x.get("ex")) == ex and (x.get("ts") or 0) >= cut and x.get("p") is not None:
-                        vals += [round(1 - float(x["p"]), 3)] * max(1, int(float(x.get("q") or 1) // 1000))   # share-weighted (per 1k)
+                        ps = round(1 - float(x["p"]), 3) if r["side"] == "no" else round(float(x["p"]), 3)
+                        vals += [ps] * max(1, int(float(x.get("q") or 1) // 1000))
         vals.sort()
-        self.res_p10, self.res_p10_t = (vals[int(0.10 * (len(vals) - 1))] if vals else None), now
-        return self.res_p10
+        self.res_p10[ex] = vals[int(0.10 * (len(vals) - 1))] if vals else None
+        self.res_p10_t[ex] = now
+        return self.res_p10[ex]
 
-    def reservoir_check_triggers(self, now, f):
-        """Rebuild triggers (Piero 10:10 §4): 24-h p10 of RI NO prints >= 0.85, PM fair moved >= 2c from the deploy, or Oct 30 00:00 PT."""
-        r = self.reservoir_cfg()
+    def reservoir_save(self, r):
+        c = self.controls
+        with c.lock:
+            c.d.setdefault("reservoirs", {})[str(r["ex"])] = r
+            c.save()
+
+    def reservoir_check_triggers(self, now, r, f):
+        """Rebuild triggers: 24-h p10 of NO prints >= trig_p10, PM fair moved >= 2c from the deploy, or Oct 30 00:00 PT."""
         if r.get("mode") == "rebuild":
             return
-        if r.get("fair0") is None and f is not None:        # C84d: the deploy ran before the first fair was in — pin the reference now
-            c = self.controls
-            with c.lock:
-                r["fair0"] = f; c.d["reservoir"] = r; c.save()
-            self.event("SWING", f"RESERVOIR fair reference pinned at {f:.4f} (PM fair YES at the first priced loop); the 2c-move trigger is live from here")
+        if r.get("fair0") is None and f is not None:        # the deploy ran before the first fair was in — pin the reference now
+            r["fair0"] = f
+            self.reservoir_save(r)
+            self.event("SWING", f"RESERVOIR {self.name(r['ex'])}: fair reference pinned at {f:.4f}; the 2c-move trigger is live from here")
         why = None
-        p10 = self.reservoir_p10(now)
+        p10 = self.reservoir_p10(now, r)
         if p10 is not None and p10 >= r["trig_p10"] - 1e-9:
-            why = f"24-h p10 of RI NO prints {p10:.3f} >= {r['trig_p10']}"
+            why = f"24-h p10 of NO prints {p10:.3f} >= {r['trig_p10']}"
         elif f is not None and r.get("fair0") is not None and abs(f - float(r["fair0"])) >= r["trig_fair_move"] - 1e-9:
             why = f"PM fair moved {abs(f - float(r['fair0'])) * 100:.1f}c from the deploy ({float(r['fair0']):.3f} -> {f:.3f})"
         elif now >= time.mktime(time.strptime(r["trig_date"], "%Y-%m-%d %H:%M:%S")):
             why = f"{r['trig_date']} reached"
         if why:
-            c = self.controls
-            with c.lock:
-                r["mode"] = "rebuild"; r["rebuild_t"] = stamp(); r["rebuild_why"] = why
-                c.d["reservoir"] = r
-                c.save()
-            msg = f"RESERVOIR -> REBUILD: {why}; selling stops, rebuying up to {r['full_qty']:,} NO at <= {r['rebuild_px']}"
+            r["mode"] = "rebuild"; r["rebuild_t"] = stamp(); r["rebuild_why"] = why
+            self.reservoir_save(r)
+            msg = f"RESERVOIR {self.name(r['ex'])} -> REBUILD: {why}; selling stops, rebuying up to {r['full_qty']:,} at <= {r['rebuild_px']}"
             self.event("SWING", msg); self.night.line(msg); self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
 
     def reservoir_resting(self):
-        """The reservoir's resting rebuy bids at cost (reserved first among entries, off the top of the entry budget)."""
-        r = self.reservoir_cfg()
-        if not r:
+        """The reservoirs' resting rebuy bids at cost — reserved first among entries inside the ring windows only (Piero 16:10)."""
+        rs = self.reservoirs()
+        if not rs or not self.ring_window(time.time()):
             return 0.0
-        return sum(o["qty"] * o["price"] for o in self.open if o["ex"] == str(r["ex"]) and o["action"] == "buy" and o["side"] == r["side"]
+        return sum(o["qty"] * o["price"] for o in self.open if o["ex"] in rs and o["action"] == "buy" and o["side"] == rs[o["ex"]]["side"]
                    and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "swing" and o["id"] not in self.ex.cancelling)
 
-    def reservoir_plan(self, now, f):
-        """{ex: {sells, buys}} (Piero 10:10 Oct 8, C84c). Trade mode: NO asks at sell_px for the tradable lots (largest sub first, one
-        clip <= 3k resting, rule 0 per lot, queue kept); NO bids at the rebuy levels for 40/30/30 of the shares sold and not yet
-        rebought, never above the last sell - 4c, within free cash - the 2k guard and the RI room. Rebuild mode: no asks; one bid
-        at min(touch, 0.85) for the shares missing to full_qty. The core lot is never offered."""
-        r = self.reservoir_cfg()
+    def reservoir_out(self, r):
+        st = r.get("stats") or {}
+        return max(0.0, float(st.get("sold_sh") or 0) - float(st.get("bought_sh") or 0))
+
+    def reservoirs_plan(self, now):
+        out = {}
+        for ex, r in self.reservoirs().items():
+            if ex not in self.owner or self.ex.is_frozen(ex):
+                continue
+            try:
+                p = self.reservoir_plan(now, r)
+            except Exception as err:
+                self.event("ERR", f"reservoir {self.name(ex)}: {err!r}")
+                continue
+            if p:
+                out[ex] = p
+        return out
+
+    def reservoir_plan(self, now, r):
+        """{sells, buys} for one reservoir (Piero 10:10 / 16:10 Oct 8). Trade mode: every offerable share rests at its sub's price in clips
+        <= clip (several at once; rule 0 per lot — a tranche lot whose entry + 0.5c is above the price waits, inventory lots are counted
+        by rule0_allowed); rebuys at three levels for 40/30/30 of the shares out, never above the last sell - 3c, within free - the 2k
+        guard and the race room. Rebuild mode: nothing offered; one bid at min(touch, rebuild_px) for the shares missing to full_qty."""
         ex, side = str(r["ex"]), r["side"]
-        self.reservoir_check_triggers(now, f)
+        f = self.fair.get(ex)
+        self.reservoir_check_triggers(now, r, f)
         px = self.px.get(ex)
         if px is None or px[0] is None or px[1] is None or px[1] <= px[0]:
-            return {}
-        books = self.ledger.subbooks.get(ex, {})
+            return None
         no_bid, no_ask = bots.side_book(px[0], px[1], side)
         fs = self.side_fair(ex, side)
         cash = (min(self.cash_hist) if getattr(self, "cash_hist", None) else 0.0)
         free = cash - CASH_RESERVE
-        core, trad, total = self.reservoir_held()
-        st = r.setdefault("stats", dict(sold_sh=0.0, bought_sh=0.0, realized=0.0, cycles=0, sold_val=0.0, bought_val=0.0, legs=[]))
-        existing = collections.defaultdict(list)
-        for o in self.open:
-            rec = self.ledger.orders.get(o["id"])
-            if rec and rec.get("layer") in ("swing", "swingsell") and o["ex"] == ex and o["id"] not in self.ex.cancelling:
-                existing[rec["layer"]].append(o)
         plan = dict(sells=[], buys=[])
         if r.get("mode", "trade") == "trade":
-            levels = r.get("sell_levels") or [[float(r["sell_px"]), int(r["sell_clip"])]]   # Piero 15:35 (1a): 3k at 0.855 / 0.860 / 0.865
-            remaining = {s_: int(trad.get(s_, 0.0)) for s_ in r["tradable_subs"]}
-            for lvl_px, lvl_q in levels:
-                left = int(lvl_q)
-                for s_ in sorted(r["tradable_subs"], key=lambda k: -remaining.get(k, 0)):   # largest lot first
-                    avail = remaining.get(s_, 0)
-                    if avail < MIN_QTY or left < MIN_QTY:
-                        continue
-                    avg = (self.ledger.tranches.get(s_) or {}).get("avg")
-                    if avg and float(avg) + RULE0_MARGIN > float(lvl_px) + 1e-9:
-                        continue                            # rule 0 per lot: this lot's entry + 0.5c is above the level
-                    take = min(avail, left)
-                    plan["sells"].append(dict(side=side, px=float(lvl_px), qty=take, sub=s_, ttl=SWING_TTL_S))
-                    left -= take; remaining[s_] -= take
-            out = max(0.0, float(st["sold_sh"]) - float(st["bought_sh"]))   # shares sold and not yet rebought
+            avail = self.reservoir_avail(r)
+            for sub, sp in r["offers"]:
+                q = int(avail.get(sub, 0.0))
+                if q < MIN_QTY:
+                    continue
+                t_avg = (self.ledger.tranches.get(sub) or {}).get("avg")
+                if sub.startswith(("wall:", "swing:")) and t_avg and float(t_avg) + RULE0_MARGIN > float(sp) + 1e-9:
+                    continue                                # rule 0 per lot: this lot waits for a higher price
+                if sub == "inventory" or not t_avg:
+                    q = min(q, self.rule0_allowed(ex, side, sub, float(sp), q))
+                while q >= MIN_QTY:
+                    take = int(min(q, r["clip"]))
+                    plan["sells"].append(dict(side=side, px=float(sp), qty=take, sub=sub, ttl=SWING_TTL_S))
+                    q -= take
+            out_sh = self.reservoir_out(r)
             cap_px = (float(r["last_sell_px"]) - r["rebuy_under_sell"]) if r.get("last_sell_px") else 1.0
-            budget = max(0.0, free - ENTRY_MIN_FREE)        # sized to free cash - the 2k guard; no cash reserved while waiting
+            budget = max(0.0, free - ENTRY_MIN_FREE)
             room = self.race_room(ex, side, fs if fs is not None else 0.99)
-            if out >= MIN_QTY and budget > 0 and room > 0:
+            if out_sh >= MIN_QTY and budget > 0 and room > 0 and self.entry_budget(cash) > 0:
                 for lvl_px, share in r["rebuy"]:
                     p = min(float(lvl_px), cap_px)
                     if no_ask is not None and p >= no_ask - 1e-9:
-                        p = round(no_ask - TICK, 3)         # never crossing our own / the market's ask
-                    q = int(min(out * float(share), budget / p, room / p))
+                        p = round(no_ask - TICK, 3)
+                    q = int(min(out_sh * float(share), budget / p, room / p))
                     if q < MIN_QTY:
                         continue
                     plan["buys"].append(dict(side=side, px=round(p, 3), qty=q, sub=f"swing:{ex}:{side}", ttl=SWING_TTL_S))
                     budget -= q * p; room -= q * p
-        else:                                               # rebuild: rebuy up to full_qty at <= rebuild_px, nothing offered
-            missing = int(float(r["full_qty"]) - total)
+        else:
+            missing = int(float(r["full_qty"]) - self.reservoir_total(r))
             budget = max(0.0, free - ENTRY_MIN_FREE)
             room = self.race_room(ex, side, fs if fs is not None else 0.99)
-            if missing >= MIN_QTY and no_bid is not None and budget > 0 and room > 0:
+            if missing >= MIN_QTY and no_bid is not None and budget > 0 and room > 0 and self.entry_budget(cash) > 0:
                 p = min(no_bid, float(r["rebuild_px"]))
                 q = int(min(missing, budget / p, room / p))
                 if q >= MIN_QTY:
                     plan["buys"].append(dict(side=side, px=round(p, 3), qty=q, sub=f"swing:{ex}:{side}", ttl=SWING_TTL_S))
-        self.reservoir_view = dict(mode=r.get("mode", "trade"), core=core, tradable=sum(trad.values()), out=max(0.0, float(st["sold_sh"]) - float(st["bought_sh"])),
-                                   sells=sum(x["qty"] for x in plan["sells"]), buys=sum(x["qty"] for x in plan["buys"]), p10=self.res_p10)
-        return {ex: plan} if (plan["sells"] or plan["buys"]) else {}
+        return plan if (plan["sells"] or plan["buys"]) else None
 
     def reservoir_migration(self):
-        """Once (C84c, Piero 10:10 Oct 8): the reservoir replaces the band; the swing layer carries it; the walls' buy-backs retire."""
+        """Once per config version (C84g, Piero 16:10 Oct 8): the three reservoirs; the RI one keeps its stats, mode and fair reference."""
         c = self.controls
-        if c.d.get("reservoir") and "sell_levels" not in c.d["reservoir"]:   # C84f: the live config predates the ladder (Piero 15:35 1a)
-            with c.lock:
-                c.d["reservoir"]["sell_levels"] = [list(x) for x in RESERVOIR["sell_levels"]]
-                c.save()
-            self.event("SWING", "RESERVOIR asks laddered: " + " / ".join(f"{q:,} at {p}" for p, q in RESERVOIR["sell_levels"]) + " (rule 0 per lot; rebuys unchanged)")
-            self.night.line("RESERVOIR asks laddered: " + " / ".join(f"{q:,} at {p}" for p, q in RESERVOIR["sell_levels"]))
-        if c.d.get("reservoir") or os.environ.get("SIG_RESERVOIR", "1") != "1":
+        if os.environ.get("SIG_RESERVOIR", "1") != "1":
             return
-        r = dict(RESERVOIR); r["mode"] = "trade"; r["fair0"] = self.fair.get(str(r["ex"])); r["since"] = stamp()
-        r["stats"] = dict(sold_sh=0.0, bought_sh=0.0, realized=0.0, cycles=0, sold_val=0.0, bought_val=0.0, legs=[])
+        rs = c.d.get("reservoirs") or {}
+        old = c.d.get("reservoir")
+        if rs and all(ex in rs for ex in RESERVOIRS):
+            return
+        for ex, base in RESERVOIRS.items():
+            if ex in rs:
+                continue
+            r = json.loads(json.dumps(base)); r["mode"] = "trade"; r["fair0"] = self.fair.get(ex); r["since"] = stamp()
+            r["stats"] = dict(sold_sh=0.0, bought_sh=0.0, realized=0.0, cycles=0, sold_val=0.0, bought_val=0.0, legs=[])
+            if old and str(old.get("ex")) == ex:            # carry the live RI state over (out shares, last sell, mode, fair0)
+                for k in ("mode", "fair0", "since", "last_sell_px", "stats", "rebuild_t", "rebuild_why"):
+                    if old.get(k) is not None:
+                        r[k] = old[k]
+            rs[ex] = r
         with c.lock:
-            c.d["reservoir"] = r
+            c.d["reservoirs"] = rs
+            c.d.pop("reservoir", None)
             sw = c.d.get("swing") or {}
             sw.pop("band", None); c.d["swing"] = sw
             c.d["layers"].setdefault("swing", dict(state="full", caps={}, killed=None))["state"] = "full"
             c.save()
-        core, trad, total = self.reservoir_held()
-        msg = (f"RESERVOIR on (C84c): RI Senate R NO — core {core:,.0f} (held to settlement, never offered), tradable {sum(trad.values()):,.0f} "
-               f"({', '.join(f'{k.split(":")[-1]} {v:,.0f}' for k, v in trad.items())}): asks at {r['sell_px']} in clips <= {r['sell_clip']:,} (rule 0 per lot), rebuys at "
-               f"{' / '.join(f'{p}' for p, _ in r['rebuy'])} (40/30/30 of what was sold, never above the last sell - {r['rebuy_under_sell'] * 100:.0f}c), first among entries, sized to free - 2k; "
-               f"C80 waived for these shares; rebuild when the 24-h p10 of RI NO prints >= {r['trig_p10']}, PM fair moves >= {r['trig_fair_move'] * 100:.0f}c from {r['fair0']}, or {r['trig_date']}; "
-               f"the two wall buy-backs at YES 0.13 retire; gate after {r['gate_h']} h")
-        self.event("SWING", msg); self.night.line(msg)
+        for ex, r in rs.items():
+            avail = self.reservoir_avail(r)
+            msg = (f"RESERVOIR {self.name(ex)} (C84g): core {float(r.get('core_qty') or 0):,.0f} held, offerable {sum(avail.values()):,.0f} ("
+                   + ", ".join(f"{sub.split(':')[-1]} {q:,.0f} @{sp}" for (sub, sp), q in zip(r["offers"], [avail.get(s_, 0.0) for s_, _ in r["offers"]]))
+                   + f") in clips <= {r['clip']:,}, rule 0 per lot; rebuys {' / '.join(str(p) for p, _ in r['rebuy'])} (40/30/30 of what was sold, <= last sell - {r['rebuy_under_sell'] * 100:.0f}c), "
+                   f"first among entries in the ring windows; rebuild on p10 >= {r['trig_p10']}, PM move >= 2c, or {r['trig_date'][:10]}; out now {self.reservoir_out(r):,.0f}")
+            self.event("SWING", msg); self.night.line(msg)
 
     def swing_band_plan(self, now, cfg, f):
         """turnover_plan §2.1: the RI Senate R NO inventory (the wall lots + the swing sub) trades inside [lo, hi] shares at the touch:
@@ -4962,18 +4996,18 @@ class Engine:
             if f["layer"] not in ("swing", "swingsell"):
                 continue
             changed = True
-            r = self.reservoir_cfg()
-            if r and f["ex"] == str(r["ex"]):               # C84c: the reservoir's stats, per-fill log and cycle c/share
+            r = self.reservoirs().get(str(f["ex"]))
+            if r:                                           # C84c/g: the reservoir's stats, per-fill log and cycle c/share
                 st_r = r.setdefault("stats", dict(sold_sh=0.0, bought_sh=0.0, realized=0.0, cycles=0, sold_val=0.0, bought_val=0.0, legs=[]))
                 sub_f = (self.ledger.orders.get(f["order"]) or {}).get("sub")
                 if f["layer"] == "swingsell":
-                    sale_px = round(1 - f["price"], 3) if f["side"] != cfg["side"] else f["price"]
+                    sale_px = round(1 - f["price"], 3) if f["side"] != r["side"] else f["price"]
                     st_r["sold_sh"] += f["qty"]; st_r["sold_val"] += f["qty"] * sale_px; st_r["realized"] += f.get("realized") or 0.0
                     r["last_sell_px"] = sale_px
-                    line = f"RESERVOIR sold {f['qty']:,.0f} NO at {sale_px:.3f} from {sub_f} (out {st_r['sold_sh'] - st_r['bought_sh']:,.0f}), realized {(f.get('realized') or 0):+,.0f}"
+                    line = f"RESERVOIR {self.name(f['ex'])} sold {f['qty']:,.0f} {r['side'].upper()} at {sale_px:.3f} from {sub_f} (out {st_r['sold_sh'] - st_r['bought_sh']:,.0f}), realized {(f.get('realized') or 0):+,.0f}"
                 else:
                     st_r["bought_sh"] += f["qty"]; st_r["bought_val"] += f["qty"] * f["price"]
-                    line = f"RESERVOIR rebought {f['qty']:,.0f} NO at {f['price']:.3f} (out {st_r['sold_sh'] - st_r['bought_sh']:,.0f})"
+                    line = f"RESERVOIR {self.name(f['ex'])} rebought {f['qty']:,.0f} {r['side'].upper()} at {f['price']:.3f} (out {st_r['sold_sh'] - st_r['bought_sh']:,.0f})"
                     if st_r["bought_sh"] >= st_r["sold_sh"] - 1 and st_r["sold_sh"] >= 1:
                         sq, sv, bq, bv = st_r["sold_sh"], st_r["sold_val"], st_r["bought_sh"], st_r["bought_val"]
                         st_r["cycles"] += 1
@@ -4981,8 +5015,7 @@ class Engine:
                         st_r.update(sold_sh=0.0, bought_sh=0.0, sold_val=0.0, bought_val=0.0)
                 st_r["legs"] = (st_r.get("legs") or [])[-300:] + [dict(t=f["t"], layer=f["layer"], qty=f["qty"], px=f["price"], sub=sub_f, realized=f.get("realized"))]
                 self.event("SWING", line); self.night.line(line)
-                with c.lock:
-                    c.d["reservoir"] = r; c.save()
+                self.reservoir_save(r)
             band = cfg.get("band")
             if band is not None:                            # C84b: the band's cash-neutral credit and its cycle log
                 if f["layer"] == "swingsell":
@@ -5518,6 +5551,10 @@ class Engine:
             return {}
         if self.entry_budget(cash) <= 0:
             return {}
+        if c.state("tm") == "pilot" and self.free_cash() >= self.buffer() and c.d.get("tm_autofull", True):   # control 'tm_autofull': False keeps the pilot
+            c.set_layer("tm", "full", f"Piero 16:10 §3: free {self.free_cash():,.0f} >= BUFFER {self.buffer():,.0f}", by="engine")
+            msg = f"TM -> FULL SIZE (clip {TM_CLIP:,}, {TM_INV_MARKET:,} per market-side, {TM_CAP_COST:,}): free {self.free_cash():,.0f} >= BUFFER {self.buffer():,.0f} (Piero 16:10 §3)"
+            self.event("TM", msg); self.night.line(msg)
         if self.ring_window(now):
             self.tm_cov = dict(quoted=0, available=0, top=0, writes_left=0, writes_used=0, ring=True)
             return {}                                       # (1c) a ring window: no new TM entries (resting bids go; the exits in track_tm keep running)

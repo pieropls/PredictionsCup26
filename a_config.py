@@ -283,10 +283,27 @@ SWING_BAND = dict(lo=27_000, hi=42_000, sell_over_entry=0.01, buy_min_edge=0.14,
 # last sell - 4c), first among entries, sized to free cash - the 2k guard; no cash reserved while waiting. C80 does not apply to these
 # shares (Piero's instruction). Rebuild triggers (stop selling, rebuy to the full size at <= 0.85): 24-h p10 of RI NO prints >= 0.85,
 # PM fair moved >= 2c from the deploy, or Oct 30 00:00 PT. Gate after 48 h: realized >= 0.8k/day -> tradable 40k; < 0.3k/day -> re-tune.
-RESERVOIR = dict(ex="1077", side="no", core_sub="inventory", tradable_subs=["wall:1077:no:w1791342782", "wall:1077:no:w1791342929", "swing:1077:no"],
-                 sell_px=0.860, sell_clip=3_000, sell_levels=[[0.855, 3_000], [0.860, 3_000], [0.865, 3_000]],   # Piero 15:35 (1a): asks laddered from 16:00 Oct 8
-                 rebuy=[[0.815, 0.40], [0.810, 0.30], [0.800, 0.30]], rebuy_under_sell=0.04,
-                 full_qty=46_949, rebuild_px=0.85, trig_p10=0.85, trig_fair_move=0.02, trig_date="2026-10-30 00:00:00", gate_h=48)
+RESERVOIR_TRIG_DATE = "2026-10-30 00:00:00"
+# Piero 16:10 Oct 8 (C84g): reservoirs — recycle whenever it earns more than holding. Each: a core held to settlement (never offered),
+# offers per sub-book at a fixed NO price (rule 0 per lot: a lot whose entry + 0.5c > the price waits; clips <= 5k, several resting at
+# once, queue kept), rebuys at three levels (40/30/30 of what was sold, never above the last sell - 3c; first among entries in the ring
+# windows), every rebought lot re-offered at the main price; rebuild triggers (stop selling, rebuy to the full size at <= rebuild_px):
+# 24-h p10 of NO prints >= trig_p10, PM fair moved >= 2c from the deploy, or Oct 30 00:00 PT.
+RESERVOIRS = {
+    # RI Senate R (resized): core = the 10,000 highest-cost inventory lots; ~37k tradable — swing + the other inventory lots at 0.850, walls at 0.855
+    "1077": dict(ex="1077", side="no", core_sub="inventory", core_qty=10_000,
+                 offers=[["swing:1077:no", 0.850], ["inventory", 0.850], ["wall:1077:no:w1791342782", 0.855], ["wall:1077:no:w1791342929", 0.855]],
+                 clip=5_000, rebuy=[[0.820, 0.40], [0.815, 0.30], [0.810, 0.30]], rebuy_under_sell=0.03,
+                 full_qty=46_949, rebuild_px=0.85, trig_p10=0.85, trig_fair_move=0.02, trig_date=RESERVOIR_TRIG_DATE, gate_h=48),
+    # Delaware Senate R and RI Governor R (the 10:17 study): levels from the last 72 h of tape — sell at p80 0.880 (>= entry 0.870 + 1c), rebuy 3c under it (p20 0.85-0.86)
+    "1075": dict(ex="1075", side="no", core_sub="inventory", core_qty=0, offers=[["swing:1075:no", 0.880], ["inventory", 0.880]],
+                 clip=5_000, rebuy=[[0.850, 0.40], [0.845, 0.30], [0.840, 0.30]], rebuy_under_sell=0.03,
+                 full_qty=4_654, rebuild_px=0.870, trig_p10=0.880, trig_fair_move=0.02, trig_date=RESERVOIR_TRIG_DATE, gate_h=48),
+    "1074": dict(ex="1074", side="no", core_sub="inventory", core_qty=0, offers=[["swing:1074:no", 0.880], ["inventory", 0.880]],
+                 clip=5_000, rebuy=[[0.850, 0.40], [0.845, 0.30], [0.840, 0.30]], rebuy_under_sell=0.03,
+                 full_qty=8_468, rebuild_px=0.870, trig_p10=0.880, trig_fair_move=0.02, trig_date=RESERVOIR_TRIG_DATE, gate_h=48),
+}
+WORKING_TARGET, WORKING_TARGET_DATE = 40_000, "2026-10-10"   # Piero 16:10 §2: working capital (free + TM + SM + catcher + reservoir cash out) >= 40k by Oct 10
 ENTRY_RESUME_FREE = 3_000       # C84c: once entries stopped under the 2k guard they resume only at 3k free (no flapping: 92 SM placements + 88 cancels in one hour on Oct 8 08:00)
 # Piero 15:35 Oct 8 (1c): the ring-window cash order — 19:30-21:00 and 03:30-06:00 PT no new TM / SM entries (exits keep running, their
 # reserves drop to what they hold); cash goes first to the reservoir's rebuys, then the catcher's L0 / L1 levels, then TM / SM.
