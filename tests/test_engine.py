@@ -3553,6 +3553,14 @@ class FMTests(EngineCase):
         self.assertEqual(eng.controls.state("fm"), "off")
         self.assertTrue(any("FM AUTO-OFF" in e["text"] for e in eng.events))
 
+    def test_fm_quotes_even_when_the_dump_budget_binds(self):
+        """C81b: the FM's 5k is reserved off the top of the entry budget, so a binding dump plan leaves its quotes in place."""
+        fake, eng, ex = self.rig()
+        eng.entry_left = 0.0                               # as after a dump plan that used everything
+        plan = eng.fm_plan(time.time(), eng.cash_hist[-1])
+        self.assertEqual(len(plan.get(ex, [])), 2, plan)
+        self.assertGreater(eng.fm_reserve(), 0)
+
     def test_writes_budget_and_cost_cap(self):
         fake, eng, ex = self.rig()
         now = time.time()

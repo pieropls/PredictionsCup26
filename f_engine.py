@@ -2430,7 +2430,7 @@ class Engine:
         # Day 9 §2-§3: the budget is k x free cash above the floor (minus Piero's walls); levels are allocated resting-first
         # (hysteresis: a resting level loses its slot only when the resting set alone no longer fits), L0 first within its
         # 8k cap (held + resting), then by expected edge = (fair - price) x reach / weight.
-        budget = max(0.0, self.entry_budget(cash) - self.wall_resting())   # C70: Piero's walls come off the top (weight 1.0)
+        budget = max(0.0, self.entry_budget(cash) - self.wall_resting() - self.fm_reserve())   # C70: Piero's walls and (C81b) the FM's cap come off the top (weight 1.0)
         out, cut, spent = self.allocate_levels(rows, budget, max(0.0, DUMP_L0_BUDGET - self.l0_held()))
         self.entry_spent = round(spent)
         self.entry_left = max(0.0, budget - spent)
@@ -4419,6 +4419,13 @@ class Engine:
                 out += abs(q) * float(avg)
         return out
 
+    def fm_reserve(self):
+        """C81b: the FM's room in the entry budget, reserved before the dump's L1-L4 compete (mm_plan: ranked after L0, before the
+        scalper): its cost cap minus what it already holds, while the layer is on and has targets."""
+        if not self.controls.on("fm") or not self.fm_targets():
+            return 0.0
+        return max(0.0, FM_CAP_COST - self.fm_cost())
+
     def fm_writes_last_min(self, now):
         """FM writes in the last minute = distinct placement seconds (one batch write places up to 50 orders)."""
         return len({int(o["ts"]) for o in self.ledger.orders.values() if o.get("layer") in ("fm", "fmexit") and (o.get("ts") or 0) >= now - 60})
@@ -4489,7 +4496,7 @@ class Engine:
                     q = int(min(FM_CLIP, -inv))
                     px = bid if not (aged and avg) else max(min(bid, round(1 - (avg + 0.01), 3)), round(1 - (avg + RULE0_MARGIN), 3))   # the NO lot sells at NO >= entry + 0.5c
                     quotes.append(dict(reduce=True, held="no", sell_px=round(1 - px, 3), qty=q, sub=sub, ttl=FM_TTL_S, side="yes", px=px))
-                elif inv < cap_sh and cost_all + FM_CLIP * bid <= FM_CAP_COST + 1e-6 and getattr(self, "entry_left", float("inf")) >= FM_CLIP * bid:
+                elif inv < cap_sh and cost_all + FM_CLIP * bid <= FM_CAP_COST + 1e-6:   # its budget room is reserved off the top (fm_reserve)
                     quotes.append(dict(side="yes", px=bid, qty=FM_CLIP, sub=sub, ttl=FM_TTL_S))
             # ask side (sell YES = buy NO at 1 - ask): an exit while long, else an entry
             if ask <= MB_MAX_PX and (b_sig is None or ask > b_sig + 1e-9):
@@ -4497,13 +4504,10 @@ class Engine:
                     q = int(min(FM_CLIP, inv))
                     sell = ask if not (aged and avg) else max(min(ask, round(avg + 0.01, 3)), round(avg + RULE0_MARGIN, 3))
                     quotes.append(dict(reduce=True, held="yes", sell_px=round(sell, 3), qty=q, sub=sub, ttl=FM_TTL_S, side="no", px=round(1 - sell, 3)))
-                elif -inv < cap_sh and cost_all + FM_CLIP * (1 - ask) <= FM_CAP_COST + 1e-6 and getattr(self, "entry_left", float("inf")) >= FM_CLIP * (1 - ask):
+                elif -inv < cap_sh and cost_all + FM_CLIP * (1 - ask) <= FM_CAP_COST + 1e-6:
                     quotes.append(dict(side="no", px=round(1 - ask, 3), qty=FM_CLIP, sub=sub, ttl=FM_TTL_S))
             if not writes_ok and not resting.get(ex):
                 continue                                    # the write budget is spent: no new market this loop (resting quotes are re-stated)
-            for qd in quotes:
-                if not qd.get("reduce"):
-                    self.entry_left = max(0.0, getattr(self, "entry_left", float("inf")) - qd["qty"] * qd["px"])
             if quotes:
                 plan[ex] = quotes
         return plan
