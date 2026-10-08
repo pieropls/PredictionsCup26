@@ -4319,6 +4319,13 @@ class ReservoirTests(EngineCase):
         loop(eng, fake)
         self.assertEqual(eng.controls.d["reservoir"]["mode"], "rebuild")
 
+    def test_fair_reference_pinned_on_the_first_priced_loop(self):
+        fake, eng, ex, subs = self.rig()
+        eng.controls.d["reservoir"]["fair0"] = None
+        loop(eng, fake)
+        self.assertAlmostEqual(eng.controls.d["reservoir"]["fair0"], eng.fair[ex], places=6)
+        self.assertTrue(any("fair reference pinned" in e["text"] for e in eng.events))
+
     def test_entry_guard_hysteresis(self):
         fake, eng, ex, subs = self.rig()
         self.assertEqual(eng.entry_budget(a_config.CASH_RESERVE + 1_900), 0.0)

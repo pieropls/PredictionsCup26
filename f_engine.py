@@ -4676,6 +4676,11 @@ class Engine:
         r = self.reservoir_cfg()
         if r.get("mode") == "rebuild":
             return
+        if r.get("fair0") is None and f is not None:        # C84d: the deploy ran before the first fair was in — pin the reference now
+            c = self.controls
+            with c.lock:
+                r["fair0"] = f; c.d["reservoir"] = r; c.save()
+            self.event("SWING", f"RESERVOIR fair reference pinned at {f:.4f} (PM fair YES at the first priced loop); the 2c-move trigger is live from here")
         why = None
         p10 = self.reservoir_p10(now)
         if p10 is not None and p10 >= r["trig_p10"] - 1e-9:
