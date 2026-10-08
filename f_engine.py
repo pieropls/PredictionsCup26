@@ -51,11 +51,13 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      DUMP_REACH, BUDGET_K_MAX, BUDGET_K_MIN, BUDGET_K_STEP, BUDGET_K_DOWN_S, BUDGET_K_UP_S, BUDGET_K_PEAK_DOWN, BUDGET_K_PEAK_UP,
                      DUMP_WANT_BAND_LO, DUMP_WANT_BAND_HI, DUMP_GAP_LOG_S, DUMP_LADDER_FIRST, DUMP_LADDER_STEP_S, DUMP_LADDER_TICK,
                      BUDGET_K_TABLE, BUDGET_K_TIER_HYST, RI_SENATE_RACE, RI_SENATE_ADD, RI_SENATE_MIN_EDGE,
+                     RULES_V2, HOLD_IDLE_GAP, BUFFER_ADD, BUFFER_WINDOW_S, BUFFER_P, BUFFER_DEFAULT, BUFFER_MIN, BUFFER_MAX, L3_BUDGET_SHARE, RI_TURNOVER, RI_MIN_EDGE,
                      SLEEVE_CAP, SLEEVE_MIN_FREE, SLEEVE_CLIP, SLEEVE_GAP_S, SLEEVE_TTL_S, SLEEVE_MIN_FAIR, SLEEVE_MIN_EDGE, SLEEVE_NEWS_C, SLEEVE_NEWS_WINDOW_S,
                      SLEEVE_NEWS_HOLD_S, SLEEVE_TARGETS, SWING, SWING_TTL_S, WALL_HOLD_MIN_FREE, WALL_RECYCLE_EXIT_C,
                      REBUILD_MAX_GAP, DUMP_BIG_SWEEP_SH, DUMP_BIG_CLIP, DUMP_V3_WEIGHTS_DAY_BIG,
                      FM_TARGETS, FM_CLIP, FM_CAP_SH, FM_CAP_COST, FM_TTL_S, FM_WRITES_PER_MIN, FM_SKEW_PER_1K, FM_NEWS_C, FM_NEWS_WINDOW_S, FM_REQUOTE_S,
                      FM_AGE_LADDER_S, FM_OFF_REALIZED, FM_OFF_MO30, FM_OFF_MIN_FILLS, FM_GLIDE_START, FM_POLL_PULL_S,
+                     FAST_PATH_ON, FAST_REARMS_PER_10M, FAST_WRITES_RESERVE, FAST_SLOW_S, FAST_PM_MOVE_C,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
@@ -389,6 +391,7 @@ class Engine:
         self.swing_now, self.swing_block, self.swing_note = {}, 0.0, {}   # day 10 §3: the RI swing
         self.big_sweep, self.big_sweep_t = set(), 0.0                    # day 10 §4.2: big-sweep sides (clips to 4k)
         self.fm_now, self.fm_block, self.fm_fills, self.fm_note, self.fm_poll = {}, {}, collections.deque(maxlen=5000), {}, None   # mm_plan §1: the fair maker
+        self.fast_seen, self.fast_rearms, self.fast_slow, self.fast_orders, self.fast_stats = set(), collections.defaultdict(list), {}, {}, collections.Counter()   # mm_plan §2: the fast path
         self.in_use_hist, self.use_peak, self.rule0_log, self.rule0_blocked, self.lots_cache = collections.deque(maxlen=3000), 0.0, {}, collections.deque(maxlen=5000), (None, {})   # §9
         self.uncovered_since, self.uncovered_log, self.uncovered_n, self.refreshed = {}, {}, collections.deque(maxlen=2000), {}   # day 7 §1.3
         try:
@@ -415,6 +418,10 @@ class Engine:
             self.mm_migrations()
         except Exception as err:
             print(f"mm plan migrations: {err!r}")
+        try:
+            self.day11_migrations()
+        except Exception as err:
+            print(f"day 11 migrations: {err!r}")
         try:                                                # Oct 5 02:30: undo synthetic fills that duplicated a SIG fill
             fixed = self.ledger.dedup_synthetic()          # booked <= quantity per order + phantom netting (no time-window pairing)
             if fixed["removed"] or fixed["netted"]:
@@ -444,6 +451,8 @@ class Engine:
         self.dump_cov = None                                # day 8 §2: dump coverage (sides with >= 1 level / eligible sides)
         self.dump_gap_since, self.dump_gap_log, self.dump_cut_t = {}, {}, {}   # day 9 §4: gaps on funded sides, with cause
         self.ri_senate_base = None                          # day 9 §9.4: RI Senate holdings at cost when C73 started (set by day9_migrations)
+        self.ri_held_cap = None                             # day 11 §1.4: RI held at cost at the C81c deploy (recorded once prices are in); the engine may add RI_TURNOVER in flight
+        self.held_idle = {}                                 # day 11 §1.2: {sub: edge} of the lots held while cash is idle (free >= BUFFER)
         self.load_pilots()
         self.leaders_t, self.scan_t, self.seen_markets, self.new_markets = 0.0, 0.0, set(), {}
         self.wake, self.rt_lock, self.rt_pending = threading.Event(), threading.Lock(), []   # realtime -> planner
@@ -719,6 +728,15 @@ class Engine:
                                      f"account {snap['account']:,.0f}" + (" (late: taken " + time.strftime('%H:%M', time.localtime(now)) + ")" if snap["late"] else ""))
         except Exception as err:
             self.event("ERR", f"sigday snapshot: {err!r}")
+        try:
+            self.fast_reconcile(now)                        # mm_plan §2: a fast order neither resting nor filled -> slow path 10 min
+        except Exception as err:
+            self.event("ERR", f"fast reconcile: {err!r}")
+        try:
+            if RULES_V2:
+                self.buffer_calc(now)                       # day 11 §1.3: BUFFER recomputed once a day
+        except Exception as err:
+            self.event("ERR", f"buffer: {err!r}")
         self.controller(now)
         kappa, _ = self.kappa()
         used = self.bucket_usage()
@@ -2165,15 +2183,58 @@ class Engine:
         bk = self.controls.d.get("budget_k") or {}
         return float(bk.get("k") or BUDGET_K_MAX)
 
+    def k_table(self):
+        """Day 11 §1.3 (rules v2): the k_max table hangs off BUFFER — >= BUFFER + 5k: 3.0; BUFFER..+5k: 3.0 (the replay value);
+        under BUFFER entries shrink instead of anything being sold: 2.0 down to BUFFER/2, then the k floor."""
+        if not RULES_V2:
+            return list(BUDGET_K_TABLE)
+        B = self.buffer()
+        return [(B + 5_000, 3.0), (B, 3.0), (B / 2, 2.0), (0, float(BUDGET_K_MIN))]
+
+    def buffer(self):
+        """Day 11 §1.3: BUFFER = the catcher's p95 cash need over the last 72 h + 5k (buffer_calc), else the 15k default."""
+        b = (self.controls.d.get("buffer") or {}).get("value")
+        return float(b) if b else float(BUFFER_DEFAULT)
+
+    def buffer_calc(self, now, force=False):
+        """Once a day: BUFFER = p95 of the catcher's rolling-1-h entry cost (dump buys, 5-min samples over 72 h) + 5k, clamped
+        10k..30k; logged with its derivation."""
+        c = self.controls
+        bf = c.d.get("buffer") or {}
+        day = time.strftime("%Y-%m-%d", time.localtime(now))
+        if not force and bf.get("day") == day:
+            return self.buffer()
+        ev = []
+        for f in self.fills_since(now - BUFFER_WINDOW_S):
+            if f["layer"] == "dump" and f["action"] == "buy":
+                ev.append((time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S")), f["qty"] * f["price"]))
+        ev.sort()
+        vals, t = [], now - BUFFER_WINDOW_S
+        while t <= now + 1e-6:
+            vals.append(sum(v for t_, v in ev if t - 3600 < t_ <= t))
+            t += 300
+        vals.sort()
+        p95 = vals[min(len(vals) - 1, int(BUFFER_P * (len(vals) - 1)))] if vals else 0.0
+        value = float(min(BUFFER_MAX, max(BUFFER_MIN, p95 + BUFFER_ADD)))
+        with c.lock:
+            c.d["buffer"] = dict(value=round(value), p95=round(p95), fills=len(ev), day=day, t=stamp(),
+                                 hist=(bf.get("hist") or [])[-30:] + [dict(t=stamp(), value=round(value), p95=round(p95), fills=len(ev))])
+            c.save()
+        msg = (f"BUFFER {value:,.0f} = the catcher's p95 rolling-1-h entry cost over the last 72 h {p95:,.0f} ({len(ev)} dump buys, 5-min samples) + {BUFFER_ADD:,}"
+               f" (clamped {BUFFER_MIN:,}..{BUFFER_MAX:,}); above it catch / touch lots >= {HOLD_IDLE_GAP * 100:.0f}c under fair are held, below it the ladder offers them lowest-edge first and k falls")
+        self.event("CASH", msg)
+        self.night.line(msg)
+        return value
+
     def k_max_for(self, free, cur_tier=None):
         """Day 9 §9.2: k_max from the free-cash table; a tier is entered upward only once free is 1k past its line."""
-        tiers = sorted(BUDGET_K_TABLE, key=lambda t: -t[0])
+        tiers = sorted(self.k_table(), key=lambda t: -t[0])
         pick = tiers[-1][0]
         for lo, _ in tiers:
             if free >= lo + (BUDGET_K_TIER_HYST if (cur_tier is None or lo > cur_tier) and lo > 0 else 0):
                 pick = lo
                 break
-        return pick, dict(BUDGET_K_TABLE)[pick]
+        return pick, dict(self.k_table())[pick]
 
     def adjust_budget_k(self, now, free=None):
         """Day 9 §2 live auto-adjust inside the §9.2 table: k_max = f(free cash); k -0.5 after 30 min with bounded peak use
@@ -2188,7 +2249,7 @@ class Engine:
             with c.lock:
                 c.d["budget_k"] = bk
                 c.save()
-            self.event("CASH", f"BUDGET k = {bk['k']:g} x free cash above the floor (k_max {kmax:g} for free {free:,.0f}; table {BUDGET_K_TABLE}; -0.5 after 30 min > {BUDGET_K_PEAK_DOWN:.0%} "
+            self.event("CASH", f"BUDGET k = {bk['k']:g} x free cash above the floor (k_max {kmax:g} for free {free:,.0f}; table {self.k_table()}; -0.5 after 30 min > {BUDGET_K_PEAK_DOWN:.0%} "
                                f"peak use or a constrained minute, +0.5 after 2 h < {BUDGET_K_PEAK_UP:.0%})")
             return
         if tier != bk.get("tier") or float(bk.get("k_max") or 0) != float(kmax):
@@ -2243,6 +2304,8 @@ class Engine:
         ri = race in RI_RACES
         if ri and self.controls.d.get("ri_freeze"):
             return -1.0                                     # day 10 D1: RI frozen — no new engine entries on either race
+        if ri and RULES_V2 and self.ri_held_cap is not None:
+            return self.ri_held_cap + RI_TURNOVER - self.ri_held_cost(resting_except=(ex, side))   # day 11 §1.4: RI unfrozen for turnover — held capped at the deploy level, +10k in flight
         senate = race == RI_SENATE_RACE and self.ri_senate_base is not None   # day 9 §9.4: +10k beyond the Oct 6 holdings, all subs count
         cap = (self.ri_senate_base + RI_SENATE_ADD) if senate else RI_ENGINE_CAP if ri else next(c for lo, c in DUMP_CONC_CAPS if fs >= lo - 1e-9)
         used = 0.0
@@ -2327,6 +2390,8 @@ class Engine:
         self.adjust_budget_k(now)                           # day 9 §2
         if self.ri_senate_base is None:
             self.record_ri_base()                           # day 9 §9.4 (C74): once, on the first loop with prices and positions in
+        if RULES_V2 and self.ri_held_cap is None:
+            self.record_ri_cap()                            # day 11 §1.4 (C81c): once, on the first priced loop after the deploy
         half = 0.5 if self.controls.state("dump") == "pilot" else 1.0
         arena = self.dump_arena(now)
         l0_ok = self.l0_held() < DUMP_L0_BUDGET              # L0 holds <= 8k at cost across all sides
@@ -2383,8 +2448,8 @@ class Engine:
             books = self.ledger.subbooks.get(ex, {})
             best_s = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
             for i, px, q in self.dump_levels(ex, side, fs, rs, cost, room=room, l0_ok=l0_ok):
-                if self.ri_senate_base is not None and (self.meta.get(ex) or {}).get("race") == RI_SENATE_RACE and px > fs - RI_SENATE_MIN_EDGE + 1e-9:
-                    continue                                # day 9 §9.4: on RI Senate only levels >= 15c under fair
+                if self.ri_edge_short(ex, px, fs):
+                    continue                                # day 9 §9.4 / day 11 §1.4: on the RI races only levels >= 15c under fair
                 sub = f"dump:{ex}:{side}:{'L0' if i == 4 else i}"
                 if abs(books.get(sub, 0)) >= MIN_QTY:
                     if i != 4 or self.l0_refills(sub, now) >= DUMP_L0_REFILLS + 1:   # the first fill + 3 refills per 10 min
@@ -2470,6 +2535,64 @@ class Engine:
                 self.uncovered_n.append((now, ex, side, round(now - t0)))
                 self.event("DUMP", f"{self.name(ex)} {side.upper()}: funded but no level resting for {now - t0:.0f} s: {why}")
         return plan
+
+    def ri_held_cost(self, resting_except=None):
+        """Day 11 §1.4: everything held on the two RI races at cost, every sub-book but manual (walls, swing, inventory, tranches),
+        plus the engine's resting RI entry bids (dump / wall buys) except the level being planned."""
+        used = 0.0
+        for e, m in self.meta.items():
+            if m.get("race") not in RI_RACES:
+                continue
+            for sub, q in self.ledger.subbooks.get(e, {}).items():
+                if abs(q) < 1 or sub == "manual":
+                    continue
+                sd = "yes" if q > 0 else "no"
+                avg = (self.ledger.tranches.get(sub) or {}).get("avg") or ((self.book.get(e) or {}).get("row") or {}).get("avgCost") or self.sig_mark(e, sd) or 0.0
+                used += abs(q) * float(avg)
+            for o in self.open:
+                rec = self.ledger.orders.get(o["id"])
+                if o["ex"] != e or not rec or o["action"] != "buy" or o["id"] in self.ex.cancelling:
+                    continue
+                if rec.get("layer") == "dump" and (e, o["side"]) != resting_except or rec.get("layer") in ("wall", "touch", "scalp"):
+                    used += o["qty"] * o["price"]
+        return used
+
+    def record_ri_cap(self):
+        """Day 11 §1.4 (C81c): record RI held at cost at the deploy (both races, every sub-book but manual) once every held sub
+        has a price; from then on RI held is capped there and the engine may add RI_TURNOVER in flight on levels >= 15c under fair."""
+        base, ok = 0.0, True
+        for e, m in self.meta.items():
+            if m.get("race") not in RI_RACES:
+                continue
+            for sub, q in self.ledger.subbooks.get(e, {}).items():
+                if abs(q) < 1 or sub == "manual":
+                    continue
+                sd = "yes" if q > 0 else "no"
+                avg = (self.ledger.tranches.get(sub) or {}).get("avg") or ((self.book.get(e) or {}).get("row") or {}).get("avgCost") or self.sig_mark(e, sd)
+                if not avg:
+                    ok = False
+                    break
+                base += abs(q) * float(avg)
+            if not ok:
+                break
+        if not ok or not self.book:
+            return
+        c = self.controls
+        with c.lock:
+            c.d.setdefault("day11", {})["ri_held_cap"] = round(base, 2)
+            c.save()
+        self.ri_held_cap = base
+        msg = (f"DAY 11 §1.4: RI held at cost {base:,.0f} recorded as the cap (both RI races, every sub-book but manual); the catcher, L0 and the touch maker may "
+               f"trade RI again on levels >= {RI_MIN_EDGE * 100:.0f}c under fair with up to {RI_TURNOVER:,} in flight; any RI lot above the cap is recycled by the ladder, never held")
+        self.event("DUMP", msg)
+        self.night.line(msg)
+
+    def ri_edge_short(self, ex, px, fs):
+        """True when (ex, px) is an RI level under the 15c rule: RI Senate once its base is recorded (day 9 §9.4); both RI races under rules v2."""
+        race = (self.meta.get(ex) or {}).get("race")
+        if RULES_V2 and race in RI_RACES:
+            return px > fs - RI_MIN_EDGE + 1e-9
+        return self.ri_senate_base is not None and race == RI_SENATE_RACE and px > fs - RI_SENATE_MIN_EDGE + 1e-9
 
     def record_ri_base(self):
         """Day 9 §9.4 (C74): record the RI Senate holdings at cost (every sub-book) once every held sub has a price; until
@@ -2625,10 +2748,15 @@ class Engine:
                     best_new[k_] = w
         first = {id(w) for w in best_new.values()}
         order = sorted(rows, key=lambda r: (not r[1], not r[3]["l0"], id(r[3]) not in first, -xe(r[3])))
-        out, cut, spent, l0_spent = [], [], 0.0, 0.0
+        out, cut, spent, l0_spent, deep_spent = [], [], 0.0, 0.0, 0.0
+        deep_room = L3_BUDGET_SHARE * budget if RULES_V2 else float("inf")   # day 11 §1.5: L3 / L4 levels take at most 20% of the weighted budget
         for lvl, is_resting, ex, w in order:
             c_ = w["px"] * w["qty"] * w["weight"]
+            deep = w["lname"] in ("L3", "L4")
             if w["l0"] and l0_spent + w["px"] * w["qty"] > l0_room + 1e-6:
+                cut.append((lvl, is_resting, ex, w))
+                continue
+            if deep and deep_spent + c_ > deep_room + 1e-6:
                 cut.append((lvl, is_resting, ex, w))
                 continue
             if spent + c_ <= budget + 1e-6:
@@ -2636,6 +2764,8 @@ class Engine:
                 spent += c_
                 if w["l0"]:
                     l0_spent += w["px"] * w["qty"]
+                if deep:
+                    deep_spent += c_
             else:
                 cut.append((lvl, is_resting, ex, w))
         return out, cut, spent
@@ -2658,6 +2788,7 @@ class Engine:
                                t=stamp(), ts=now, state="open")
                 self.event("DUMP", f"{self.name(ex)}: dump fill -> tranche {sub} {side.upper()} {abs(q):,.0f}, pre-dump ref "
                                    f"{tr[sub]['pre_ref_side'] if tr[sub]['pre_ref_side'] is None else round(tr[sub]['pre_ref_side'], 3)}")
+        live = []
         for sub, t in tr.items():
             if t.get("kind") != "dump" or t["state"] != "open":
                 continue
@@ -2665,24 +2796,36 @@ class Engine:
             q = self.ledger.subbooks.get(ex, {}).get(sub, 0)
             if abs(q) < 1:
                 t.update(state="closed", closed_ts=now, hold_min=round((now - t.get("ts", now)) / 60, 1))
+                t.pop("held", None)
                 self.event("DUMP", f"{self.name(ex)}: tranche {sub} sold back after {t['hold_min']:.0f} min (round trip done)")
                 for o in self.open:                         # its exit must not keep filling
                     rec = self.ledger.orders.get(o["id"])
                     if rec and rec.get("sub") == sub and rec.get("layer") == "dumpexit" and o["id"] not in self.ex.cancelling:
                         self.ex.cancel(o, reason="tranche done: exit no longer owns shares", front=True)
                 continue
-            age = now - t.get("ts", now)
-            if age > DUMP_HOLD_S:
-                self.ledger.move_sub(ex, sub, "inventory")
-                t["state"] = "aged"
-                self.event("DUMP", f"{self.name(ex)}: sell-back for {sub} not filled in 6 h: {abs(q):,.0f} shares to inventory")
-                continue
             since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t.get("ts", now) - 300))
             avg = self.ledger.tranche_avg(sub, "dump", ex=ex, side=t["side"], since=since) or t.get("avg")
             if avg is None:
                 continue
             t["avg"] = round(avg, 5)
-            pre, fs = t.get("pre_ref_side"), self.side_fair(ex, t["side"])
+            live.append((sub, t, ex, q, avg, self.side_fair(ex, t["side"])))
+        held = self.hold_when_idle(live, now) if RULES_V2 else set()
+        for sub, t, ex, q, avg, fs in live:
+            if sub in held:
+                if not t.get("held"):
+                    t["held"] = now
+                    self.event("DUMP", f"{self.name(ex)}: {sub} {abs(q):,.0f} {t['side'].upper()} at {avg:.3f} is {(fs - avg) * 100:.1f}c under fair and cash is idle: held, not offered (day 11 §1.2)")
+                continue                                    # held: no sell-back on the ladder (and no ageing to inventory while held)
+            if t.get("held"):
+                t["held_s"] = float(t.get("held_s") or 0.0) + max(0.0, now - float(t.pop("held")))   # the held time does not count towards the 6-h ageing or the ladder steps
+                self.event("DUMP", f"{self.name(ex)}: {sub} back on the ladder (free cash under BUFFER or the lot no longer >= {HOLD_IDLE_GAP * 100:.0f}c under fair)")
+            age = now - t.get("ts", now) - float(t.get("held_s") or 0.0)
+            if age > DUMP_HOLD_S:
+                self.ledger.move_sub(ex, sub, "inventory")
+                t["state"] = "aged"
+                self.event("DUMP", f"{self.name(ex)}: sell-back for {sub} not filled in 6 h: {abs(q):,.0f} shares to inventory")
+                continue
+            pre = t.get("pre_ref_side")
             r_now = self.ref(ex)
             ref_side = None if r_now is None else (r_now if t["side"] == "yes" else 1 - r_now)
             # day 9 §9.1 (Piero, C73): first ask at fill + 1c, one tick lower every 10 min, floor at entry + 0.5c (rule 0);
@@ -2693,6 +2836,33 @@ class Engine:
                 target = min(target, fs - DUMP_SELL_FAIR_GAP)
             rebound = bots.tick_up(round(max(target, floor_), 6))
             self.dump_view.setdefault(ex, []).append(dict(sub=sub, rebound=min(rebound, 0.99), avg=avg))
+
+    def hold_when_idle(self, live, now):
+        """Day 11 §1.2: the set of tranche subs held off the ladder. A lot >= 8c under fair is held while free cash >= BUFFER;
+        under BUFFER the ladder offers such lots lowest-edge first until their cost covers the shortfall; lots < 8c under
+        fair always keep the ladder. An RI lot is held only while RI held at cost is within its cap (else always recycled)."""
+        free = (min(self.cash_hist) if getattr(self, "cash_hist", None) else 0.0) - CASH_RESERVE
+        B = self.buffer()
+        cands = []
+        for sub, t, ex, q, avg, fs in live:
+            if fs is None or fs - avg < HOLD_IDLE_GAP - 1e-9:
+                continue
+            if (self.meta.get(ex) or {}).get("race") in RI_RACES and (self.ri_held_cap is None or self.ri_held_cost() > self.ri_held_cap + 1):
+                continue                                    # §1.4: RI above its cap is never held
+            cands.append((fs - avg, abs(q) * avg, sub))
+        self.held_idle = {}
+        if not cands:
+            return set()
+        if free >= B:
+            self.held_idle = {sub: edge for edge, _, sub in cands}
+            return set(self.held_idle)
+        short, offered = B - free, 0.0
+        for edge, cost, sub in sorted(cands):               # lowest edge first until the shortfall is covered
+            if offered >= short:
+                self.held_idle[sub] = edge
+            else:
+                offered += cost
+        return set(self.held_idle)
 
     def dump_fill_events(self, fills):
         for f in fills:
@@ -3902,7 +4072,7 @@ class Engine:
         free = cash - CASH_RESERVE
         pending = sum(o["qty"] * (1 - o["price"]) for o in self.open
                       if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "release")
-        if free + pending < REBUILD_FREE:                   # Oct 5 22:50 (Piero): rebuild free cash to 15k first
+        if free + pending < REBUILD_FREE and not RULES_V2:   # Oct 5 22:50 (Piero): rebuild free cash to 15k first — gone with day 11 rules v2: nothing is sold to raise cash, k falls instead
             return self.rebuild_plan(cash, now, free, pending)
         self.release_fund_log = [(t_, v) for t_, v in self.release_fund_log if t_ >= now - 3600]
         budget = max(0.0, min(T - free - pending, RELEASE_FUND_PER_H - sum(v for _, v in self.release_fund_log)))   # tiers 1-2: up to T, <= 10k/h
@@ -4401,6 +4571,150 @@ class Engine:
         return dict(slice=cfg["slice"], held=round(held), sold_out=round(sold), in_walls=round(in_walls), swing_sub=round(swing_q),
                     sold_total=round(st.get("sold", 0)), bought_total=round(st.get("bought", 0)), realized=round(st.get("realized", 0), 2), cycles=st.get("cycles", 0))
 
+    # ------------------------------------------------------------------------------------------------ mm_plan §2 / §8.1: the fast path
+    def fast_step(self, now):
+        """Between a realtime wake and the full loop: act on our new fills and on Polymarket moves within ~1 s.
+        L0 sweep-follow: our L0 level filled -> one book read -> re-bid at the new best bid while it is >= 5c under fair
+        (<= 3 fast re-arms per side per 10 min, under the L0 held cap and the refill cap). FM: the filled side is re-quoted;
+        a PM move >= 2c pulls that market's FM quotes (per-order cancels). 5 writes/min stay reserved. The next full loop
+        reconciles: a fast order that is neither resting nor filled sends its market to the slow path for 10 min."""
+        if not FAST_PATH_ON or api.DRY_RUN or self.controls.paused or self.fills_blind:
+            return 0
+        with self.rt_lock:
+            events = list(self.rt_pending)
+        sig_ev = [e for e in events if e[1] in ("fills", "orders")]
+        pm_ev = [e for e in events if e[1] == "pm_move"]
+        sent = 0
+        if pm_ev and self.controls.on("fm"):
+            sent += self.fast_pull(pm_ev, now)
+        if not sig_ev:
+            return sent
+        if api.writes_left() <= FAST_WRITES_RESERVE:
+            self.fast_stats["skipped_writes"] += 1
+            return sent
+        try:
+            known = {f["key"] for f in self.ledger.fills} | self.fast_seen
+            new = [f for f in api.fills(known=known, max_pages=1) if f"{f['id']}:{f.get('orderId')}" not in known]
+        except Exception as err:
+            self.event("ERR", f"fast path fills read: {err!r}")
+            return sent
+        t_ev = min(e[0] for e in sig_ev)
+        for f in new:
+            key = f"{f['id']}:{f.get('orderId')}"
+            self.fast_seen.add(key)
+            rec = self.ledger.orders.get(str(f.get("orderId") or ""))
+            if not rec:
+                continue
+            ex = rec["ex"]
+            if self.fast_slow.get(ex, 0) > now:
+                self.fast_stats["slow_skipped"] += 1
+                continue
+            if rec.get("layer") == "dump" and str(rec.get("sub", "")).endswith(":L0"):
+                sent += self.fast_l0(ex, rec, t_ev, now, filled_id=str(f.get("orderId") or ""))
+            elif rec.get("layer") in ("fm", "fmexit"):
+                sent += self.fast_fm(ex, rec, t_ev, now)
+        if len(self.fast_seen) > 5000:
+            self.fast_seen = set(list(self.fast_seen)[-2000:])
+        return sent
+
+    def fast_l0(self, ex, rec, t_ev, now, filled_id=""):
+        side = rec["side"]
+        key = (ex, side)
+        self.fast_rearms[key] = [t for t in self.fast_rearms[key] if t >= now - 600]
+        if len(self.fast_rearms[key]) >= FAST_REARMS_PER_10M or self.l0_held() >= DUMP_L0_BUDGET or self.l0_refills(rec.get("sub"), now) >= DUMP_L0_REFILLS + 1:
+            self.fast_stats["l0_capped"] += 1
+            return 0
+        fs = self.side_fair(ex, side)
+        if fs is None or ex in self.manual_ex or not self.controls.on("dump") or (self.controls.d.get("ri_freeze") and (self.meta.get(ex) or {}).get("race") in RI_RACES):
+            return 0
+        try:
+            bids, asks = api.orderbook(ex, depth=5)
+        except Exception as err:
+            self.event("ERR", f"fast path book read {self.name(ex)}: {err!r}")
+            return 0
+        self.px[ex] = (bids[0][0] if bids else None, asks[0][0] if asks else None, self.px.get(ex, (None, None, None))[2])
+        bid_s = bots.side_book(self.px[ex][0], self.px[ex][1], side)[0]
+        if bid_s is None or bid_s > fs - DUMP_L0_GAP + 1e-9 or not (MB_MIN_PX <= bid_s <= MB_MAX_PX) or self.ri_edge_short(ex, bid_s, fs):
+            self.fast_stats["l0_no_edge"] += 1
+            return 0
+        room = self.race_room(ex, side, fs)
+        q = int(min(DUMP_L0_CLIP if (ex, side) not in self.big_sweep else DUMP_BIG_CLIP, room / bid_s if room > 0 else 0))
+        if q < MIN_QTY:
+            return 0
+        sub = rec["sub"]
+        if any(o["ex"] == ex and o["id"] != filled_id and (self.ledger.orders.get(o["id"]) or {}).get("sub") == sub and o["id"] not in self.ex.cancelling for o in self.open):
+            return 0                                        # another order of this level already rests (the filled one is still in the stale open list)
+        self.ex.place([(self.owner[ex].name, sub, "dump", (ex, side, "buy", bid_s, q))], ttl_s=DUMP_NEAR_TTL_S)
+        n = self.ex.step_placements()
+        self.fast_rearms[key].append(now)
+        self.fast_orders[(ex, sub)] = now
+        self.sample("fast_fill_to_sent", time.time() - t_ev)
+        self.fast_stats["l0_rearms"] += 1
+        self.event("FAST", f"FAST L0 re-bid {self.name(ex)} {side.upper()}: {q:,} at {bid_s:.3f} ({(fs - bid_s) * 100:.1f}c under fair), {time.time() - t_ev:.2f} s after the fill event")
+        return n
+
+    def fast_fm(self, ex, rec, t_ev, now):
+        if not self.controls.on("fm") or self.fm_block.get(ex, 0) > now:
+            return 0
+        plan = self.fm_plan(now).get(ex) or []
+        side_filled = rec["side"]
+        wants = [q for q in plan if q["side"] == side_filled]   # the side that just filled is re-quoted (the other still rests)
+        if not wants:
+            return 0
+        items = []
+        for q in wants:
+            px = q["px"] if not q.get("reduce") else round(1 - q["sell_px"], 3) if q["held"] == "yes" else q["sell_px"]
+            items.append((self.owner[ex].name, q["sub"], "fmexit" if q.get("reduce") else "fm", (ex, q["side"], "buy", px, int(q["qty"]))))
+        self.ex.place(items, ttl_s=FM_TTL_S)
+        n = self.ex.step_placements()
+        self.fast_orders[(ex, "fm")] = now
+        self.sample("fast_fill_to_sent", time.time() - t_ev)
+        self.fast_stats["fm_requotes"] += 1
+        self.event("FAST", f"FAST FM re-quote {self.name(ex)} {side_filled.upper()}: {len(items)} quote(s), {time.time() - t_ev:.2f} s after the fill event")
+        return n
+
+    def fast_pull(self, pm_ev, now):
+        targets = {str(t["ex"]) for t in self.fm_targets()}
+        n = 0
+        for t_ev, _, exs in pm_ev:
+            for ex in exs:
+                if ex not in targets or self.fast_slow.get(ex, 0) > now:
+                    continue
+                h = [x for x in self.fair_hist.get(ex, []) if x[0] >= now - FM_NEWS_WINDOW_S]
+                f = self.fair.get(ex)
+                if f is None:
+                    continue
+                move = max(abs(f - v) for _, v in h) if h else 0.0
+                if move < FAST_PM_MOVE_C - 1e-9:
+                    continue
+                pulled = 0
+                for o in list(self.open):
+                    r = self.ledger.orders.get(o["id"])
+                    if o["ex"] == ex and r and r.get("layer") in ("fm", "fmexit") and o["id"] not in self.ex.cancelling:
+                        self.ex.cancel(o, reason="fast pull on a Polymarket move", front=True); pulled += 1
+                if pulled:
+                    self.ex.step_cancels()
+                    self.fm_block[ex] = now + FM_REQUOTE_S
+                    self.sample("fast_pm_to_pull", time.time() - t_ev)
+                    self.fast_stats["pm_pulls"] += 1
+                    self.event("FAST", f"FAST pull {self.name(ex)}: Polymarket moved {move * 100:.1f}c, {pulled} FM quote(s) cancelled {time.time() - t_ev:.2f} s after the event")
+                    n += pulled
+        return n
+
+    def fast_reconcile(self, now):
+        """In the full loop, after the REST state is in: a fast order placed >= 20 s ago must be resting, filled or cancelled by us;
+        otherwise the market goes to the slow path for 10 min and the event is logged."""
+        for (ex, sub), t0 in list(self.fast_orders.items()):
+            if now - t0 < 20:
+                continue
+            del self.fast_orders[(ex, sub)]
+            ok = any(o["ex"] == ex and ((self.ledger.orders.get(o["id"]) or {}).get("sub") == sub or sub == "fm") for o in self.open) or \
+                 any(r["ex"] == ex and (r.get("sub") == sub or sub == "fm") and (r.get("ts") or 0) >= t0 - 1 and (r.get("status") in ("done", "cancelled") or (r.get("filled") or 0) > 0) for r in self.ledger.orders.values())
+            if not ok:
+                self.fast_slow[ex] = now + FAST_SLOW_S
+                self.fast_stats["mismatch"] += 1
+                self.event("FAST", f"FAST mismatch {self.name(ex)} ({sub}): the fast order is neither resting nor filled: slow path for 10 min")
+
     # ------------------------------------------------------------------------------------------------ mm_plan §1/§4: the fair maker (FM)
     def fm_targets(self):
         """The pilot's targets (a control override wins); none at all when the pilot switch is off (the test package sets SIG_FM_PILOT=0)."""
@@ -4593,6 +4907,25 @@ class Engine:
                f"pulled on a 2c / 10 min Polymarket move (re-quote 5 min after), {FM_TTL_S}-s expiry, <= {FM_WRITES_PER_MIN} writes/min, weight 1.0 after L0 before the scalper; "
                f"auto-off at realized < {FM_OFF_REALIZED:+,.0f} or a 30-min mark-out < -0.5c over >= {FM_OFF_MIN_FILLS} fills; cap 0 from Nov 2 17:00 PT and no quotes from a state's poll close - 10 min")
         self.event("FM", msg)
+        self.night.line(msg)
+
+    def day11_migrations(self):
+        """Once (C81c): rules v2 — RI unfrozen (the cap is recorded on the first priced loop), BUFFER recomputed at the deploy, the rules logged."""
+        c = self.controls
+        d11 = c.d.setdefault("day11", {})
+        self.ri_held_cap = None if d11.get("ri_held_cap") is None else float(d11["ri_held_cap"])
+        if d11.get("rules_v2") or not RULES_V2:
+            return
+        with c.lock:
+            c.d["ri_freeze"] = False
+            c.d.pop("buffer", None)
+            d11["rules_v2"] = stamp()
+            c.save()
+        msg = (f"DAY 11 §1 (C81c) rules v2: no forced sales at any cash level (the 15k rebuild line is gone; rule 0 and the ladder are the only exits); "
+               f"while free >= BUFFER a catch / touch lot >= {HOLD_IDLE_GAP * 100:.0f}c under fair is held, under BUFFER the ladder offers such lots lowest-edge first and k falls "
+               f"(k table {{>= B+5k: 3, >= B: 3, >= B/2: 2, else {BUDGET_K_MIN:g}}}); RI unfrozen for turnover (held capped at the deploy level, +{RI_TURNOVER:,} in flight, levels >= {RI_MIN_EDGE * 100:.0f}c under fair); "
+               f"L3 / L4 levels <= {L3_BUDGET_SHARE:.0%} of the weighted entry budget")
+        self.event("CASH", msg)
         self.night.line(msg)
 
     def day10_migrations(self):
@@ -6426,6 +6759,10 @@ def main():
             if loops is None or i < loops:                  # a realtime event replans early, within the read budget:
                 eng.wake.wait(timeout=max(1.0, min(LOOP_S, FILL_POLL_S) - (time.time() - t)))   # fills read <= 10 s apart (§6)
                 eng.wake.clear()
+                try:
+                    eng.fast_step(time.time())              # mm_plan §2: act on our fills / PM moves within ~1 s, before the full loop
+                except Exception as e:
+                    eng.event("ERR", f"fast path: {e!r}")
                 reads = api.health(60)["reads_last_min"]    # ~8 SIG reads a loop; SIG allows 100 a minute
                 with eng.rt_lock:
                     ours = any(k != "pm_move" for _, k, _ in eng.rt_pending)

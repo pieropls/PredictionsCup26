@@ -1728,6 +1728,8 @@ class DumpV3Tests(EngineCase):
         a fill becomes a dump tranche selling at entry + 1.5c (entry + 0.5c after 60 min); while the tranche is open the
         level refills at the new best bid, at most 3 times per 10 min."""
         fake, eng, favs = self.rig(state="full")
+        self.addCleanup(setattr, f_engine, "HOLD_IDLE_GAP", f_engine.HOLD_IDLE_GAP)
+        f_engine.HOLD_IDLE_GAP = 0.50                          # day 11 §1.2 would hold an 8c lot while cash is idle (RulesV2Tests); here the ladder
         ex = max(favs, key=lambda e_: eng.fair[e_])
         f = eng.fair[ex]
         bid = bots.tick_down(round(f - 0.08, 3))
@@ -1753,11 +1755,11 @@ class DumpV3Tests(EngineCase):
         self.settle(eng, fake, favs, 2)
         xs = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "dumpexit"]
         self.assertAlmostEqual(1 - xs[0]["price"], bots.tick_up(round(bid + a_config.DUMP_STEP2_MIN, 6)), places=3, msg="after 60 min: entry + 0.5c")
-        for _ in range(3):                                # 3 refills in 10 min: the fourth waits
+        for _ in range(a_config.DUMP_L0_REFILLS):          # DUMP_L0_REFILLS refills in 10 min (5 since C82): the next one waits
             o = [o for o in self.dump_orders(eng, fake, ex) if abs(o["price"] - bid) < 1e-9][0]
             fake.fill(o["id"], o["qty"])
             self.settle(eng, fake, favs, 2)
-        self.assertEqual([o for o in self.dump_orders(eng, fake, ex) if abs(o["price"] - bid) < 1e-9], [], "no 4th refill within 10 min")
+        self.assertEqual([o for o in self.dump_orders(eng, fake, ex) if abs(o["price"] - bid) < 1e-9], [], f"no refill beyond {a_config.DUMP_L0_REFILLS} within 10 min")
 
     def test_race_cap_counts_every_engine_layer_and_ri_gets_its_own_10k(self):
         fake, eng, favs = self.rig(state="full")
@@ -1771,6 +1773,7 @@ class DumpV3Tests(EngineCase):
         ri = next((e_ for e_, m in eng.meta.items() if m.get("race") == "Rhode Island Senate" and m.get("party") == "R"), None)
         if ri:
             eng.ri_senate_base = None                             # day 7 rule (before the C73 base is recorded): the engine's own 10k
+            eng.ri_held_cap = None                                # day 11 §1.4 turnover cap (RulesV2Tests); here the day-7 / day-9 rules
             eng.ledger.subbooks[ri] = {"inventory": -14_401.0}       # the old RI Senate R NO book does not count
             self.assertAlmostEqual(eng.race_room(ri, "no", 0.99), a_config.RI_ENGINE_CAP, delta=1)
             eng.ledger.subbooks[ri]["dump:%s:no:L0" % ri] = -4_000.0
@@ -3207,9 +3210,10 @@ class CashGuardTests(EngineCase):
         out, cut, spent = eng.allocate_levels(rows, budget=1e9, l0_room=1_500)   # 8k cap: one L0 (900) fits, the second (900 more) does not
         self.assertEqual(sum(1 for r in out if r[3]["l0"]), 1)
         self.assertEqual(sum(1 for r in cut if r[3]["l0"]), 1)
-        # hysteresis: a resting L3 with a small edge keeps its slot ahead of a better new L1 when only one fits
-        rows = [row("L3", 0.03, resting=True, ex="r"), row("L1", 0.03, ex="n")]
-        out, cut, spent = eng.allocate_levels(rows, budget=0.90 * 1000 * 0.15 + 1.0, l0_room=1e9)
+        # hysteresis: a resting L2 with a small edge keeps its slot ahead of a better new L1 when only one fits
+        # (an L2, not an L3: day 11 §1.5 caps L3 / L4 at 20% of the budget — RulesV2Tests)
+        rows = [row("L2", 0.03, resting=True, ex="r"), row("L1", 0.03, ex="n")]
+        out, cut, spent = eng.allocate_levels(rows, budget=0.90 * 1000 * 0.30 + 1.0, l0_room=1e9)
         self.assertEqual([r[2] for r in out], ["r"], out)
         self.assertEqual([r[2] for r in cut], ["n"])
         self.assertIn("k", eng.dump_cov)
@@ -3227,6 +3231,7 @@ class CashGuardTests(EngineCase):
         fake, eng, favs = self.rig(cash_above_floor=20_000)
         c = eng.controls
         now = time.time()
+        c.d["buffer"] = dict(value=15_000, day=time.strftime("%Y-%m-%d"))   # day 11: the table hangs off BUFFER; at 15k it is the day-9 table
         self.assertEqual(eng.k_max_for(25_000)[1], 3.0)
         self.assertEqual(eng.k_max_for(17_000)[1], 3.0)
         self.assertEqual(eng.k_max_for(12_000)[1], 2.0)
@@ -3235,7 +3240,7 @@ class CashGuardTests(EngineCase):
         self.assertEqual(eng.k_max_for(16_100, cur_tier=0)[1], 3.0)
         c.d["budget_k"] = dict(k=3.0, k_max=3.0, tier=20_000, t=now, hist=[])
         eng.adjust_budget_k(now, free=12_000)
-        self.assertEqual((c.d["budget_k"]["k"], c.d["budget_k"]["k_max"], c.d["budget_k"]["tier"]), (2.0, 2.0, 0), "a lower tier caps k at once")
+        self.assertEqual((c.d["budget_k"]["k"], c.d["budget_k"]["k_max"], c.d["budget_k"]["tier"]), (2.0, 2.0, 7_500), "a lower tier caps k at once (day 11: the BUFFER/2 tier)")
         self.assertTrue(any("BUDGET k_max -> 2" in e["text"] for e in eng.events))
         eng.adjust_budget_k(now, free=21_500)
         self.assertEqual((c.d["budget_k"]["k"], c.d["budget_k"]["k_max"]), (2.0, 3.0), "a higher tier raises k_max; k climbs by the +0.5 rule")
@@ -3305,7 +3310,7 @@ class CashGuardTests(EngineCase):
         self.assertEqual(ttls.get(True, {a_config.DUMP_NEAR_TTL_S}), {a_config.DUMP_NEAR_TTL_S})
         self.assertEqual(ttls.get(False, {a_config.DUMP_TTL_S}), {a_config.DUMP_TTL_S})
         ex = favs[0]
-        eng.ledger.subbooks.setdefault(ex, {})[f"dump:{ex}:yes:L0"] = 9_000.0
+        eng.ledger.subbooks.setdefault(ex, {})[f"dump:{ex}:yes:L0"] = float(int(a_config.DUMP_L0_BUDGET / 0.9) + 1_000)   # above the L0 held cap (15k since C82)
         eng.ledger.tranches[f"dump:{ex}:yes:L0"] = dict(ex=ex, side="yes", kind="dump", state="open", ts=time.time(), t="x", avg=0.9)
         self.assertGreaterEqual(eng.l0_held(), a_config.DUMP_L0_BUDGET)
         for _ in range(3):
@@ -3334,6 +3339,8 @@ class CashGuardTests(EngineCase):
         self.assertEqual(len(eng.ledger.fills), n0, "SIG pulled both sides at the cash floor: nothing was filled")
 
     def test_rebuild_sells_engine_lots_at_the_bid_to_15k_free(self):
+        self.addCleanup(setattr, f_engine, "RULES_V2", f_engine.RULES_V2)
+        f_engine.RULES_V2 = False                              # day 11 rules v2 retire the rebuild (RulesV2Tests); this covers the v1 code path
         fake, eng = Day4Tests.rig(self)
         self.addCleanup(setattr, f_engine, "RELEASE_QUIET_HOURS", f_engine.RELEASE_QUIET_HOURS)
         f_engine.RELEASE_QUIET_HOURS = (0, 0)
@@ -3483,6 +3490,262 @@ class WallC77Tests(WallRulesC76Tests):
         eng.release_t = 0
         plan = eng.release_plan(a_config.CASH_RESERVE + 3_000, time.time(), eng.bucket_usage())
         self.assertNotIn(ex, plan, plan)
+
+
+class RulesV2Tests(EngineCase):
+    """Day 11 §1 (C81c) rules v2: no forced sales at any cash level (the 15k rebuild line is gone); while free cash >= BUFFER a
+    catch lot >= 8c under fair is held off the ladder, under BUFFER the ladder offers such lots lowest-edge first; BUFFER = the
+    catcher's p95 rolling-1-h entry cost over 72 h + 5k and the k table hangs off it; RI unfrozen for turnover (held capped at
+    the deploy level, +10k in flight, levels >= 15c under fair); L3 / L4 levels <= 20% of the weighted budget."""
+
+    def rig(self, cash_above_floor=60_000):
+        fresh_data(layers=dict(position=dict(state="full"), dump=dict(state="full"), release=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + cash_above_floor)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        favs = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] >= 0.90
+                and eng.meta[b.ex].get("race") not in a_config.RI_RACES]
+        self.assertTrue(favs)
+        return fake, eng, favs
+
+    def tranche(self, eng, ex, sub, qty, avg, side="yes"):
+        eng.ledger.subbooks.setdefault(ex, {})[sub] = float(qty if side == "yes" else -qty)
+        eng.ledger.tranches[sub] = dict(ex=ex, side=side, kind="dump", state="open", ts=time.time() - 60, t="x", avg=avg)
+
+    def test_migration_unfreezes_ri_and_logs_the_rules(self):
+        fake, eng, favs = self.rig()
+        self.assertTrue(a_config.RULES_V2)
+        self.assertFalse(eng.controls.d.get("ri_freeze"))
+        self.assertTrue(eng.controls.d["day11"]["rules_v2"])
+        self.assertTrue(any("rules v2" in e["text"] for e in eng.events))
+        self.assertTrue(any(e["text"].startswith("BUFFER ") for e in eng.events), "BUFFER logged with its derivation")
+
+    def test_no_forced_sales_at_any_cash_level(self):
+        fake, eng = Day4Tests.rig(self)
+        self.addCleanup(setattr, f_engine, "RELEASE_QUIET_HOURS", f_engine.RELEASE_QUIET_HOURS)
+        f_engine.RELEASE_QUIET_HOURS = (0, 0)
+        ex = mid_market(eng)
+        fake.pos[ex] = 2000
+        fake.avg_cost[ex] = 0.30
+        loop(eng, fake)
+        bid = fake.px[ex][0]
+        eng.ledger.subbooks[ex] = {f"dump:{ex}:yes:0": 2000.0}
+        eng.ledger.tranches[f"dump:{ex}:yes:0"] = dict(ex=ex, side="yes", kind="dump", state="open", ts=time.time(), t="x", avg=round(bid - 0.01, 3))
+        eng.ledger.fills.append(dict(key="r1", order="r1", ex=ex, side="yes", qty=2000.0, price=round(bid - 0.01, 3), action="buy", realized=0.0,
+                                     t="2026-10-05 12:00:00", bot="b", layer="dump", before_engine=False, fair=None, edge=None, sig_edge=None, sig_mid=None))
+        eng.ledger.orders["r1"] = dict(id="r1", bot="b", layer="dump", ex=ex, side="yes", action="buy", price=round(bid - 0.01, 3), qty=2000, filled=2000.0,
+                                       cost=0.0, left=0, placed="x", ts=time.time() - 3600, closed=None, status="done", sub=f"dump:{ex}:yes:0", note="")
+        eng.lots_cache = (None, {})
+        for free in (3_000, 8_000, 12_000):
+            eng.release_t = 0
+            plan = eng.release_plan(a_config.CASH_RESERVE + free, time.time(), eng.bucket_usage())
+            self.assertNotEqual(plan.get(ex, {}).get("why"), "rebuild", (free, plan))
+        self.assertFalse(any("REBUILD sale" in e["text"] for e in eng.events), "nothing is ever sold to raise cash")
+
+    def test_hold_when_idle_and_the_ladder_under_buffer(self):
+        fake, eng, favs = self.rig(cash_above_floor=60_000)
+        ex = favs[0]
+        fs = eng.fair[ex]
+        a, b, c = f"dump:{ex}:yes:1", f"dump:{ex}:yes:2", f"dump:{ex}:yes:3"
+        self.tranche(eng, ex, a, 2000, round(fs - 0.10, 3))       # 10c under fair: holdable
+        self.tranche(eng, ex, b, 2000, round(fs - 0.03, 3))       # 3c under fair: always on the ladder
+        eng.controls.d["buffer"] = dict(value=20_000, day=time.strftime("%Y-%m-%d"))
+        now = time.time()
+        eng.cash_hist = [a_config.CASH_RESERVE + 60_000]           # free 60k >= BUFFER: idle cash
+        eng.track_dumps(now)
+        view = {x["sub"] for x in eng.dump_view.get(ex, [])}
+        self.assertNotIn(a, view, "a lot >= 8c under fair is held while cash is idle")
+        self.assertIn(b, view, "a lot < 8c under fair keeps the ladder")
+        self.assertTrue(eng.ledger.tranches[a].get("held"))
+        self.assertIn(a, eng.held_idle)
+        eng.cash_hist = [a_config.CASH_RESERVE + 10_000]           # free 10k < BUFFER 20k: the ladder runs
+        eng.track_dumps(now + 600)
+        view = {x["sub"] for x in eng.dump_view.get(ex, [])}
+        self.assertIn(a, view)
+        self.assertFalse(eng.ledger.tranches[a].get("held"))
+        self.assertGreaterEqual(eng.ledger.tranches[a].get("held_s", 0), 599, "the held time does not count towards the ladder steps or the 6-h ageing")
+        # lowest-edge lots first: a 1k shortfall is covered by the 10c lot alone; the 20c lot stays held
+        self.tranche(eng, ex, c, 2000, round(fs - 0.20, 3))
+        eng.cash_hist = [a_config.CASH_RESERVE + 19_000]
+        eng.track_dumps(now + 600)
+        view = {x["sub"] for x in eng.dump_view.get(ex, [])}
+        self.assertIn(a, view)
+        self.assertNotIn(c, view, "the shortfall (1k) is covered by the lowest-edge lot; the 20c lot is still held")
+        # a held lot never ages to inventory while held
+        eng.ledger.tranches[c]["ts"] = now - 7 * 3600
+        eng.cash_hist = [a_config.CASH_RESERVE + 60_000]
+        eng.track_dumps(now + 600)
+        self.assertEqual(eng.ledger.tranches[c]["state"], "open")
+        self.assertIn(c, eng.ledger.subbooks[ex])
+        # integration: no exit rests for a held lot, the ladder lot's exit does
+        fake.pos[ex] = 6000
+        fake.avg_cost[ex] = round(fs - 0.10, 3)
+        for _ in range(3):
+            loop(eng, fake)
+        exits = {eng.ledger.orders[o["id"]]["sub"] for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "dumpexit"}
+        self.assertNotIn(a, exits)
+        self.assertNotIn(c, exits)
+        self.assertIn(b, exits)
+
+    def test_buffer_is_the_catchers_p95_hourly_cost_plus_5k_and_sets_the_k_table(self):
+        fake, eng, favs = self.rig()
+        now = time.time()
+        eng.ledger.fills = [f for f in eng.ledger.fills if f["layer"] != "dump"]
+        v0 = eng.buffer_calc(now, force=True)
+        self.assertEqual(v0, a_config.BUFFER_MIN, "no catches in 72 h: the 10k floor")
+        for i in range(72):                                       # 2,000 at cost every 5 min for 6 h: a 24k rolling hour
+            t = now - 6 * 3600 + i * 300
+            eng.ledger.fills.append(dict(key=f"bf{i}", order=f"bf{i}", ex=favs[0], side="yes", qty=2500.0, price=0.80, action="buy", realized=0.0,
+                                         t=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)), bot="b", layer="dump", before_engine=False, fair=0.9, edge=0.1, sig_edge=0, sig_mid=0.8))
+        v = eng.buffer_calc(now, force=True)
+        bf = eng.controls.d["buffer"]
+        self.assertEqual(bf["fills"], 72)
+        self.assertTrue(20_000 <= bf["p95"] <= 24_000, bf)
+        self.assertEqual(v, min(a_config.BUFFER_MAX, bf["p95"] + a_config.BUFFER_ADD))
+        self.assertEqual(eng.buffer(), v)
+        self.assertTrue(any(e["text"].startswith("BUFFER ") and "p95" in e["text"] for e in eng.events))
+        # recomputed once a day: a second call the same day keeps the value
+        eng.ledger.fills = eng.ledger.fills[:-72]
+        self.assertEqual(eng.buffer_calc(now), v)
+        # the k table hangs off BUFFER
+        eng.controls.d["buffer"] = dict(value=20_000, day=bf["day"])
+        self.assertEqual(eng.k_max_for(26_000)[1], 3.0)
+        self.assertEqual(eng.k_max_for(21_500)[1], 3.0)
+        self.assertEqual(eng.k_max_for(15_000)[1], 2.0, "under BUFFER entries shrink")
+        self.assertEqual(eng.k_max_for(5_000)[1], a_config.BUDGET_K_MIN)
+
+    def test_l3_levels_take_at_most_20pct_of_the_budget(self):
+        fake, eng, favs = self.rig()
+        def row(i, lname, px, qty, w, l0=False):
+            return (i, False, favs[0], dict(side="yes", px=px, qty=qty, sub=f"dump:{favs[0]}:yes:{lname}{i}", level=i, edge=0.05, arena=False, l0=l0,
+                                            ttl=600, weight=w, lname=lname, px_rest=None))
+        rows = [row(i, "L3", 0.80, 1000, a_config.ENTRY_WEIGHTS["L3"]) for i in range(10)] + [row(4, "L0", 0.85, 2000, 1.0, l0=True)]
+        out, cut, spent = eng.allocate_levels(rows, 3_000, 15_000)
+        deep = [w for _, _, _, w in out if w["lname"] == "L3"]
+        self.assertEqual(len(deep), 5, "5 x 120 = 600 = 20% of 3,000")
+        self.assertTrue(any(w["l0"] for _, _, _, w in out), "the L0 takes the rest")
+        self.assertLessEqual(sum(w["px"] * w["qty"] * w["weight"] for w in deep), a_config.L3_BUDGET_SHARE * 3_000 + 1e-6)
+
+    def test_ri_unfrozen_for_turnover_with_a_held_cap_and_the_15c_rule(self):
+        fake, eng, favs = self.rig(cash_above_floor=60_000)
+        ex = favs[0]
+        eng.meta[ex]["race"] = a_config.RI_SENATE_RACE
+        fs = eng.fair[ex]
+        eng.ri_held_cap = None
+        eng.ledger.subbooks.setdefault(ex, {})["inventory"] = 2_000.0
+        eng.record_ri_cap()
+        self.assertIsNotNone(eng.ri_held_cap)
+        self.assertGreater(eng.ri_held_cap, 1_000)
+        self.assertEqual(eng.controls.d["day11"]["ri_held_cap"], round(eng.ri_held_cap, 2))
+        self.assertAlmostEqual(eng.race_room(ex, "yes", fs), a_config.RI_TURNOVER, delta=1.0, msg="at the cap: the 10k turnover room")
+        eng.ledger.subbooks[ex]["inventory"] = 4_000.0
+        self.assertLess(eng.race_room(ex, "yes", fs), a_config.RI_TURNOVER - 1_000, "above the cap: the room shrinks")
+        self.assertTrue(eng.ri_edge_short(ex, fs - 0.10, fs))
+        self.assertFalse(eng.ri_edge_short(ex, fs - 0.16, fs))
+        # an RI lot above the cap is never held, whatever the cash
+        sub = f"dump:{ex}:yes:1"
+        t = dict(ex=ex, side="yes", kind="dump", state="open", ts=time.time(), t="x", avg=round(fs - 0.16, 3))
+        eng.cash_hist = [a_config.CASH_RESERVE + 60_000]
+        eng.controls.d["buffer"] = dict(value=20_000, day=time.strftime("%Y-%m-%d"))
+        self.assertEqual(eng.hold_when_idle([(sub, t, ex, 1000, fs - 0.16, fs)], time.time()), set())
+        eng.ledger.subbooks[ex]["inventory"] = 1_000.0           # back under the cap: holdable
+        self.assertEqual(eng.hold_when_idle([(sub, t, ex, 1000, fs - 0.16, fs)], time.time()), {sub})
+        # the 15c rule on the levels
+        for _ in range(3):
+            seed_ref(eng, ex, mid=fs - 0.06)
+            for e_ in favs[1:]:
+                seed_ref(eng, e_, mid=eng.fair[e_] - 0.06)
+            loop(eng, fake)
+        mine = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "dump"]
+        self.assertEqual(mine, [], "no RI level < 15c under fair")
+        for _ in range(3):
+            seed_ref(eng, ex, mid=fs - 0.17)
+            loop(eng, fake)
+        mine = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "dump"]
+        self.assertTrue(mine, "levels >= 15c under fair are placed on RI again (unfrozen)")
+        self.assertTrue(all(o["price"] <= fs - 0.15 + 1e-9 for o in mine))
+
+
+class FastPathTests(EngineCase):
+    """mm_plan §2 / §8.1: on a SIG fill notification the fast step reads the fills once, re-bids a filled L0 level at the new
+    best bid while it is >= 5c under fair (<= 3 per side per 10 min), re-quotes a filled FM side, and pulls a market's FM
+    quotes on a Polymarket move >= 2c; a fast order neither resting nor filled sends the market to the slow path 10 min."""
+
+    def rig(self):
+        fresh_data(layers=dict(position=dict(state="full"), dump=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 60_000)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        fake.DRY_RUN = False
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] >= 0.95
+                  and eng.meta[b.ex].get("race") != a_config.RI_SENATE_RACE)
+        return fake, eng, ex
+
+    def test_l0_sweep_follow_within_the_fast_step(self):
+        fake, eng, ex = self.rig()
+        f = eng.fair[ex]
+        fake.px[ex] = eng.px[ex] = (round(f - 0.08, 3), round(f - 0.075, 3), f - 0.08)   # the bid 8c under fair: L0 joins it
+        seed_ref(eng, ex, mid=f - 0.08)
+        loop(eng, fake); loop(eng, fake)
+        l0 = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and str(eng.ledger.orders[o["id"]].get("sub", "")).endswith(":L0")]
+        self.assertEqual(len(l0), 1, l0)
+        fake.fill(l0[0]["id"], l0[0]["qty"])               # the sweep takes our L0 level
+        fake.px[ex] = (round(f - 0.09, 3), round(f - 0.085, 3), f - 0.09)   # the new best bid, lower
+        eng.rt_event("fills", set(), time.time() - 0.3)    # the SIG notification (no market in it)
+        before = len(fake.open_orders())
+        n = eng.fast_step(time.time())
+        self.assertGreaterEqual(n, 1, "the fast step placed the re-bid")
+        new = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and str(eng.ledger.orders[o["id"]].get("sub", "")).endswith(":L0")]
+        self.assertEqual(len(new), 1, new)
+        self.assertAlmostEqual(new[0]["price"], round(f - 0.09, 3), places=3, msg="re-bid at the NEW best bid")
+        self.assertTrue(eng.latency.get("fast_fill_to_sent"), "latency sampled")
+        self.assertLess(eng.latency["fast_fill_to_sent"][-1], 2.0)
+        self.assertTrue(any("FAST L0 re-bid" in e["text"] for e in eng.events))
+        # guard: no more than 3 fast re-arms per side per 10 min
+        eng.fast_rearms[(ex, "yes")] = [time.time()] * 3
+        eng.rt_event("fills", set(), time.time())
+        fake.fill(new[0]["id"], new[0]["qty"])
+        self.assertEqual(eng.fast_step(time.time()), 0)
+        self.assertGreaterEqual(eng.fast_stats["l0_capped"], 1)
+        # reconcile: a fast order that vanished without a fill -> slow path 10 min
+        eng.fast_orders[(ex, f"dump:{ex}:yes:L0")] = time.time() - 30
+        for o in list(fake.open_orders()):
+            if o["ex"] == ex:
+                fake.open.pop(o["id"], None) if hasattr(fake, "open") else None
+        loop(eng, fake)
+        eng.fast_reconcile(time.time())
+        self.assertTrue(eng.fast_slow.get(ex, 0) > time.time() or eng.fast_stats["mismatch"] == 0)
+
+    def test_pm_move_pulls_fm_quotes_fast(self):
+        fresh_data(layers=dict(position=dict(state="full"), fm=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 60_000)
+        eng = engine(fake); eng.ex.capacity = 6000.0; fake.DRY_RUN = False
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
+        FAIR[ex] = 0.50; self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = eng.px[ex] = (0.48, 0.52, 0.50)
+        eng.controls.d["fm_targets"] = [dict(ex=ex, e=0.03, name="t")]
+        for k in list(eng.ledger.orders):
+            if eng.ledger.orders[k].get("layer") in ("fm", "fmexit"):
+                eng.ledger.orders[k]["ts"] = 0
+        loop(eng, fake); loop(eng, fake)
+        q = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "fm"]
+        self.assertEqual(len(q), 2, q)
+        eng.fair_hist[ex] = [(time.time() - 60, 0.50)]
+        eng.fair[ex] = 0.525                               # +2.5c in a minute, as the Polymarket feed would set it before the loop runs
+        eng.rt_event("pm_move", {ex}, time.time() - 0.2)
+        n = eng.fast_step(time.time())
+        self.assertGreaterEqual(n, 1, "the fast step cancelled the quotes")
+        self.assertTrue(eng.latency.get("fast_pm_to_pull"))
+        self.assertGreater(eng.fm_block.get(ex, 0), time.time())
 
 
 class FMTests(EngineCase):

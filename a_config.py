@@ -206,7 +206,7 @@ SWING_TTL_S, WALL_HOLD_MIN_FREE, WALL_RECYCLE_EXIT_C = 3600, 30_000, 0.02   # da
 SLEEVE_TARGETS = [dict(ex="1075", side="no", limit=0.865, cap=5_000, name="Delaware Senate R NO"),   # buy NO <= 0.865, 5k at cost
                   dict(ex="963", side="no", limit=0.890, cap=5_000, name="Montana Senate D NO")]     # buy NO <= 0.89, 5k at cost   # day 9 §9.4 (Piero): +10k at cost on RI Senate beyond the Oct 6 holdings, only on levels >= 15c under fair
 DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP = 0.90, 0.05, 2_000   # day 7 §2.1: L0 joins the SIG best bid when it sits >= 5c under a >= 90% fair
-DUMP_L0_REFILLS, DUMP_L0_WINDOW_S = 3, 600            # sweep follow: at most 3 refills per side per 10 min while the tranche is open
+DUMP_L0_REFILLS, DUMP_L0_WINDOW_S = 5, 600            # mm_plan §8.2 (C82): at most 5 refills per side per 10 min while the tranche is open (was 3)
 UNCOVERED_LOG_S = 30            # §1.3: an eligible side without its level for > 30 s is logged
 # Oct 5 22:50 (Piero): hard cash guards after the floor breach
 ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE = 1.5, 0.01, 3.0, 2_000   # day 8 §2: sum(resting cost x weight) <= 1.5 x free cash above the floor; < 2k free: none
@@ -218,11 +218,22 @@ BUDGET_K_TIER_HYST = 1_000                                         # move up a t
 BUDGET_K_DOWN_S, BUDGET_K_UP_S, BUDGET_K_PEAK_DOWN, BUDGET_K_PEAK_UP = 1800, 7200, 0.70, 0.40   # -0.5 after 30 min > 70% or constrained; +0.5 after 2 h < 40%
 DUMP_WANT_BAND_LO, DUMP_WANT_BAND_HI, DUMP_GAP_LOG_S = 0.01, 0.005, 30   # day 9 §4: a resting level within [px - 1c, px + 0.5c] is kept; gaps > 30 s logged with cause   # day 8 §2 (replay reach 40/25/10/1%; ours since C64: L0 15%, L1 0.1%, L2-L3 0)
 DUMP_NEAR_TTL_S, DUMP_NEAR_GAP = 1200, 0.02      # L0 and levels within 2c of the touch: 20-min TTL (make-before-break); deeper 60 min
-DUMP_L0_BUDGET = 8_000          # L0 holds <= 8k at cost across all sides; refills only under it; L1-L4 get the cash first
+DUMP_L0_BUDGET = 15_000         # mm_plan §8.2 (C82): L0 holds <= 15k at cost across all sides (was 8k); refills only under it
+# mm_plan §2 / §8.1 (C82): the event-driven fast path — on a SIG fill notification act within ~1 s (one fills read, one book read, one batch write),
+# before the full loop; reconcile on the next loop; a mismatch sends that market back to the slow path for 10 min
+FAST_PATH_ON, FAST_REARMS_PER_10M, FAST_WRITES_RESERVE, FAST_SLOW_S, FAST_PM_MOVE_C = True, 3, 5, 600, 0.02
 REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2 = 15_000, 0.07, 0.10   # rebuild free cash to 15k: engine lots above entry + 0.5c at the bid, lowest gap first
 REBUILD_MARGIN, REBUILD_MARGIN_GAP = -0.01, 0.05 # Piero 23:00: lots <= 5c under fair may go down to entry - 1c for the rebuild
 REBUILD_EXC_FREE = 10_000       # day 8 §1.5: that exception runs only while free cash above the floor is under 10k
 REBUILD_MAX_GAP = 0.08          # day 10 §9.4: the rebuild never sells a lot >= 8c under fair; below the 15k line the catcher shrinks (k falls) instead
+# day 11 §1 rules v2 (C81c): no forced sales at any cash level; hold-when-idle; BUFFER; RI unfrozen for turnover; L3 <= 20%
+RULES_V2 = True                 # the 15k rebuild line is gone: nothing is ever sold to raise cash (rule 0 and the ladder are the only exits)
+HOLD_IDLE_GAP = 0.08            # while free >= BUFFER a catch / touch lot >= 8c under fair is held (the ladder does not offer it)
+BUFFER_ADD, BUFFER_WINDOW_S, BUFFER_P, BUFFER_DEFAULT = 5_000, 72 * 3600, 0.95, 15_000   # BUFFER = p95 of the catcher's rolling-1-h entry cost over 72 h + 5k, recomputed daily
+BUFFER_MIN, BUFFER_MAX = 10_000, 30_000
+L3_BUDGET_SHARE = 0.20          # L3 / L4 levels may use at most 20% of the weighted entry budget; the rest goes to L0, the touch maker and the FM
+RI_TURNOVER = 10_000            # RI unfrozen: the engine may buy on both RI races up to the held cap (today's level at the deploy) + 10k in flight, levels >= 15c under fair
+RI_MIN_EDGE = RI_SENATE_MIN_EDGE
 DUMP_BIG_SWEEP_SH, DUMP_BIG_CLIP = 50_000, 4_000   # day 10 §4.2: sides whose 72-h median sweep >= 50k shares get L0/L1/L2 clips up to 4,000 (from 2,000)
 DUMP_V3_WEIGHTS_DAY_BIG = [0.45, 0.30, 0.05, 0.20]   # on those sides L3's share is trimmed to pay for it (L1 0.45, L2 0.30, L3 0.05, L4 0.20)
 # wall layer (Piero's manual pilot, Oct 5 23:40): one big resting order placed by control, with its buy-back, hold and news guard
