@@ -3630,6 +3630,50 @@ class RulesV2Tests(EngineCase):
         self.assertTrue(any(w["l0"] for _, _, _, w in out), "the L0 takes the rest")
         self.assertLessEqual(sum(w["px"] * w["qty"] * w["weight"] for w in deep), a_config.L3_BUDGET_SHARE * 3_000 + 1e-6)
 
+    def test_rotation_sells_low_edge_lots_under_buffer_to_fund_8c_entries(self):
+        """Piero 22:15 Oct 7 (C82 item 4): under BUFFER, lots with < 4c left to settlement sell at the bid when >= entry + 0.5c
+        (rule 0), never a lot >= 8c under fair, never manual / wall / sleeve / pair-set lots, lowest edge first, only to fund
+        cut entries with >= 8c edge; each sale logged with the edge given up vs the edge bought."""
+        fake, eng, favs = self.rig(cash_above_floor=10_000)
+        eng.controls.d["buffer"] = dict(value=20_000, day=time.strftime("%Y-%m-%d"))
+        ex = favs[0]
+        fs = eng.fair[ex]
+        bid = bots.tick_down(round(fs - 0.02, 3))               # 2c left to settlement at the bid
+        fake.px[ex] = eng.px[ex] = (bid, round(bid + 0.005, 3), bid)
+        fake.pos[ex] = 3000; fake.avg_cost[ex] = round(bid - 0.02, 3)
+        loop(eng, fake)
+        eng.ledger.subbooks[ex] = {f"dump:{ex}:yes:1": 2000.0, f"wall:{ex}:yes:w1": 1000.0}
+        eng.ledger.tranches[f"dump:{ex}:yes:1"] = dict(ex=ex, side="yes", kind="dump", state="open", ts=time.time(), t="x", avg=round(bid - 0.02, 3))
+        eng.ledger.tranches[f"wall:{ex}:yes:w1"] = dict(ex=ex, side="yes", kind="wall", state="open", ts=time.time(), t="x", avg=round(bid - 0.02, 3))
+        eng.lots_cache = (None, {})
+        now = time.time()
+        # no cut entries with >= 8c edge: nothing is rotated
+        eng.dump_cut_rows, eng.tm_unfunded = [(0.05, 5_000.0, 0.85)], []
+        self.assertEqual(eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now), {})
+        # 8c-edge entries cut for budget: the dump lot sells at the bid, the wall lot never
+        eng.dump_cut_rows = [(0.09, 1_000.0, 0.85)]
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now)
+        self.assertIn(ex, plan, plan)
+        self.assertEqual(plan[ex]["why"], "rotation")
+        self.assertEqual(set(plan[ex]["subs"]), {f"dump:{ex}:yes:1"}, "never a wall lot")
+        self.assertLessEqual(sum(plan[ex]["subs"].values()) * bid, 1_000.0 + bid * a_config.MIN_QTY, "only up to the cut entries' cost")
+        self.assertAlmostEqual(plan[ex]["px"], round(bid + 0.005, 3), places=3, msg="a resting ask at the touch ask (turnover_plan §2.2), not the bid")
+        line = next(e["text"] for e in eng.events if e["text"].startswith("ROTATION ask"))
+        self.assertIn("edge given up", line); self.assertIn("cash freed", line)
+        # rule 0: entry 0.5c above the ask -> this lot is not sold (the fixture's other holdings may still rotate)
+        eng.ledger.tranches[f"dump:{ex}:yes:1"]["avg"] = round(bid + 0.010, 3)
+        eng.lots_cache = (None, {})
+        self.assertNotIn(ex, eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now))
+        # a lot >= 8c under fair is never rotated, nor anything with >= 4c left, nor above BUFFER
+        eng.ledger.tranches[f"dump:{ex}:yes:1"]["avg"] = round(fs - 0.10, 3)
+        eng.lots_cache = (None, {})
+        self.assertNotIn(ex, eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now))
+        eng.ledger.tranches[f"dump:{ex}:yes:1"]["avg"] = round(bid - 0.02, 3)
+        eng.lots_cache = (None, {})
+        self.assertEqual(eng.rotation_plan(a_config.CASH_RESERVE + 30_000, now), {}, "free >= BUFFER: no rotation")
+        fake.px[ex] = eng.px[ex] = (round(fs - 0.07, 3), round(fs - 0.065, 3), fs - 0.07)
+        self.assertNotIn(ex, eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now), "6.5c left to settlement at the ask: kept")
+
     def test_ri_unfrozen_for_turnover_with_a_held_cap_and_the_15c_rule(self):
         fake, eng, favs = self.rig(cash_above_floor=60_000)
         ex = favs[0]
@@ -3747,14 +3791,21 @@ class TMTests(EngineCase):
         self.assertEqual((t["kind"], t["state"]), ("tm", "open"))
         xs = self.tm_orders(eng, fake, ex, "tmexit")
         self.assertEqual(len(xs), 1, xs)
-        self.assertAlmostEqual(1 - xs[0]["price"], 0.47, places=3, msg="exit at fill + 1 tick (0.465 + 0.005)")
+        self.assertAlmostEqual(1 - xs[0]["price"], 0.47, places=3, msg="exit at the touch ask 0.47 (= fill + 1 tick here), turnover_plan §2.4")
         self.assertEqual(eng.controls.d["tm_stats"]["buys"], 1)
         self.assertTrue(any("TM bought" in e["text"] for e in eng.events))
-        t["ts"] -= 700                                          # 10 min unfilled: fill + 1c
+        fake.px[ex] = eng.px[ex] = (0.47, 0.48, 0.475)          # the ask moves up: the exit joins the new touch ask
         loop(eng, fake); loop(eng, fake)
         xs = self.tm_orders(eng, fake, ex, "tmexit")
         self.assertEqual(len(xs), 1, xs)
-        self.assertAlmostEqual(1 - xs[0]["price"], 0.475, places=3)
+        self.assertAlmostEqual(1 - xs[0]["price"], 0.48, places=3)
+        fake.px[ex] = eng.px[ex] = (0.455, 0.46, 0.4575)        # the ask under entry + 0.5c: rule 0 holds the exit at 0.47
+        loop(eng, fake); loop(eng, fake)
+        xs = self.tm_orders(eng, fake, ex, "tmexit")
+        self.assertAlmostEqual(1 - xs[0]["price"], 0.47, places=3)
+        fake.px[ex] = eng.px[ex] = (0.46, 0.47, 0.465)
+        loop(eng, fake); loop(eng, fake)
+        xs = self.tm_orders(eng, fake, ex, "tmexit")
         # rule 0: never below entry + 0.5c
         self.assertGreaterEqual(1 - xs[0]["price"], t["avg"] + a_config.RULE0_MARGIN - 1e-9)
         # hold-when-idle: a lot >= 8c under fair with idle cash is held (no exit); under BUFFER it is offered again
@@ -3782,7 +3833,8 @@ class TMTests(EngineCase):
     def test_caps_news_guard_write_budget_and_reserve(self):
         fake, eng, ex = self.rig()
         loop(eng, fake)
-        self.assertAlmostEqual(eng.tm_reserve(), a_config.TM_CAP_COST_PILOT, delta=1.0, msg="the pilot's 8k is reserved off the top while flat")
+        self.assertAlmostEqual(eng.tm_reserve(), eng.tm_cap(time.time()) - eng.tm_cost(), delta=1.0, msg="the cap (base + free above BUFFER) is reserved off the top")
+        self.assertGreaterEqual(eng.tm_cap(time.time()), a_config.TM_CAP_COST_PILOT)
         self.assertGreater(a_config.ENTRY_WEIGHTS["tm"], 0.99)
         # per market-side inventory cap: only the exit quotes
         fake.pos[ex] = a_config.TM_INV_MARKET_PILOT; fake.avg_cost[ex] = 0.46   # SIG holds them (else the audit nets the phantom sub)
@@ -3800,8 +3852,11 @@ class TMTests(EngineCase):
         fake.pos[other] = 10_000; fake.avg_cost[other] = 0.85
         eng.ledger.subbooks.setdefault(other, {})[f"tm:{other}:yes"] = 10_000.0
         eng.ledger.tranches[f"tm:{other}:yes"] = dict(ex=other, side="yes", kind="tm", state="open", ts=time.time(), t="x", avg=0.85)
+        cash_was = eng.cash_hist
+        eng.cash_hist = [a_config.CASH_RESERVE + 5_000]       # under BUFFER: the cap is the 8k base (Piero 22:15 item 2)
         self.assertEqual(eng.tm_reserve(), 0.0)
         self.assertNotIn(ex, eng.tm_plan(time.time(), eng.cash_hist[-1], eng.bucket_usage()))
+        eng.cash_hist = cash_was
         eng.ledger.subbooks.get(other, {}).pop(f"tm:{other}:yes", None); eng.ledger.tranches.pop(f"tm:{other}:yes", None)
         fake.pos[other] = 0
         # the touch depth rule: a 1,000-share touch -> at most 200 shares
@@ -3836,13 +3891,67 @@ class TMTests(EngineCase):
         f_engine.TM_SIDES_PILOT = 1
         cands = eng.tm_candidates()
         self.assertTrue(cands)
-        self.assertEqual((cands[0][1], cands[0][2]), (ex, "yes"), "the busiest off-fair market first")
-        self.assertEqual([r[0] for r in cands], sorted([r[0] for r in cands], reverse=True))
+        self.assertEqual([r[0] for r in cands], sorted([r[0] for r in cands], reverse=True), "ranked by edge / price (Piero 22:15)")
+        top_ex = cands[0][1]
         resting = {o["ex"] for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "tm"}
         plan = eng.tm_plan(time.time(), eng.cash_hist[-1], eng.bucket_usage())
-        self.assertIn(ex, plan)
-        self.assertTrue(set(plan) <= {ex} | resting, "the pilot takes the top N market-sides (N = 1 here); sides already resting are kept while they rest")
+        self.assertTrue(set(plan) <= {top_ex} | resting, "the pilot takes the top N market-sides (N = 1 here); sides already resting are kept while they rest")
         self.assertEqual(eng.tm_cov["top"], 1)
+
+    def test_e_min_by_cash_and_ranking_by_edge_over_price(self):
+        """Piero 22:15 Oct 7 (C82 item 1): e_min 2c while free >= BUFFER, 4c below; TM entries ranked by edge / price."""
+        fake, eng, ex = self.rig()
+        eng.controls.d["buffer"] = dict(value=20_000, day=time.strftime("%Y-%m-%d"))
+        eng.cash_hist = [a_config.CASH_RESERVE + 60_000]
+        self.assertEqual(eng.tm_e_min(), a_config.TM_E_MIN)
+        cands = eng.tm_candidates()
+        self.assertEqual([r[0] for r in cands], sorted([r[0] for r in cands], reverse=True))
+        self.assertAlmostEqual(cands[0][0], (cands[0][3] - cands[0][4]) / cands[0][4], places=6, msg="score = edge / price")
+        eng.cash_hist = [a_config.CASH_RESERVE + 10_000]       # under BUFFER: 4c
+        self.assertEqual(eng.tm_e_min(), a_config.TM_E_MIN_LOW)
+        fake.px[ex] = eng.px[ex] = (0.47, 0.475, 0.4725)       # 3c under fair: enough above BUFFER, not below
+        self.assertNotIn((ex, "yes"), {(r[1], r[2]) for r in eng.tm_candidates()})
+        eng.cash_hist = [a_config.CASH_RESERVE + 60_000]
+        self.assertIn((ex, "yes"), {(r[1], r[2]) for r in eng.tm_candidates()})
+
+    def test_cap_grows_with_free_cash_above_buffer_and_logs_on_change(self):
+        """Piero 22:15 Oct 7 (C82 item 2): TM cap = base + max(0, free - BUFFER), recomputed each loop, logged on change."""
+        fake, eng, ex = self.rig()
+        eng.controls.d["buffer"] = dict(value=20_000, day=time.strftime("%Y-%m-%d"))
+        eng.cash_hist = [a_config.CASH_RESERVE + 10_000]
+        self.assertEqual(eng.tm_cap(time.time()), a_config.TM_CAP_COST_PILOT, "under BUFFER: the base cap")
+        eng.cash_hist = [a_config.CASH_RESERVE + 32_000]
+        n0 = sum(1 for e in eng.events if e["text"].startswith("TM cap ->"))
+        self.assertEqual(eng.tm_cap(time.time()), a_config.TM_CAP_COST_PILOT + 12_000)
+        self.assertEqual(sum(1 for e in eng.events if e["text"].startswith("TM cap ->")), n0 + 1, "logged on change")
+        self.assertEqual(eng.tm_cap(time.time()), a_config.TM_CAP_COST_PILOT + 12_000)
+        self.assertEqual(sum(1 for e in eng.events if e["text"].startswith("TM cap ->")), n0 + 1, "no change, no line")
+        self.assertAlmostEqual(eng.tm_reserve(), a_config.TM_CAP_COST_PILOT + 12_000 - eng.tm_cost(), delta=1.0)
+
+    def test_per_market_round_trip_share_sets_clip_and_cap(self):
+        """Piero 22:15 Oct 7 (C82 item 3): exits >= 50% of buys over 24 h -> clip 1k and cap 3k; < 20% -> cap 1k."""
+        fake, eng, ex = self.rig()
+        now = time.time()
+        def fill(e_, layer, qty, t):
+            eng.ledger.fills.append(dict(key=f"{e_}{layer}{t}", order="x", ex=e_, side="yes", qty=float(qty), price=0.46, action="buy", realized=0.0,
+                                         t=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)), bot="b", layer=layer, before_engine=False, fair=0.5, edge=0.04, sig_edge=0, sig_mid=0.46))
+        a, b, c = "a1", "b1", "c1"
+        fill(a, "tm", 1000, now - 7200); fill(a, "tmexit", 600, now - 3600)      # 60% -> clip 1k, cap 3k
+        fill(b, "tm", 1000, now - 7200); fill(b, "tmexit", 100, now - 3600)      # 10% -> cap 1k
+        fill(c, "tm", 1000, now - 7200); fill(c, "tmexit", 300, now - 3600)      # 30% -> defaults
+        fill("d1", "tm", 1000, now - 600)                                        # bought 10 min ago: grace, no profile
+        prof = eng.tm_market_profile(now)
+        self.assertEqual(prof[a][:2], (a_config.TM_CLIP_HI, a_config.TM_INV_HI))
+        self.assertEqual(prof[b][:2], (a_config.TM_CLIP_PILOT, a_config.TM_INV_LO))
+        self.assertEqual(prof[c][:2], (a_config.TM_CLIP_PILOT, a_config.TM_INV_MARKET_PILOT))
+        self.assertNotIn("d1", prof)
+        # in the plan: a 60% market bids the 1k clip
+        fill(ex, "tm", 1000, now - 7200); fill(ex, "tmexit", 600, now - 3600)
+        for o in self.tm_orders(eng, fake, ex):
+            fake.cancel(o["id"]) if hasattr(fake, "cancel") else None
+        loop(eng, fake); loop(eng, fake)
+        q = self.tm_orders(eng, fake, ex)
+        self.assertTrue(q and q[0]["qty"] == a_config.TM_CLIP_HI, q)
 
     def test_migration_turns_the_pilot_on_and_the_scalper_off(self):
         fresh_data(layers=dict(position=dict(state="full"), scalp=dict(state="full")))
