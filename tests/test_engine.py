@@ -207,6 +207,8 @@ class EngineCase(unittest.TestCase):
         fresh_data()
         self.addCleanup(setattr, f_engine, "LIQUIDATE", f_engine.LIQUIDATE)
         f_engine.LIQUIDATE = {}                           # the AK sale (day 4 §3) has its own test
+        self.addCleanup(setattr, f_engine, "STARTUP_HOLD_S", f_engine.STARTUP_HOLD_S)
+        f_engine.STARTUP_HOLD_S = 0                         # the rigs read from their first loop (the 2-min start-up hold is a live-only guard)
         for k in ("PNL_READ_S", "ORDERS_READ_S", "FILLS_READ_S", "POSITIONS_READ_S"):   # day 4 §4 / Oct 8 read caching have their own tests; the rigs (no realtime feed) read fresh each loop
             self.addCleanup(setattr, f_engine, k, getattr(f_engine, k))
             setattr(f_engine, k, 0)
@@ -4212,7 +4214,7 @@ class ReadBudgetTests(EngineCase):
         bid = next(o for o in q if o["side"] == "yes")
         r = eng.lifecycle.get(bid["id"])
         self.assertIsNotNone(r, "an SM order is tracked from placement")
-        self.assertEqual(r["queue_ahead"], 1_234.0, "shares at our level from the latest book sample (the rig's cached sample; the sampler holds off for 2 min after a start)")
+        self.assertEqual(r["queue_ahead"], 1_000.0, "shares at our level from the latest book sample (the sampler read the fake's 1,000-share touch)")
         self.assertIsNotNone(r["mid0"])
         fake.fill(bid["id"], bid["qty"])
         r["t_place"] -= 1801                                   # all three marks are due
@@ -4250,7 +4252,8 @@ class ReservoirTests(EngineCase):
         fake.pos[ex] = -46_931
         eng.meta[ex]["race"] = a_config.RI_SENATE_RACE; eng.ri_held_cap = 43_539.0
         r = json.loads(json.dumps(a_config.RESERVOIRS["1077"]))
-        r.update(ex=ex, offers=[[subs[0], 0.850], ["inventory", 0.850], [subs[2], 0.855], [subs[3], 0.855]], mode="trade", fair0=0.0065, since=stamp_(),
+        r.update(ex=ex, offers=[[subs[0], 0.850], ["inventory", 0.850], [subs[2], 0.855], [subs[3], 0.855]], max_out=None, join_touch=False, hold_subs=[], core_qty=10_000,
+                 mode="trade", fair0=0.0065, since=stamp_(),
                  stats=dict(sold_sh=0.0, bought_sh=0.0, realized=0.0, cycles=0, sold_val=0.0, bought_val=0.0, legs=[]))
         eng.controls.d["reservoirs"] = {ex: r}
         eng.controls.d["swing"] = dict(a_config.SWING, ex=ex, wall_subs=subs[2:], hold_qty=0.0, stats=dict(sold=0.0, bought=0.0, realized=0.0, cycles=0, legs=[]))
@@ -4286,6 +4289,27 @@ class ReservoirTests(EngineCase):
         eng.rule0_allowed = lambda ex_, side, sub, px, q, margin=a_config.RULE0_MARGIN: min(q, 4_000) if sub == "inventory" else q
         plan = eng.reservoir_plan(time.time(), r)
         self.assertEqual(sum(x["qty"] for x in plan["sells"] if x["sub"] == "inventory"), 4_000)
+
+    def test_partial_unwind_20k_at_0845_joining_the_touch_rest_held(self):
+        """Piero 16:50: 20,000 NO offered at 0.845 (swing lots first, then cheap inventory lots), joining the touch, clips <= 5k; the walls
+        and the rest held (no wall buy-back); after a sale only (20,000 - out) is offered."""
+        fake, eng, ex, subs = self.rig()
+        r = eng.controls.d["reservoirs"][ex]
+        r.update(offers=[[subs[0], 0.845], ["inventory", 0.845]], hold_subs=subs[2:], max_out=20_000, join_touch=True, core_qty=0)
+        fake.px[ex] = eng.px[ex] = (0.155, 0.16, 0.1575)       # NO bid 0.84 / ask 0.845: the level is the touch
+        plan = eng.reservoir_plan(time.time(), r)
+        self.assertEqual(sum(x["qty"] for x in plan["sells"]), 20_000)
+        self.assertTrue(all(abs(x["px"] - 0.845) < 1e-9 and x["qty"] <= 5_000 for x in plan["sells"]))
+        self.assertEqual(sum(x["qty"] for x in plan["sells"] if x["sub"] == subs[0]), 14_787, "the swing lots first")
+        self.assertFalse(any(x["sub"] in subs[2:] for x in plan["sells"]), "the walls are held")
+        self.assertEqual(eng.reservoir_subs(ex), {subs[0], "inventory", subs[2], subs[3]}, "held walls stay owned: no wall buy-back")
+        fake.px[ex] = eng.px[ex] = (0.145, 0.15, 0.1475)       # NO touch ask 0.855 above the level: join it
+        plan = eng.reservoir_plan(time.time(), r)
+        self.assertTrue(all(abs(x["px"] - 0.855) < 1e-9 for x in plan["sells"]), [x["px"] for x in plan["sells"]])
+        # an existing 0.845 order stays when the touch moves up one tick (queue kept); a 0.850 order above a 0.845 touch re-pegs down (tested above)
+        r["stats"]["sold_sh"] = 6_000.0                         # 6,000 out: only 14,000 more offered
+        plan = eng.reservoir_plan(time.time(), r)
+        self.assertEqual(sum(x["qty"] for x in plan["sells"]), 14_000)
 
     def test_an_ask_never_crosses_the_bid(self):
         fake, eng, ex, subs = self.rig()
@@ -4350,7 +4374,7 @@ class ReservoirTests(EngineCase):
         self.assertEqual(rs["1077"]["stats"]["sold_sh"], 6000.0, "the live RI state carries over (shares out)")
         self.assertAlmostEqual(rs["1077"]["last_sell_px"], 0.86, places=3)
         self.assertNotIn("reservoir", eng.controls.d)
-        self.assertEqual(rs["1077"]["core_qty"], 10_000)
+        self.assertEqual((rs["1077"]["max_out"], rs["1077"]["ver"]), (20_000, "16:50"), "Piero 16:50: at most 20,000 out")
 
     def test_fair_reference_pinned_on_the_first_priced_loop(self):
         fake, eng, ex, subs = self.rig()
@@ -4446,6 +4470,129 @@ class RingWindowTests(EngineCase):
         lock = eng.pair_lock("77")
         self.assertIsNotNone(lock); self.assertAlmostEqual(lock["lock"], 0.03, places=6, msg="1 - (0.18 + 0.79) = +3c per share")
         self.assertIn("@ 0.180", lock["legs"]); self.assertIn("@ 0.790", lock["legs"])
+
+
+class FeedTests(EngineCase):
+    """C86 (Piero 15:35 Oct 8): SIG's tournament markets feed — books (full, versioned) and sweeps from the trades; per-market
+    revisions (duplicates dropped, gaps counted); a reconnect makes every book stale until a fresh batch (the election-night drill);
+    log mode compares with REST and changes nothing; live mode serves the depth, the queue-ahead and the fast path from the feed."""
+    TID = "tid-1"
+
+    def batch(self, mid, rev, prev, books=(), trades=(), at="2026-10-08T23:11:45.000+00:00"):
+        return {"event": "broadcast", "topic": f"realtime:tournament:{self.TID}:markets", "payload": {"event": "markets_batch", "type": "broadcast", "payload": {"markets": [
+            {"marketId": mid, "batch": {"delivery": {"previousRevision": prev, "revision": rev, "model": "best-effort-authoritative-resync"},
+                                        "books": [{"exchangeId": ex, "asOf": {"at": at, "sequence": seq}, "bids": [{"price": p, "quantity": q} for p, q in bids],
+                                                   "asks": [{"price": p, "quantity": q} for p, q in asks], "nextExpiryAt": None} for ex, seq, bids, asks in books],
+                                        "trades": [{"exchangeId": ex, "executedAt": t_at, "id": str(i), "price": p, "quantity": q, "sequence": i} for i, (ex, t_at, p, q) in enumerate(trades)],
+                                        "bookDirty": [], "marketSettled": []}}]}}}
+
+    def feed(self, t0):
+        import i_realtime
+        clock = [t0]
+        f = i_realtime.SigMarketFeed(lambda: {}, self.TID, clock=lambda: clock[0], log=lambda *a: None)
+        f.connected_t = t0
+        return f, clock
+
+    def test_parser_books_lag_duplicates_and_gaps(self):
+        from datetime import datetime, timezone
+        t0 = datetime(2026, 10, 8, 23, 11, 46, tzinfo=timezone.utc).timestamp()
+        f, clock = self.feed(t0)
+        f.handle(self.batch("270", 10, 9, books=[("959", 100, [(0.48, 500), (0.475, 900)], [(0.49, 700)])]))
+        self.assertEqual(f.book("959"), ([(0.48, 500.0), (0.475, 900.0)], [(0.49, 700.0)]))
+        self.assertAlmostEqual(f.lags[-1], 1.0, places=2, msg="asOf -> received")
+        f.handle(self.batch("270", 10, 9, books=[("959", 101, [(0.47, 1)], [(0.5, 1)])]))
+        self.assertEqual(f.stats["duplicates"], 1, "a revision at or below the last one is a duplicate")
+        self.assertEqual(f.book("959")[0][0], (0.48, 500.0))
+        f.handle(self.batch("270", 14, 12, books=[("959", 102, [(0.485, 300)], [(0.49, 700)])]))
+        self.assertEqual(f.stats["gaps"], 1, "previousRevision 12 > last 10: a gap")
+        self.assertEqual(f.book("959")[0][0], (0.485, 300.0), "the gap batch's book is a full snapshot: used")
+        f.handle(self.batch("270", 15, 14, books=[("959", 90, [(0.40, 1)], [(0.6, 1)])]))
+        self.assertEqual(f.book("959")[0][0], (0.485, 300.0), "an older book version is ignored")
+
+    def test_reconnect_resync_drill_and_staleness(self):
+        from datetime import datetime, timezone
+        t0 = datetime(2026, 10, 8, 23, 11, 46, tzinfo=timezone.utc).timestamp()
+        f, clock = self.feed(t0)
+        f.handle(self.batch("270", 10, 9, books=[("959", 100, [(0.48, 500)], [(0.49, 700)])]))
+        self.assertIsNotNone(f.book("959"))
+        f.connection_lost()                                  # the drill: the socket drops (election night: SIG / network blip)
+        self.assertIsNone(f.book("959"), "after a reconnect every book is stale")
+        self.assertEqual(f.stats["reconnects"], 1)
+        f.connected_t = clock[0]
+        f.handle(self.batch("270", 3, 2, books=[("959", 50, [(0.47, 100)], [(0.48, 100)])]))   # revisions restart after a reconnect
+        self.assertEqual(f.book("959"), ([(0.47, 100.0)], [(0.48, 100.0)]), "a fresh batch on the new connection is used, whatever its sequence")
+        clock[0] += 31                                       # no message for 31 s: not connected -> no book
+        self.assertIsNone(f.book("959"))
+        clock[0] -= 31
+        f.books["959"]["at"] = clock[0] - 20; f.books["959"]["recv"] = clock[0] - 20
+        self.assertIsNone(f.book("959", 10.0), "older than 10 s: stale")
+
+    def test_sweep_detection(self):
+        from datetime import datetime, timezone
+        t0 = datetime(2026, 10, 8, 23, 11, 46, tzinfo=timezone.utc).timestamp()
+        f, clock = self.feed(t0)
+        got = []
+        f.on_sweep = got.append
+        small = [("986", "2026-10-08T23:11:45.1+00:00", 0.90, 300)]
+        f.handle(self.batch("297", 1, 0, trades=small))
+        self.assertEqual(got, [])
+        burst = [("986", "2026-10-08T23:11:45.2+00:00", 0.90, 2000), ("986", "2026-10-08T23:11:45.6+00:00", 0.905, 2500), ("986", "2026-10-08T23:11:46.0+00:00", 0.915, 2000)]
+        f.handle(self.batch("297", 2, 1, trades=burst))
+        self.assertEqual(len(got), 1, got)
+        self.assertEqual((got[0]["ex"], got[0]["direction"], got[0]["shares"]), ("986", "up", 6800.0))
+        f.handle(self.batch("297", 3, 2, trades=[]))
+        self.assertEqual(len(got), 1, "reported once")
+
+    def rig(self):
+        fresh_data(layers=dict(position=dict(state="full"), sm=dict(state="pilot"), dump=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 60_000)
+        eng = engine(fake); eng.ex.capacity = 6000.0; fake.DRY_RUN = False
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
+        import i_realtime
+        f = i_realtime.SigMarketFeed(lambda: {}, self.TID, log=lambda *a: None)
+        f.connected_t = time.time(); f.last_msg_t = time.time()
+        f.books[ex] = dict(seq=1, at=time.time(), recv=time.time(), epoch=f.epoch, bids=[(0.48, 4321.0), (0.475, 100.0)], asks=[(0.49, 1234.0)])
+        eng.mkt_feed = f
+        eng.boot_t = 0.0                                     # past the 2-min start-up hold on optional reads
+        n = [0]; real = fake.orderbook
+        fake.orderbook = lambda *a, **k: (n.__setitem__(0, n[0] + 1), real(*a, **k))[1]
+        return fake, eng, ex, n
+
+    def test_log_mode_changes_nothing_and_compares_with_rest(self):
+        fake, eng, ex, n = self.rig()
+        eng.controls.d["feed_mode"] = "log"
+        self.assertIsNone(eng.feed_book(ex), "log mode: the engine never uses the feed's book")
+        eng.sm_depth.pop(ex, None)
+        eng.sm_touch_size(ex, time.time())
+        self.assertEqual(n[0], 1, "the depth still comes from REST")
+        eng.feed_compare(ex, [(0.48, 4321.0)], [(0.49, 1234.0)], time.time())
+        eng.feed_compare(ex, [(0.48, 4000.0)], [(0.49, 1234.0)], time.time())
+        self.assertEqual([(x["px_ok"], x["size_ok"]) for x in eng.feed_cmp], [(True, True), (True, False)])
+        eng.feed_report_t = time.time() - a_config.FEED_REPORT_S - 1
+        eng.feed_report(time.time())
+        self.assertTrue(any(e["text"].startswith("FEED (log)") and "touch prices equal 2" in e["text"] for e in eng.events))
+
+    def test_live_mode_serves_depth_queue_and_the_fast_path_and_wakes_on_sweeps(self):
+        fake, eng, ex, n = self.rig()
+        eng.controls.d["feed_mode"] = "live"
+        eng.sm_depth.pop(ex, None); eng.tm_depth.pop(ex, None)
+        self.assertEqual(eng.sm_touch_size(ex, time.time()), (4321.0, 1234.0))
+        self.assertEqual(eng.tm_touch_depth(ex, "yes", time.time()), 4321.0)
+        self.assertEqual(eng.queue_ahead(ex, "yes", 0.48), 4321.0)
+        self.assertEqual(eng.queue_ahead(ex, "no", round(1 - 0.49, 3)), 1234.0)
+        self.assertEqual(n[0], 0, "no REST book read in live mode")
+        eng.mkt_feed.connection_lost()                       # the drill: stale -> REST fallback
+        eng.sm_touch_size(ex, time.time())
+        self.assertEqual(n[0], 1, "after a reconnect the depth falls back to REST")
+        eng.mkt_feed.connected_t = time.time(); eng.mkt_feed.last_msg_t = time.time()
+        eng.mkt_feed.books[ex]["epoch"] = eng.mkt_feed.epoch
+        with eng.rt_lock:
+            eng.rt_pending = []
+        eng.on_feed_sweep(dict(ex=ex, t=time.time(), recv=time.time(), shares=9000.0, lo=0.48, hi=0.50, direction="up", n=4))
+        self.assertTrue(any(k == "sweep" and ex in exs for _, k, exs in eng.rt_pending), "live: a sweep wakes the loop for that market")
 
 
 class FastPathTests(EngineCase):

@@ -58,7 +58,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      ROTATION_EDGE_LEFT, ROTATION_FUND_EDGE, ROTATION_MARKETS, ROTATION_RET_LEFT, ROTATION_STOP_ABOVE,
                      SM_CLIP, SM_CLIP_PILOT, SM_DEPTH_SHARE, SM_MIN_QTY, SM_CAP_SH, SM_CAP_SH_PILOT, SM_CAP_COST, SM_CAP_COST_PILOT, SM_MARKETS, SM_MARKETS_PILOT,
                      SM_FAIR_LO, SM_FAIR_HI, SM_TTL_S, SM_REPEG_TICKS, SM_WRITES_PER_MIN, SM_NEWS_C, SM_NEWS_WINDOW_S, SM_REQUOTE_S, SM_SWEEP_C, SM_SWEEP_HOLD_S,
-                     SM_GLIDE_START, SM_DEPTH_CACHE_S, SM_GATE_RT, SM_GATE_PER_RT, SM_GATE_MO30, SWING_BAND, RESERVOIRS, ENTRY_RESUME_FREE, RING_WINDOWS,
+                     SM_GLIDE_START, SM_DEPTH_CACHE_S, SM_GATE_RT, SM_GATE_PER_RT, SM_GATE_MO30, SWING_BAND, RESERVOIRS, ENTRY_RESUME_FREE, RING_WINDOWS, FEED_MODE_DEFAULT, FEED_BOOK_MAX_AGE_S, FEED_REPORT_S, FEED_SWEEP_TICKS, FEED_SWEEP_SHARES, FEED_SWEEP_WINDOW_S, FEED_SPOT_EVERY,
                      SLEEVE_CAP, SLEEVE_MIN_FREE, SLEEVE_CLIP, SLEEVE_GAP_S, SLEEVE_TTL_S, SLEEVE_MIN_FAIR, SLEEVE_MIN_EDGE, SLEEVE_NEWS_C, SLEEVE_NEWS_WINDOW_S,
                      SLEEVE_NEWS_HOLD_S, SLEEVE_TARGETS, SWING, SWING_TTL_S, WALL_HOLD_MIN_FREE, WALL_RECYCLE_EXIT_C,
                      REBUILD_MAX_GAP, DUMP_BIG_SWEEP_SH, DUMP_BIG_CLIP, DUMP_V3_WEIGHTS_DAY_BIG,
@@ -129,6 +129,7 @@ def host_id():
 
 
 # ====================================================================================================== controls
+STARTUP_HOLD_S = 120          # optional reads (sampler, depth, fat-finger queues) wait 2 min after a start: every restart's burst gave a 429 (Oct 8)
 LAYERS = ["position", "recycler", "release", "mm", "scalp", "tm", "sm", "touch", "wall", "sleeve", "swing", "fm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
 TMM_ENABLED = True              # afternoon D-C: the engine's MM is the turnover MM (False: classic MM v2, tests only)
 LAYER_STATES = ("off", "pilot", "full")
@@ -403,7 +404,8 @@ class Engine:
         self.tm_now, self.tm_view, self.tm_block, self.tm_fills, self.tm_note, self.tm_depth, self.off24, self.tm_cov, self.tm_wpeak = {}, {}, {}, collections.deque(maxlen=5000), {}, {}, {}, {}, 0   # day 11 §2: the touch maker
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
-        self.entries_off, self.res_p10, self.res_p10_t, self.boot_t, self.ring_on = False, {}, {}, time.time(), None   # C84c: the entry guard's hysteresis; the reservoir's 24-h p10 of RI NO prints; the start time (optional reads wait 2 min)
+        self.entries_off, self.res_p10, self.res_p10_t, self.boot_t, self.ring_on = False, {}, {}, time.time(), None
+        self.mkt_feed, self.feed_cmp, self.feed_report_t, self.feed_samples, self.feed_sweep_log_t = None, collections.deque(maxlen=5000), time.time(), 0, 0.0   # C86: the markets feed   # C84c: the entry guard's hysteresis; the reservoir's 24-h p10 of RI NO prints; the start time (optional reads wait 2 min)
         self.fast_seen, self.fast_rearms, self.fast_slow, self.fast_orders, self.fast_stats = set(), collections.defaultdict(list), {}, {}, collections.Counter()   # mm_plan §2: the fast path
         self.in_use_hist, self.use_peak, self.rule0_log, self.rule0_blocked, self.lots_cache = collections.deque(maxlen=3000), 0.0, {}, collections.deque(maxlen=5000), (None, {})   # §9
         self.uncovered_since, self.uncovered_log, self.uncovered_n, self.refreshed = {}, {}, collections.deque(maxlen=2000), {}   # day 7 §1.3
@@ -793,6 +795,10 @@ class Engine:
             self.track_lifecycle(now)                       # ideas_backlog: the order-lifecycle log (SM / TM / L0)
         except Exception as err:
             self.event("ERR", f"lifecycle: {err!r}")
+        try:
+            self.feed_report(now)                           # C86: the markets feed's 30-min line
+        except Exception as err:
+            self.event("ERR", f"feed report: {err!r}")
         self.controller(now)
         kappa, _ = self.kappa()
         used = self.bucket_usage()
@@ -1001,29 +1007,119 @@ class Engine:
     def book_sampler(self, now):
         """ideas_backlog (Oct 8): depth at the touch +/- 2 ticks on the SM universe + RI Senate R, every ~60 s each, with spare
         reads only, to data/intel/books/<day>.jsonl; the samples also feed the SM / TM depth caches (no second read)."""
-        if not self.controls.on("sm") or now - getattr(self, "boot_t", 0) < 120:
+        if not self.controls.on("sm") or now - getattr(self, "boot_t", 0) < STARTUP_HOLD_S:
             return 0                                        # the sampler serves the spread maker's universe (+ RI Senate R); not in the first 2 min after a start (the restart burst gave a 429 every time)
         due = sorted((ex for ex in self.sampler_targets() if now - self.sample_t.get(ex, 0) >= SAMPLER_EVERY_S), key=lambda e: self.sample_t.get(e, 0))
         n = 0
         for ex in due[:SAMPLER_PER_LOOP]:
-            if not api.spare_reads(keep=max(1, SPARE_KEEP // 2)):   # the sampler is the freed budget's first consumer: it runs to READ_BUDGET - 10
-                break
-            try:
-                bids, asks = api.orderbook(ex, depth=SAMPLER_DEPTH)
-            except Exception as err:
-                self.event("ERR", f"book sampler {self.name(ex)}: {err!r}")
-                self.sample_t[ex] = now
-                continue
+            fb = self.feed_book(ex)                         # C86 live: the feed's book, one REST spot check per FEED_SPOT_EVERY samples
+            self.feed_samples += 1
+            src = "feed"
+            if fb is not None and self.feed_samples % FEED_SPOT_EVERY:
+                bids, asks = fb[0][:SAMPLER_DEPTH], fb[1][:SAMPLER_DEPTH]
+            else:
+                if not api.spare_reads(keep=max(1, SPARE_KEEP // 2)):   # the sampler is the freed budget's first consumer: it runs to READ_BUDGET - 10
+                    break
+                try:
+                    bids, asks = api.orderbook(ex, depth=SAMPLER_DEPTH)
+                except Exception as err:
+                    self.event("ERR", f"book sampler {self.name(ex)}: {err!r}")
+                    self.sample_t[ex] = now
+                    continue
+                src = "rest"
+                try:
+                    self.feed_compare(ex, bids, asks, now)  # C86: every REST sample is a comparison with the feed
+                except Exception as err:
+                    self.event("ERR", f"feed compare: {err!r}")
             self.sample_t[ex] = now
             self.sm_depth[ex] = self.tm_depth[ex] = (now, bids, asks)
             px = self.px.get(ex) or (None, None, None)
             self.intel_write(f"books/{datetime.fromtimestamp(now).strftime('%Y-%m-%d')}.jsonl",
-                             dict(t=round(now, 3), ex=ex, fair=self.fair.get(ex), bid=px[0], ask=px[1], last=px[2], bids=bids[:SAMPLER_DEPTH], asks=asks[:SAMPLER_DEPTH]))
+                             dict(t=round(now, 3), ex=ex, fair=self.fair.get(ex), bid=px[0], ask=px[1], last=px[2], bids=bids[:SAMPLER_DEPTH], asks=asks[:SAMPLER_DEPTH], src=src))
             n += 1
         return n
 
+    def feed_mode(self):
+        return str(self.controls.d.get("feed_mode") or FEED_MODE_DEFAULT)
+
+    def feed_book(self, ex):
+        """C86 live mode: (bids, asks) from the markets feed when fresh and from the current connection, else None (REST then)."""
+        if self.feed_mode() != "live" or self.mkt_feed is None:
+            return None
+        return self.mkt_feed.book(ex, FEED_BOOK_MAX_AGE_S)
+
+    def on_feed_sweep(self, sw):
+        """A sweep on the feed: logged (data/intel/feed_sweeps.jsonl) and, in live mode, the loop wakes for that market."""
+        try:
+            self.intel_write(f"feed_sweeps/{datetime.fromtimestamp(sw['t']).strftime('%Y-%m-%d')}.jsonl", dict(sw, name=self.name(sw["ex"]), mode=self.feed_mode()))
+        except Exception:
+            pass
+        if self.feed_mode() == "live":
+            self.rt_event("sweep", {sw["ex"]}, sw["recv"])
+
+    def feed_compare(self, ex, bids, asks, now):
+        """C86: the feed's book against a REST read of the same exchange: touch prices equal, touch sizes equal, and the shares at each of
+        our resting SM / TM levels (queue-ahead) — the log-only window's agreement numbers."""
+        if self.mkt_feed is None:
+            return
+        fb = self.mkt_feed.book(ex, 60.0)
+        if fb is None:
+            self.feed_cmp.append(dict(t=now, ex=ex, have=False))
+            return
+        fbids, fasks = fb
+        top = lambda xs: (xs[0][0], xs[0][1]) if xs else (None, None)
+        rb, ra, fbb, fba = top(bids), top(asks), top(fbids), top(fasks)
+        qa = []
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"]) or {}
+            if o["ex"] != ex or rec.get("layer") not in ("sm", "tm", "smexit", "tmexit"):
+                continue
+            lvl, book_r, book_f = (o["price"], bids, fbids) if o["side"] == "yes" else (round(1 - o["price"], 3), asks, fasks)
+            r_q = next((q for p_, q in book_r if abs(p_ - lvl) < 1e-9), 0.0)
+            f_q = next((q for p_, q in book_f if abs(p_ - lvl) < 1e-9), 0.0)
+            qa.append(abs(r_q - f_q))
+        self.feed_cmp.append(dict(t=now, ex=ex, have=True, px_ok=(rb[0] == fbb[0] and ra[0] == fba[0]), size_ok=(rb == fbb and ra == fba), qa=qa))
+
+    def feed_report(self, now):
+        """Every 30 min: the feed's health and the REST comparisons, one RUN_LOG line."""
+        if self.mkt_feed is None or now - self.feed_report_t < FEED_REPORT_S:
+            return
+        since, self.feed_report_t = self.feed_report_t, now
+        f = self.mkt_feed
+        st = dict(f.stats)
+        prev = getattr(self, "feed_prev_stats", {}) or {}
+        self.feed_prev_stats = st
+        d = {k: st.get(k, 0) - prev.get(k, 0) for k in st}
+        mins = max(1.0, (now - since) / 60)
+        cmp_ = [x for x in self.feed_cmp if x["t"] >= since]
+        have = [x for x in cmp_ if x["have"]]
+        qa = sorted(q for x in have for q in x.get("qa") or [])
+        big = []
+        try:
+            for line in open(os.path.join(DATA, "intel", "events.jsonl")):
+                e = json.loads(line)
+                if e.get("t", 0) >= since and (e.get("value") or 0) >= 1000:
+                    big.append(e)
+        except Exception:
+            pass
+        sw = [x for x in f.sweeps if x["recv"] >= since]
+        seen = sum(1 for e in big if any(x["ex"] == str(e.get("ex")) and abs(x["t"] - e.get("t", 0)) <= 600 for x in sw))
+        msg = (f"FEED ({self.feed_mode()}) last {mins:.0f} min: connected {f.connected()}, {d.get('messages', 0) / mins:.1f} batches/min, {d.get('books', 0):,} books, {d.get('trades', 0):,} trades, "
+               f"gaps {d.get('gaps', 0)}, duplicates {d.get('duplicates', 0)}, reconnects {d.get('reconnects', 0)}, errors {d.get('errors', 0)}; book asOf lag p50 {f.lag_pct(0.5)} s / p90 {f.lag_pct(0.9)} s; "
+               f"sweeps detected {len(sw)} vs REST big events {len(big)} ({seen} of them also seen by the feed within 10 min); REST spot checks {len(cmp_)}: feed book present {len(have)}, "
+               f"touch prices equal {sum(1 for x in have if x['px_ok'])}, touch sizes equal {sum(1 for x in have if x['size_ok'])}, queue-ahead |REST - feed| at our levels p50 "
+               f"{qa[len(qa) // 2] if qa else 'n/a'} / p90 {qa[int(0.9 * (len(qa) - 1))] if qa else 'n/a'} shares over {len(qa)}")
+        self.event("FEED", msg)
+        self.night.line(msg)
+
     def queue_ahead(self, ex, side, price):
         """Shares resting at the order's own level on its side, from the latest book sample (None without a fresh sample)."""
+        fb = self.feed_book(ex)                             # C86 live: the feed's current book
+        if fb is not None:
+            bids, asks = fb
+            if side == "yes":
+                return next((q for p, q in bids if abs(p - price) < 1e-9), 0.0)
+            return next((q for p, q in asks if abs(p - round(1 - price, 3)) < 1e-9), 0.0)
         c = self.sm_depth.get(ex) or self.tm_depth.get(ex)
         if not c or time.time() - c[0] > 2 * SAMPLER_EVERY_S:
             return None
@@ -1228,6 +1324,15 @@ class Engine:
             self.sig_feed.start()
         except Exception as e:
             self.event("ERR", f"SIG realtime not started: {e!r}")
+        try:
+            if self.feed_mode() != "off":                   # C86: books and sweeps from the tournament markets topic
+                self.mkt_feed = rt.SigMarketFeed(lambda: api._req("POST", "/realtime/token", json={}), api.T["id"], on_sweep=self.on_feed_sweep,
+                                                 log=lambda k, s: self.event(k, s), sweep_ticks=FEED_SWEEP_TICKS, sweep_shares=FEED_SWEEP_SHARES,
+                                                 sweep_window_s=FEED_SWEEP_WINDOW_S)
+                self.mkt_feed.start()
+                self.event("FEED", f"SIG markets feed started (mode {self.feed_mode()}): tournament:{api.T['id']}:markets")
+        except Exception as e:
+            self.event("ERR", f"SIG markets feed not started: {e!r}")
         try:
             toks = read_json(os.path.join(DATA, "clob_tokens.json"), {})
             tokens = {m["ex"]: [toks[i][0] for i in m["pm_ids"] if toks.get(i)] for m in self.mp}
@@ -1843,7 +1948,7 @@ class Engine:
         # queue reads: oldest first, a few per loop
         stale = [ex for ex in exs if now - (self.fat_book.get(ex) or (0,))[0] > FAT_QUEUE_S and self.fat_eligible(ex)]
         for ex in stale[:FAT_BOOK_READS]:
-            if not api.spare_reads():                       # §6: fills and exits first; the queue read waits
+            if not api.spare_reads() or now - getattr(self, "boot_t", 0) < STARTUP_HOLD_S:   # §6: fills and exits first; not in the first 2 min after a start (C86)
                 break
             try:
                 bids, asks = api.orderbook(ex, depth=50)
@@ -4669,7 +4774,7 @@ class Engine:
 
     def reservoir_subs(self, ex):
         r = self.reservoirs().get(str(ex))
-        return {sub for sub, _ in r["offers"]} if r else set()
+        return ({sub for sub, _ in r["offers"]} | set(r.get("hold_subs") or [])) if r else set()   # held subs: no wall buy-back either
 
     def reservoir_avail(self, r):
         """{sub: shares offerable} — the core_sub keeps core_qty back (the highest-cost lots stay; rule 0 picks the cheap ones)."""
@@ -4684,7 +4789,7 @@ class Engine:
 
     def reservoir_total(self, r):
         books = self.ledger.subbooks.get(str(r["ex"]), {})
-        subs = {sub for sub, _ in r["offers"]} | {r["core_sub"]}
+        subs = {sub for sub, _ in r["offers"]} | {r["core_sub"]} | set(r.get("hold_subs") or [])
         return sum(abs(books.get(sub, 0.0)) for sub in subs)
 
     def reservoir_p10(self, now, r):
@@ -4783,8 +4888,14 @@ class Engine:
         plan = dict(sells=[], buys=[])
         if r.get("mode", "trade") == "trade":
             avail = self.reservoir_avail(r)
+            out_room = (float(r["max_out"]) - self.reservoir_out(r)) if r.get("max_out") is not None else float("inf")   # Piero 16:50: at most 20,000 out at a time
+            resting = collections.defaultdict(list)
+            for o in self.open:
+                rec = self.ledger.orders.get(o["id"]) or {}
+                if o["ex"] == ex and rec.get("layer") == "swingsell" and o["id"] not in self.ex.cancelling:
+                    resting[rec.get("sub")].append(round(1 - o["price"], 3) if o["side"] != side else o["price"])
             for sub, sp in r["offers"]:
-                q = int(avail.get(sub, 0.0))
+                q = int(min(avail.get(sub, 0.0), max(0.0, out_room)))
                 if q < MIN_QTY:
                     continue
                 t_avg = (self.ledger.tranches.get(sub) or {}).get("avg")
@@ -4793,8 +4904,16 @@ class Engine:
                 if sub == "inventory" or not t_avg:
                     q = min(q, self.rule0_allowed(ex, side, sub, float(sp), q))
                 ask_px = float(sp)
+                if r.get("join_touch") and no_ask is not None and no_ask > ask_px + 1e-9:
+                    ask_px = float(no_ask)                  # Piero 16:50: join the touch when it sits above the level (a better price, passive)
                 if no_bid is not None and ask_px <= no_bid + 1e-9:
                     ask_px = round(no_bid + TICK, 3)        # C84h: never cross — a level under the market's bid rests one tick above the bid (a better price)
+                cur = resting.get(sub)
+                if cur:                                     # queue kept: a resting price within a tick of the target, >= the level and not crossing, stays
+                    p_cur = max(set(cur), key=cur.count)
+                    if p_cur >= float(sp) - 1e-9 and ask_px - TICK - 1e-9 <= p_cur <= ask_px + 1e-9 and (no_bid is None or p_cur > no_bid + 1e-9):   # kept only when the touch moved up past it (it stays the best ask); above the touch it re-pegs down
+                        ask_px = p_cur
+                out_room -= q
                 while q >= MIN_QTY:
                     take = int(min(q, r["clip"]))
                     plan["sells"].append(dict(side=side, px=ask_px, qty=take, sub=sub, ttl=SWING_TTL_S))
@@ -4831,6 +4950,23 @@ class Engine:
             return
         rs = c.d.get("reservoirs") or {}
         old = c.d.get("reservoir")
+        changed = []
+        for ex, base in RESERVOIRS.items():                 # a new config version updates the static fields, keeps the live state
+            if ex in rs and base.get("ver") and rs[ex].get("ver") != base.get("ver"):
+                keep = {k: rs[ex][k] for k in ("mode", "fair0", "since", "last_sell_px", "stats", "rebuild_t", "rebuild_why") if k in rs[ex]}
+                rs[ex] = dict(json.loads(json.dumps(base)), **keep)
+                changed.append(ex)
+        if changed:
+            with c.lock:
+                c.d["reservoirs"] = rs
+                c.save()
+            for ex in changed:
+                r = rs[ex]
+                msg = (f"RESERVOIR {self.name(ex)} re-configured ({r['ver']}): offers " + ", ".join(f"{sub.split(':')[-1]} @{sp}" for sub, sp in r["offers"])
+                       + (f", at most {r['max_out']:,} out" if r.get("max_out") else "") + (", joining the touch" if r.get("join_touch") else "")
+                       + (f"; held: {', '.join(x.split(':')[-1] for x in r.get('hold_subs') or [])}" if r.get("hold_subs") else "")
+                       + f"; rebuys {' / '.join(str(p) for p, _ in r['rebuy'])}; out now {self.reservoir_out(r):,.0f}")
+                self.event("SWING", msg); self.night.line(msg)
         if rs and all(ex in rs for ex in RESERVOIRS):
             return
         for ex, base in RESERVOIRS.items():
@@ -5123,8 +5259,9 @@ class Engine:
         fs = self.side_fair(ex, side)
         if fs is None or ex in self.manual_ex or not self.controls.on("dump") or (self.controls.d.get("ri_freeze") and (self.meta.get(ex) or {}).get("race") in RI_RACES):
             return 0
+        fb = self.feed_book(ex)                             # C86 live: the feed's book saves the fast path's REST read (~0.3 s)
         try:
-            bids, asks = api.orderbook(ex, depth=5)
+            bids, asks = fb if fb is not None else api.orderbook(ex, depth=5)
         except Exception as err:
             self.event("ERR", f"fast path book read {self.name(ex)}: {err!r}")
             return 0
@@ -5526,9 +5663,12 @@ class Engine:
 
     def tm_touch_depth(self, ex, side, now):
         """Shares at the SIG touch of `side` (order-book read cached 5 min, only with spare reads), else None."""
+        fb = self.feed_book(ex)                             # C86 live: the feed's book, no REST read
+        if fb is not None:
+            return (fb[0][0][1] if fb[0] else 0.0) if side == "yes" else (fb[1][0][1] if fb[1] else 0.0)
         c = self.tm_depth.get(ex)
         if not c or now - c[0] > TM_DEPTH_CACHE_S:
-            if not api.spare_reads() or now - getattr(self, "boot_t", 0) < 120:
+            if not api.spare_reads() or now - getattr(self, "boot_t", 0) < STARTUP_HOLD_S:
                 return None
             try:
                 bids, asks = api.orderbook(ex, depth=1)
@@ -5985,9 +6125,12 @@ class Engine:
 
     def sm_touch_size(self, ex, now):
         """(shares at the best bid, shares at the best ask) — an order-book read cached 5 min, only with spare reads, else None."""
+        fb = self.feed_book(ex)                             # C86 live: the feed's book, no REST read
+        if fb is not None:
+            return (fb[0][0][1] if fb[0] else 0.0, fb[1][0][1] if fb[1] else 0.0)
         c = self.sm_depth.get(ex)
         if not c or now - c[0] > SM_DEPTH_CACHE_S:
-            if not api.spare_reads() or now - getattr(self, "boot_t", 0) < 120:
+            if not api.spare_reads() or now - getattr(self, "boot_t", 0) < STARTUP_HOLD_S:
                 return None
             try:
                 bids, asks = api.orderbook(ex, depth=1)

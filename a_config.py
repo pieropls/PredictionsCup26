@@ -291,8 +291,11 @@ RESERVOIR_TRIG_DATE = "2026-10-30 00:00:00"
 # 24-h p10 of NO prints >= trig_p10, PM fair moved >= 2c from the deploy, or Oct 30 00:00 PT.
 RESERVOIRS = {
     # RI Senate R (resized): core = the 10,000 highest-cost inventory lots; ~37k tradable — swing + the other inventory lots at 0.850, walls at 0.855
-    "1077": dict(ex="1077", side="no", core_sub="inventory", core_qty=10_000,
-                 offers=[["swing:1077:no", 0.850], ["inventory", 0.850], ["wall:1077:no:w1791342782", 0.855], ["wall:1077:no:w1791342929", 0.855]],
+    "1077": dict(ex="1077", side="no", core_sub="inventory", core_qty=0, ver="16:50",
+                 # Piero 16:50 Oct 8: a partial unwind — 20,000 NO offered as passive asks at 0.845 (>= the position average 0.840), joining the touch,
+                 # clips <= 5k, never taking; the other ~27,000 held (the walls included: their own buy-backs stay retired)
+                 offers=[["swing:1077:no", 0.845], ["inventory", 0.845]], hold_subs=["wall:1077:no:w1791342782", "wall:1077:no:w1791342929"],
+                 max_out=20_000, join_touch=True,
                  clip=5_000, rebuy=[[0.820, 0.40], [0.815, 0.30], [0.810, 0.30]], rebuy_under_sell=0.03,
                  full_qty=46_949, rebuild_px=0.85, trig_p10=0.85, trig_fair_move=0.02, trig_date=RESERVOIR_TRIG_DATE, gate_h=48),
     # Delaware Senate R and RI Governor R (the 10:17 study): levels from the last 72 h of tape — sell at p80 0.880 (>= entry 0.870 + 1c), rebuy 3c under it (p20 0.85-0.86)
@@ -304,6 +307,12 @@ RESERVOIRS = {
                  full_qty=8_468, rebuild_px=0.870, trig_p10=0.880, trig_fair_move=0.02, trig_date=RESERVOIR_TRIG_DATE, gate_h=48),
 }
 WORKING_TARGET, WORKING_TARGET_DATE = 40_000, "2026-10-10"   # Piero 16:10 §2: working capital (free + TM + SM + catcher + reservoir cash out) >= 40k by Oct 10
+# C86 (Piero 15:35 Oct 8): SIG's realtime markets feed for books and sweeps (fills stay on the user channel + the fills page).
+# mode 'log' = connected, compared with REST, nothing uses it; 'live' = the SM / TM depth, the queue-ahead, the book sampler and the fast
+# path's L0 re-bid read the feed's book (fresh <= 10 s, current connection), REST as the fallback; 'off' = not connected. Control 'feed_mode'.
+FEED_MODE_DEFAULT, FEED_BOOK_MAX_AGE_S, FEED_REPORT_S = "log", 10.0, 1800
+FEED_SWEEP_TICKS, FEED_SWEEP_SHARES, FEED_SWEEP_WINDOW_S = 3, 5_000, 2.0
+FEED_SPOT_EVERY = 10            # live mode: one REST spot check per 10 sampler samples (agreement keeps being measured)
 ENTRY_RESUME_FREE = 3_000       # C84c: once entries stopped under the 2k guard they resume only at 3k free (no flapping: 92 SM placements + 88 cancels in one hour on Oct 8 08:00)
 # Piero 15:35 Oct 8 (1c): the ring-window cash order — 19:30-21:00 and 03:30-06:00 PT no new TM / SM entries (exits keep running, their
 # reserves drop to what they hold); cash goes first to the reservoir's rebuys, then the catcher's L0 / L1 levels, then TM / SM.
