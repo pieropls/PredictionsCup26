@@ -8,7 +8,8 @@ No network, nothing sent.   python3 -m unittest tests.test_engine
   dashboard         read-only controls, bound to 127.0.0.1
 """
 import os as _os
-_os.environ["SIG_FM_PILOT"] = "0"   # mm_plan C81: the fair-maker pilot never switches itself on inside a rig (FMTests set targets explicitly); set here because `unittest discover tests` imports this module without tests/__init__.py
+_os.environ["SIG_FM_PILOT"] = "0"
+_os.environ["SIG_TM_PILOT"] = "0"   # day 11 C83: the touch-maker pilot never switches itself on inside a rig (TMTests set the layer explicitly)   # mm_plan C81: the fair-maker pilot never switches itself on inside a rig (FMTests set targets explicitly); set here because `unittest discover tests` imports this module without tests/__init__.py
 import collections
 import contextlib
 import csv
@@ -2651,7 +2652,7 @@ class DashV4PayloadTests(EngineCase):
         sd = s["sigday"]
         self.assertTrue(sd["ok"])
         rows = s["strategies4"]
-        self.assertEqual([r["key"] for r in rows], ["dump", "fm", "swing", "sleeve", "wall", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])
+        self.assertEqual([r["key"] for r in rows], ["dump", "tm", "fm", "swing", "sleeve", "wall", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])   # day 11: the touch maker
         self.assertEqual(next(r for r in rows if r["key"] == "mm")["trades_today"], 1)
         self.assertAlmostEqual(sum(r["pnl_today"] for r in rows) + sd["drift"], sd["today"], delta=25, msg="Strategies total = Live today")
         self.assertAlmostEqual(sum(h["value_sig"] for h in s["holdings4"]), s["capital4"]["holdings"], places=2, msg="Holdings total = Capital in holdings")
@@ -3669,6 +3670,194 @@ class RulesV2Tests(EngineCase):
         self.assertTrue(all(o["price"] <= fs - 0.15 + 1e-9 for o in mine))
 
 
+class TMTests(EngineCase):
+    """Day 11 §2 (C83): the touch maker (scalper v2) joins the SIG best bid on the side that is cheap vs fair (improves by a tick
+    when the spread is >= 2 ticks), only at <= fair - 2c, never the rich side; keeps its queue place while at the touch or a
+    tick behind and re-pegs only >= 2 ticks behind; pulls when the edge is gone; clip 500 in the pilot; 1.5k shares per
+    market-side and 8k at cost; exits at fill + 0.5c (fill + 1c after 10 min), never below entry + 0.5c, held while cash is
+    idle when >= 8c under fair; pulled on a 2c / 10 min Polymarket move; <= 8 writes/min; ranked by the 24-h value printed
+    >= 2c off fair; its cap is reserved off the top of the entry budget; the day-5 scalper goes off with it."""
+
+    def rig(self, cash_above_floor=60_000):
+        fresh_data(layers=dict(position=dict(state="full"), tm=dict(state="pilot")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + cash_above_floor)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
+        FAIR[ex] = 0.50
+        self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = eng.px[ex] = (0.46, 0.47, 0.465)        # SIG 0.46 / 0.47: the bid 4c under fair, 2 ticks wide -> improve to 0.465
+        eng.off24[ex] = collections.deque([(time.time(), 1e9)])   # the busiest off-fair market: first in the ranking
+        eng.tm_depth[ex] = (time.time() + 1e9, [(0.46, 50_000.0)], [(0.47, 50_000.0)])   # a deep touch (the 20% depth rule has its own check)
+        loop(eng, fake)
+        return fake, eng, ex
+
+    def tm_orders(self, eng, fake, ex, layer="tm"):
+        return [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == layer]
+
+    def test_bids_the_cheap_side_at_the_touch_improving_wide_spreads(self):
+        fake, eng, ex = self.rig()
+        loop(eng, fake)
+        q = self.tm_orders(eng, fake, ex)
+        self.assertEqual(len(q), 1, q)
+        self.assertEqual(q[0]["side"], "yes")
+        self.assertAlmostEqual(q[0]["price"], 0.465, places=3, msg="improve by a tick: the spread is 2 ticks")
+        self.assertEqual(q[0]["qty"], a_config.TM_CLIP_PILOT)
+        self.assertEqual(eng.ledger.orders[q[0]["id"]].get("ttl"), a_config.TM_TTL_S)
+        self.assertEqual(eng.ledger.orders[q[0]["id"]]["sub"], f"tm:{ex}:yes")
+        self.assertEqual([o for o in q if o["side"] == "no"], [], "the NO side is rich vs fair (ask 0.47 < fair + 2c): never quoted")
+        # a 1-tick book: join, never cross
+        fake.px[ex] = eng.px[ex] = (0.46, 0.465, 0.4625)
+        for o in q:
+            fake.cancel(o["id"]) if hasattr(fake, "cancel") else None
+        loop(eng, fake); loop(eng, fake)
+        q = self.tm_orders(eng, fake, ex)
+        self.assertTrue(q and all(abs(o["price"] - 0.46) < 1e-9 for o in q), q)
+        self.assertIn("quoted", eng.tm_cov)
+
+    def test_queue_priority_repeg_two_ticks_behind_and_pull_without_edge(self):
+        fake, eng, ex = self.rig()
+        loop(eng, fake)
+        o0 = self.tm_orders(eng, fake, ex)[0]
+        fake.px[ex] = eng.px[ex] = (0.47, 0.475, 0.4725)       # the touch moved 1 tick past us: keep the queue place
+        loop(eng, fake); loop(eng, fake)
+        q = self.tm_orders(eng, fake, ex)
+        self.assertEqual([o["id"] for o in q], [o0["id"]], "one tick behind the touch: the order stays (queue priority)")
+        fake.px[ex] = eng.px[ex] = (0.475, 0.48, 0.4775)       # 2 ticks behind: re-pegged to the new touch (join: 1 tick wide)
+        loop(eng, fake); loop(eng, fake)
+        q = self.tm_orders(eng, fake, ex)
+        self.assertEqual(len(q), 1, q)
+        self.assertNotEqual(q[0]["id"], o0["id"])
+        self.assertAlmostEqual(q[0]["price"], 0.475, places=3)
+        fake.px[ex] = eng.px[ex] = (0.485, 0.49, 0.4875)       # the bid is 1.5c under fair: no edge -> pulled
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(self.tm_orders(eng, fake, ex), [], "edge < 2c: pulled")
+
+    def test_exit_ladder_rule0_round_trip_and_hold_when_idle(self):
+        fake, eng, ex = self.rig()
+        loop(eng, fake)
+        o = self.tm_orders(eng, fake, ex)[0]
+        fake.fill(o["id"], o["qty"])
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(eng.ledger.subbooks[ex].get(f"tm:{ex}:yes"), float(a_config.TM_CLIP_PILOT))
+        t = eng.ledger.tranches[f"tm:{ex}:yes"]
+        self.assertEqual((t["kind"], t["state"]), ("tm", "open"))
+        xs = self.tm_orders(eng, fake, ex, "tmexit")
+        self.assertEqual(len(xs), 1, xs)
+        self.assertAlmostEqual(1 - xs[0]["price"], 0.47, places=3, msg="exit at fill + 1 tick (0.465 + 0.005)")
+        self.assertEqual(eng.controls.d["tm_stats"]["buys"], 1)
+        self.assertTrue(any("TM bought" in e["text"] for e in eng.events))
+        t["ts"] -= 700                                          # 10 min unfilled: fill + 1c
+        loop(eng, fake); loop(eng, fake)
+        xs = self.tm_orders(eng, fake, ex, "tmexit")
+        self.assertEqual(len(xs), 1, xs)
+        self.assertAlmostEqual(1 - xs[0]["price"], 0.475, places=3)
+        # rule 0: never below entry + 0.5c
+        self.assertGreaterEqual(1 - xs[0]["price"], t["avg"] + a_config.RULE0_MARGIN - 1e-9)
+        # hold-when-idle: a lot >= 8c under fair with idle cash is held (no exit); under BUFFER it is offered again
+        FAIR[ex] = 0.60
+        eng.controls.d["buffer"] = dict(value=20_000, day=time.strftime("%Y-%m-%d"))
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(self.tm_orders(eng, fake, ex, "tmexit"), [], "13.5c under fair and free 60k >= BUFFER: held")
+        self.assertTrue(t.get("held"))
+        eng.cash_hist = [a_config.CASH_RESERVE + 10_000]
+        eng.track_tm(time.time())
+        self.assertFalse(t.get("held"))
+        self.assertTrue(eng.tm_view.get(ex))
+        FAIR[ex] = 0.50
+        loop(eng, fake); loop(eng, fake)
+        # the round trip
+        xs = self.tm_orders(eng, fake, ex, "tmexit")
+        self.assertTrue(xs)
+        fake.fill(xs[0]["id"], xs[0]["qty"])
+        loop(eng, fake); loop(eng, fake)
+        self.assertLess(abs(eng.ledger.subbooks[ex].get(f"tm:{ex}:yes", 0)), 1)
+        self.assertEqual(eng.ledger.tranches[f"tm:{ex}:yes"]["state"], "closed")
+        self.assertEqual(eng.controls.d["tm_stats"]["round_trips"], 1)
+        self.assertTrue(any("round trip done" in e["text"] and "TM" in e["text"] for e in eng.events))
+
+    def test_caps_news_guard_write_budget_and_reserve(self):
+        fake, eng, ex = self.rig()
+        loop(eng, fake)
+        self.assertAlmostEqual(eng.tm_reserve(), a_config.TM_CAP_COST_PILOT, delta=1.0, msg="the pilot's 8k is reserved off the top while flat")
+        self.assertGreater(a_config.ENTRY_WEIGHTS["tm"], 0.99)
+        # per market-side inventory cap: only the exit quotes
+        fake.pos[ex] = a_config.TM_INV_MARKET_PILOT; fake.avg_cost[ex] = 0.46   # SIG holds them (else the audit nets the phantom sub)
+        eng.ledger.subbooks.setdefault(ex, {})[f"tm:{ex}:yes"] = float(a_config.TM_INV_MARKET_PILOT)
+        eng.ledger.tranches[f"tm:{ex}:yes"] = dict(ex=ex, side="yes", kind="tm", state="open", ts=time.time(), t="x", avg=0.46)
+        for o in self.tm_orders(eng, fake, ex):
+            fake.cancel(o["id"]) if hasattr(fake, "cancel") else None
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(self.tm_orders(eng, fake, ex), [], "at the 1.5k cap: no entry bid")
+        self.assertTrue(self.tm_orders(eng, fake, ex, "tmexit"))
+        eng.ledger.subbooks.get(ex, {}).pop(f"tm:{ex}:yes", None); eng.ledger.tranches.pop(f"tm:{ex}:yes", None)
+        fake.pos[ex] = 0
+        # the cost cap: 8k at cost held elsewhere -> no new entry
+        other = next(b.ex for b in eng.bots if b.kind == "market" and b.ex != ex and b.ex not in POS)
+        fake.pos[other] = 10_000; fake.avg_cost[other] = 0.85
+        eng.ledger.subbooks.setdefault(other, {})[f"tm:{other}:yes"] = 10_000.0
+        eng.ledger.tranches[f"tm:{other}:yes"] = dict(ex=other, side="yes", kind="tm", state="open", ts=time.time(), t="x", avg=0.85)
+        self.assertEqual(eng.tm_reserve(), 0.0)
+        self.assertNotIn(ex, eng.tm_plan(time.time(), eng.cash_hist[-1], eng.bucket_usage()))
+        eng.ledger.subbooks.get(other, {}).pop(f"tm:{other}:yes", None); eng.ledger.tranches.pop(f"tm:{other}:yes", None)
+        fake.pos[other] = 0
+        # the touch depth rule: a 1,000-share touch -> at most 200 shares
+        eng.tm_depth[ex] = (time.time() + 1e9, [(0.46, 1_000.0)], [(0.47, 1_000.0)])
+        plan = eng.tm_plan(time.time(), eng.cash_hist[-1], eng.bucket_usage())
+        new = [w for w in plan.get(ex, []) if w["qty"] != a_config.TM_CLIP_PILOT]
+        self.assertTrue(all(w["qty"] <= int(a_config.TM_DEPTH_SHARE * 1_000) for w in plan.get(ex, [])) and plan.get(ex), plan.get(ex))
+        eng.tm_depth[ex] = (time.time() + 1e9, [(0.46, 50_000.0)], [(0.47, 50_000.0)])
+        # a 2c Polymarket move in 10 min pulls the market's TM orders for 5 min
+        loop(eng, fake); loop(eng, fake)
+        self.assertTrue(self.tm_orders(eng, fake, ex))
+        eng.fair_hist[ex] = [(time.time() - 300, 0.50)]
+        FAIR[ex] = 0.53
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(self.tm_orders(eng, fake, ex), [], "pulled on the move")
+        self.assertGreater(eng.tm_block.get(ex, 0), time.time())
+        self.assertTrue(any("TM " in e["text"] and "Polymarket moved" in e["text"] for e in eng.events))
+        # the write budget: 8 writes in the last minute -> no new placement this loop
+        FAIR[ex] = 0.50
+        eng.tm_block.pop(ex, None); eng.fair_hist[ex] = []
+        now = time.time()
+        for i in range(a_config.TM_WRITES_PER_MIN):
+            eng.ledger.orders[f"w{i}"] = dict(id=f"w{i}", bot="b", layer="tm", ex=other, side="yes", action="buy", price=0.3, qty=100, filled=0, cost=0.0, left=100,
+                                                placed=stamp_(), ts=now - 30 + i, closed=None, status="open", sub=f"tm:{other}:yes", note="")
+        self.assertGreaterEqual(eng.tm_writes_last_min(now), a_config.TM_WRITES_PER_MIN)   # (the rig's own placements count too)
+        self.assertNotIn(ex, eng.tm_plan(now, eng.cash_hist[-1], eng.bucket_usage()), "no write budget: the new side waits")
+        self.assertLessEqual(eng.tm_cov["writes_left"], 0)
+
+    def test_ranking_by_off_fair_value_and_the_pilots_top_n(self):
+        fake, eng, ex = self.rig()
+        self.addCleanup(setattr, f_engine, "TM_SIDES_PILOT", f_engine.TM_SIDES_PILOT)
+        f_engine.TM_SIDES_PILOT = 1
+        cands = eng.tm_candidates()
+        self.assertTrue(cands)
+        self.assertEqual((cands[0][1], cands[0][2]), (ex, "yes"), "the busiest off-fair market first")
+        self.assertEqual([r[0] for r in cands], sorted([r[0] for r in cands], reverse=True))
+        resting = {o["ex"] for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "tm"}
+        plan = eng.tm_plan(time.time(), eng.cash_hist[-1], eng.bucket_usage())
+        self.assertIn(ex, plan)
+        self.assertTrue(set(plan) <= {ex} | resting, "the pilot takes the top N market-sides (N = 1 here); sides already resting are kept while they rest")
+        self.assertEqual(eng.tm_cov["top"], 1)
+
+    def test_migration_turns_the_pilot_on_and_the_scalper_off(self):
+        fresh_data(layers=dict(position=dict(state="full"), scalp=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        _os.environ["SIG_TM_PILOT"] = "1"
+        self.addCleanup(_os.environ.__setitem__, "SIG_TM_PILOT", "0")
+        eng = engine(fake)
+        self.assertEqual(eng.controls.state("tm"), "pilot")
+        self.assertEqual(eng.controls.state("scalp"), "off")
+        self.assertTrue(eng.controls.d["day11"]["tm_pilot"])
+        self.assertTrue(any("touch maker pilot ON" in e["text"] for e in eng.events))
+        self.assertTrue(eng.tm_pilot())
+        self.assertEqual(eng.tm_sizes()["clip"], a_config.TM_CLIP_PILOT)
+
+
 class FastPathTests(EngineCase):
     """mm_plan §2 / §8.1: on a SIG fill notification the fast step reads the fills once, re-bids a filled L0 level at the new
     best bid while it is >= 5c under fair (<= 3 per side per 10 min), re-quotes a filled FM side, and pulls a market's FM
@@ -3682,6 +3871,8 @@ class FastPathTests(EngineCase):
         eng = engine(fake)
         eng.ex.capacity = 6000.0
         fake.DRY_RUN = False
+        self.addCleanup(setattr, f_engine, "FAST_PATH_ON", f_engine.FAST_PATH_ON)
+        f_engine.FAST_PATH_ON = True                       # the switch ships with C82 (Oct 8 15:00); the tests cover the path itself
         loop(eng, fake)
         ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] >= 0.95
                   and eng.meta[b.ex].get("race") != a_config.RI_SENATE_RACE)
@@ -3722,12 +3913,44 @@ class FastPathTests(EngineCase):
         eng.fast_reconcile(time.time())
         self.assertTrue(eng.fast_slow.get(ex, 0) > time.time() or eng.fast_stats["mismatch"] == 0)
 
+    def test_wv_senate_miss_an_8c_under_touch_carries_an_l0_and_the_sweep_follow_rebids(self):
+        """Day 11 §4.3 (West Virginia Senate R, Oct 7 19:1x): 429k shares printed at 0.875-0.905 under a 0.982 fair while our only level
+        sat at 0.860 and the side was uncovered through a refresh. With the fast path: an >= 0.95 favourite whose touch is 8c under
+        fair carries an L0 at the bid (the L0 budget has room, the race room allows), the sweep that takes it is followed by a
+        re-bid at the new touch within the fast step, and the slow loop never leaves the side without its L0 while the tranche sells back."""
+        fake, eng, ex = self.rig()
+        f = eng.fair[ex]
+        bid = round(f - 0.08, 3)
+        fake.px[ex] = eng.px[ex] = (bid, round(bid + 0.005, 3), bid)
+        seed_ref(eng, ex, mid=f - 0.08)
+        loop(eng, fake); loop(eng, fake)
+        l0 = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and str(eng.ledger.orders[o["id"]].get("sub", "")).endswith(":L0")]
+        self.assertEqual(len(l0), 1, "an L0 rests at the 8c-under touch")
+        self.assertAlmostEqual(l0[0]["price"], bid, places=3)
+        self.assertLess(eng.l0_held(), a_config.DUMP_L0_BUDGET, "the L0 budget is not binding (WV: 487 held of the cap)")
+        # the sweep prints 1-2 ticks above the old touch: it takes our L0; the fast step re-bids at the new (higher) best bid
+        fake.fill(l0[0]["id"], l0[0]["qty"])
+        new_bid = round(bid + 0.01, 3)
+        fake.px[ex] = (new_bid, round(new_bid + 0.005, 3), new_bid)
+        eng.rt_event("fills", set(), time.time() - 0.3)
+        self.assertGreaterEqual(eng.fast_step(time.time()), 1)
+        new = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and str(eng.ledger.orders[o["id"]].get("sub", "")).endswith(":L0")]
+        self.assertEqual(len(new), 1, new)
+        self.assertAlmostEqual(new[0]["price"], new_bid, places=3, msg="re-bid at the new touch, still >= 5c under fair")
+        # the slow loop keeps the L0 while the tranche sells back (the refill rule, not a gap): the side is never uncovered
+        for _ in range(3):
+            loop(eng, fake)
+            mine = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "dump"]
+            self.assertTrue(mine, "the side keeps a dump level across the loops after the fill")
+
     def test_pm_move_pulls_fm_quotes_fast(self):
         fresh_data(layers=dict(position=dict(state="full"), fm=dict(state="full")))
         fake = new_fake(writes_per_min=10_000)
         base = fake.pnl()
         fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 60_000)
         eng = engine(fake); eng.ex.capacity = 6000.0; fake.DRY_RUN = False
+        self.addCleanup(setattr, f_engine, "FAST_PATH_ON", f_engine.FAST_PATH_ON)
+        f_engine.FAST_PATH_ON = True
         loop(eng, fake)
         ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
         FAIR[ex] = 0.50; self.addCleanup(FAIR.pop, ex, None)

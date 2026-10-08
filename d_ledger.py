@@ -248,7 +248,7 @@ class Ledger:
                 del self.orders[o["id"]]
         return new
 
-    EXIT_LAYERS = {"dumpexit", "longexit", "scalpexit", "touchexit", "wallexit", "swingsell", "fmexit", "rebound", "recycle", "release", "exit", "unwind", "repair"}
+    EXIT_LAYERS = {"dumpexit", "longexit", "scalpexit", "touchexit", "wallexit", "swingsell", "fmexit", "tmexit", "rebound", "recycle", "release", "exit", "unwind", "repair"}
 
     def apply_sub(self, ex, order, delta):
         """Night §1.1 (I2/I3): an owned fill moves its own sub-book, but an exit never takes it past zero: a fill that would
@@ -303,7 +303,7 @@ class Ledger:
             self.fills.append(rec)
             return rec
 
-    PHANTOM_SUBS = ("dump:", "touch:", "scalp:", "sniper", "mm")
+    PHANTOM_SUBS = ("dump:", "touch:", "scalp:", "tm:", "sniper", "mm")
 
     def net_phantoms(self, dry_run=False):
         """A market cannot hold a long engine tranche (dump / touch / scalp, sniper, mm) and a short inventory at once (SIG
@@ -393,7 +393,7 @@ class Ledger:
             net = {}
             for f in (f for f in self.fills if f.get("key") not in keys):
                 sub = (self.orders.get(str(f.get("order"))) or {}).get("sub")
-                if sub and sub.startswith(("touch:", "scalp:")) and f.get("action") in ("buy", "sell"):   # dump levels: fills older than their order records
+                if sub and sub.startswith(("touch:", "scalp:", "tm:")) and f.get("action") in ("buy", "sell"):   # dump levels: fills older than their order records
                     net[(f["ex"], sub)] = net.get((f["ex"], sub), 0.0) + (1 if f["action"] == "buy" else -1) * (f["qty"] if f["side"] == "yes" else -f["qty"])
             for ex, src, dst, q, _t in getattr(self, "moves", []):
                 if (ex, src) in net:

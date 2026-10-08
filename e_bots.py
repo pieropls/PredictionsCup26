@@ -9,7 +9,7 @@ Prices: SIG books are YES-normalized; an order's price is in its own side (a NO 
 """
 import math
 
-from a_config import (DUMP_WANT_BAND_LO, DUMP_WANT_BAND_HI, TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, ROC_MIN_TIGHT, DUMP_TTL_S, TMM_BUY_EDGE, TMM_TTL_S, LONG_TTL_S, LONG_EXIT_TTL_S, SCALP_TTL_S, TOUCH_TTL_S, WALL_TTL_S, WALL_HOLD_S, RECYCLE_BID_EDGE,
+from a_config import (DUMP_WANT_BAND_LO, DUMP_WANT_BAND_HI, TICK, MIN_QTY, QTY_TOL, MARKET_MAX_POS, MB_MIN_PX, MB_MAX_PX, ROC_MIN, ROC_REF, ROC_MIN_TIGHT, DUMP_TTL_S, TMM_BUY_EDGE, TMM_TTL_S, LONG_TTL_S, LONG_EXIT_TTL_S, SCALP_TTL_S, TM_TTL_S, TOUCH_TTL_S, WALL_TTL_S, WALL_HOLD_S, RECYCLE_BID_EDGE,
                       RECYCLE_REST_EDGE, RECYCLE_TAKE_TTL_S, RECYCLE_REST_TTL_S, MM_EDGE, MM_U_MULT, MM_NOTIONAL, MM_TTL_S,
                       LADDER_LEVELS, LADDER_TTL_S, TAKE_EDGE, TAKE_U_MULT, TAKE_NOTIONAL, TAKE_TTL_S, FAT_TTL_S)
 
@@ -411,6 +411,14 @@ class MarketBot:
                 for x in (s.get("wall") or [])]
         out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], 2 * QTY_TOL, "sleeve", sub=x["sub"], ttl=x["ttl"])   # day 9 sleeve: a limit clip at the touch
                 for x in (s.get("sleeve") or [])]
+        # day 11 §2 touch maker: a bid at the touch (exact band: kept while the plan keeps its price; re-pegged when the plan moves it);
+        # exits at fill + 1 tick (fill + 1c after 10 min) for its own lots only, never below entry + 0.5c
+        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], QTY_TOL, "tm", sub=x["sub"], ttl=x.get("ttl") or TM_TTL_S)
+                for x in (s.get("tm") or [])]
+        for x in s.get("tm_exits") or []:
+            q = abs(subs.get(x["sub"], 0))
+            if q >= MIN_QTY:
+                reduce_buy(x["side"], x["px"], int(q), "tmexit", x["sub"], TM_TTL_S, band=0.0, a2=False)
         for x in s.get("fm") or []:                          # mm_plan §1: the fair maker's quotes (entries at fair ± e; the reducing side is an exit under rule 0)
             if x.get("reduce"):
                 reduce_buy(x["held"], x["sell_px"], int(x["qty"]), "fmexit", x["sub"], x["ttl"], band=0.0, a2=False)

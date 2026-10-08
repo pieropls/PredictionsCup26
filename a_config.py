@@ -153,7 +153,8 @@ LAYER_CAPS = {
     "wall": {"notional": (50_000, 50_000, 100_000)},          # manual walls (control): bounded by the cash guard, not by this
     "sleeve": {"notional": (10_000, 10_000, 10_000)},         # day 9 (Piero 18:50): settlement holds, 10k at cost in total
     "swing": {"notional": (15_000, 15_000, 15_000)},          # day 10 §3: the RI swing slice
-    "fm": {"notional": (5_000, 5_000, 10_000)},               # mm_plan §1/§4: the fair maker — 5k at cost in the pilot, 10k after the gate
+    "fm": {"notional": (5_000, 5_000, 10_000)},
+    "tm": {"notional": (8_000, 8_000, 20_000)},               # day 11 §2: the touch maker — 8k at cost in the pilot, 20k at full size               # mm_plan §1/§4: the fair maker — 5k at cost in the pilot, 10k after the gate
 }
 # fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
 FAT_LEVELS = [0.12]             # Oct 3 (Piero): only the 0.12 level on each side (0.08 / 0.05: 0 fills since day 1)
@@ -206,11 +207,11 @@ SWING_TTL_S, WALL_HOLD_MIN_FREE, WALL_RECYCLE_EXIT_C = 3600, 30_000, 0.02   # da
 SLEEVE_TARGETS = [dict(ex="1075", side="no", limit=0.865, cap=5_000, name="Delaware Senate R NO"),   # buy NO <= 0.865, 5k at cost
                   dict(ex="963", side="no", limit=0.890, cap=5_000, name="Montana Senate D NO")]     # buy NO <= 0.89, 5k at cost   # day 9 §9.4 (Piero): +10k at cost on RI Senate beyond the Oct 6 holdings, only on levels >= 15c under fair
 DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP = 0.90, 0.05, 2_000   # day 7 §2.1: L0 joins the SIG best bid when it sits >= 5c under a >= 90% fair
-DUMP_L0_REFILLS, DUMP_L0_WINDOW_S = 5, 600            # mm_plan §8.2 (C82): at most 5 refills per side per 10 min while the tranche is open (was 3)
+DUMP_L0_REFILLS, DUMP_L0_WINDOW_S = 3, 600            # at most 3 refills per side per 10 min while the tranche is open; mm_plan §8.2 (C82, Oct 8 15:00): 5
 UNCOVERED_LOG_S = 30            # §1.3: an eligible side without its level for > 30 s is logged
 # Oct 5 22:50 (Piero): hard cash guards after the floor breach
 ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE = 1.5, 0.01, 3.0, 2_000   # day 8 §2: sum(resting cost x weight) <= 1.5 x free cash above the floor; < 2k free: none
-ENTRY_WEIGHTS = dict(L0=1.0, L1=0.5, L2=0.3, L3=0.15, L4=0.15, scalp=1.0, wall=1.0, fatfinger=0.05, longshot=0.05)
+ENTRY_WEIGHTS = dict(L0=1.0, L1=0.5, L2=0.3, L3=0.15, L4=0.15, scalp=1.0, wall=1.0, fatfinger=0.05, longshot=0.05, tm=1.0, fm=1.0)   # day 11 §2: TM weight 1.0 after L0, before the FM and L1-L4
 DUMP_REACH = dict(L0=1.0, L1=0.40, L2=0.05, L3=0.10, L4=0.014)    # day 10 §4.2 (C80): re-weighted from 24 h of live fills — L0 1.47 fills per level-hour (160x the assumption: it rests only during sweeps), L2 5x below its assumption, L3 and L1 within 2x (kept)
 BUDGET_K_MAX, BUDGET_K_MIN, BUDGET_K_STEP = 2.0, 1.0, 0.5          # day 9 §2: k x free; k_max from the replay (set before C71's build)
 BUDGET_K_TABLE = [(20_000, 3.0), (15_000, 3.0), (0, 2.0)]          # day 9 §9.2: k_max by free cash above the floor (>= 20k: 3.0; 15-20k: the replay-passing value; below: 2.0)
@@ -218,10 +219,10 @@ BUDGET_K_TIER_HYST = 1_000                                         # move up a t
 BUDGET_K_DOWN_S, BUDGET_K_UP_S, BUDGET_K_PEAK_DOWN, BUDGET_K_PEAK_UP = 1800, 7200, 0.70, 0.40   # -0.5 after 30 min > 70% or constrained; +0.5 after 2 h < 40%
 DUMP_WANT_BAND_LO, DUMP_WANT_BAND_HI, DUMP_GAP_LOG_S = 0.01, 0.005, 30   # day 9 §4: a resting level within [px - 1c, px + 0.5c] is kept; gaps > 30 s logged with cause   # day 8 §2 (replay reach 40/25/10/1%; ours since C64: L0 15%, L1 0.1%, L2-L3 0)
 DUMP_NEAR_TTL_S, DUMP_NEAR_GAP = 1200, 0.02      # L0 and levels within 2c of the touch: 20-min TTL (make-before-break); deeper 60 min
-DUMP_L0_BUDGET = 15_000         # mm_plan §8.2 (C82): L0 holds <= 15k at cost across all sides (was 8k); refills only under it
+DUMP_L0_BUDGET = 8_000          # L0 holds <= 8k at cost across all sides; refills only under it; mm_plan §8.2 (C82, Oct 8 15:00): 15k
 # mm_plan §2 / §8.1 (C82): the event-driven fast path — on a SIG fill notification act within ~1 s (one fills read, one book read, one batch write),
 # before the full loop; reconcile on the next loop; a mismatch sends that market back to the slow path for 10 min
-FAST_PATH_ON, FAST_REARMS_PER_10M, FAST_WRITES_RESERVE, FAST_SLOW_S, FAST_PM_MOVE_C = True, 3, 5, 600, 0.02
+FAST_PATH_ON, FAST_REARMS_PER_10M, FAST_WRITES_RESERVE, FAST_SLOW_S, FAST_PM_MOVE_C = False, 3, 5, 600, 0.02   # OFF until C82 (Oct 8 15:00-16:30, mm_plan §8); C81c carried it on by mistake 20:30-21:1x
 REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2 = 15_000, 0.07, 0.10   # rebuild free cash to 15k: engine lots above entry + 0.5c at the bid, lowest gap first
 REBUILD_MARGIN, REBUILD_MARGIN_GAP = -0.01, 0.05 # Piero 23:00: lots <= 5c under fair may go down to entry - 1c for the rebuild
 REBUILD_EXC_FREE = 10_000       # day 8 §1.5: that exception runs only while free cash above the floor is under 10k
@@ -234,6 +235,24 @@ BUFFER_MIN, BUFFER_MAX = 10_000, 30_000
 L3_BUDGET_SHARE = 0.20          # L3 / L4 levels may use at most 20% of the weighted entry budget; the rest goes to L0, the touch maker and the FM
 RI_TURNOVER = 10_000            # RI unfrozen: the engine may buy on both RI races up to the held cap (today's level at the deploy) + 10k in flight, levels >= 15c under fair
 RI_MIN_EDGE = RI_SENATE_MIN_EDGE
+
+# day 11 §2 (C83): the touch maker (TM, scalper v2) — first in the queue at the touch on the side that is cheap vs fair, on every market
+TM_E_MIN = 0.02                 # join the best bid (improve by a tick when the spread is >= 2 ticks) only at <= fair_side - 2c; never the rich side
+TM_IMPROVE_SPREAD = 2           # ticks
+TM_CLIP, TM_CLIP_PILOT = 1_000, 500
+TM_DEPTH_SHARE = 0.20           # at most 20% of the visible touch depth (order-book read, cached 5 min, only with spare reads)
+TM_MIN_QTY = 100
+TM_INV_MARKET, TM_INV_MARKET_PILOT = 3_000, 1_500   # shares held per market and side; at the cap only the exit side quotes
+TM_CAP_COST, TM_CAP_COST_PILOT = 20_000, 8_000      # TM held at cost in total
+TM_SIDES_PILOT = 60             # the pilot quotes the top 60 market-sides by 24-h SIG value printed >= 2c off fair (full size: every side with >= 2c edge)
+TM_TTL_S = 1200                 # 20-min expiry: a stalled engine leaves nothing stale for long
+TM_REPEG_TICKS = 2              # keep the order (queue priority) while at the touch or one tick behind; re-peg only >= 2 ticks behind or when its edge < e_min
+TM_EXIT_FIRST, TM_EXIT_STEP_S, TM_EXIT_LATE = 0.005, 600, 0.01   # exit at fill + 1 tick; fill + 1c after 10 min unfilled; never below entry + 0.5c (rule 0); hold-when-idle applies
+TM_WRITES_PER_MIN = 8           # placements batch (one write per loop), a cancel is one write each: re-pegs are rationed by priority
+TM_NEWS_C, TM_NEWS_WINDOW_S, TM_REQUOTE_S = 0.02, 600, 300   # pull a market's TM orders on a >= 2c Polymarket move in 10 min, back 5 min after
+TM_GLIDE_START = FM_GLIDE_START # inventory cap 0 from Nov 2 17:00 PT; no TM from a state's last poll close - 10 min (the FM's poll_close table)
+TM_DEPTH_CACHE_S = 300
+TM_GATE_MIN_FILLS = 50          # gates (06:00 / 15:00): realized >= 0, 30-min mark-out vs the moving fair >= 0 over >= 50 fills, round-trip share, writes within budget, no I2 trims
 DUMP_BIG_SWEEP_SH, DUMP_BIG_CLIP = 50_000, 4_000   # day 10 §4.2: sides whose 72-h median sweep >= 50k shares get L0/L1/L2 clips up to 4,000 (from 2,000)
 DUMP_V3_WEIGHTS_DAY_BIG = [0.45, 0.30, 0.05, 0.20]   # on those sides L3's share is trimmed to pay for it (L1 0.45, L2 0.30, L3 0.05, L4 0.20)
 # wall layer (Piero's manual pilot, Oct 5 23:40): one big resting order placed by control, with its buy-back, hold and news guard
