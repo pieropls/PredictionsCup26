@@ -4318,6 +4318,13 @@ class ReservoirTests(EngineCase):
         loop(eng, fake)
         self.assertEqual(eng.controls.d["reservoir"]["mode"], "rebuild")
 
+    def test_live_config_without_levels_gets_the_ladder(self):
+        fake, eng, ex, subs = self.rig()
+        eng.controls.d["reservoir"].pop("sell_levels", None)
+        eng.reservoir_migration()
+        self.assertEqual(eng.controls.d["reservoir"]["sell_levels"], [list(x) for x in a_config.RESERVOIR["sell_levels"]])
+        self.assertTrue(any("asks laddered" in e["text"] for e in eng.events))
+
     def test_fair_reference_pinned_on_the_first_priced_loop(self):
         fake, eng, ex, subs = self.rig()
         eng.controls.d["reservoir"]["fair0"] = None

@@ -4797,6 +4797,12 @@ class Engine:
     def reservoir_migration(self):
         """Once (C84c, Piero 10:10 Oct 8): the reservoir replaces the band; the swing layer carries it; the walls' buy-backs retire."""
         c = self.controls
+        if c.d.get("reservoir") and "sell_levels" not in c.d["reservoir"]:   # C84f: the live config predates the ladder (Piero 15:35 1a)
+            with c.lock:
+                c.d["reservoir"]["sell_levels"] = [list(x) for x in RESERVOIR["sell_levels"]]
+                c.save()
+            self.event("SWING", "RESERVOIR asks laddered: " + " / ".join(f"{q:,} at {p}" for p, q in RESERVOIR["sell_levels"]) + " (rule 0 per lot; rebuys unchanged)")
+            self.night.line("RESERVOIR asks laddered: " + " / ".join(f"{q:,} at {p}" for p, q in RESERVOIR["sell_levels"]))
         if c.d.get("reservoir") or os.environ.get("SIG_RESERVOIR", "1") != "1":
             return
         r = dict(RESERVOIR); r["mode"] = "trade"; r["fair0"] = self.fair.get(str(r["ex"])); r["since"] = stamp()
