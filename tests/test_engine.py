@@ -7,6 +7,8 @@ No network, nothing sent.   python3 -m unittest tests.test_engine
   plan-cycle        writes taking 2 s each in the executor's threads do not slow the plan cycle
   dashboard         read-only controls, bound to 127.0.0.1
 """
+import os as _os
+_os.environ["SIG_FM_PILOT"] = "0"   # mm_plan C81: the fair-maker pilot never switches itself on inside a rig (FMTests set targets explicitly); set here because `unittest discover tests` imports this module without tests/__init__.py
 import collections
 import contextlib
 import csv
@@ -2646,7 +2648,7 @@ class DashV4PayloadTests(EngineCase):
         sd = s["sigday"]
         self.assertTrue(sd["ok"])
         rows = s["strategies4"]
-        self.assertEqual([r["key"] for r in rows], ["dump", "swing", "sleeve", "wall", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])
+        self.assertEqual([r["key"] for r in rows], ["dump", "fm", "swing", "sleeve", "wall", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])
         self.assertEqual(next(r for r in rows if r["key"] == "mm")["trades_today"], 1)
         self.assertAlmostEqual(sum(r["pnl_today"] for r in rows) + sd["drift"], sd["today"], delta=25, msg="Strategies total = Live today")
         self.assertAlmostEqual(sum(h["value_sig"] for h in s["holdings4"]), s["capital4"]["holdings"], places=2, msg="Holdings total = Capital in holdings")
@@ -3481,6 +3483,91 @@ class WallC77Tests(WallRulesC76Tests):
         eng.release_t = 0
         plan = eng.release_plan(a_config.CASH_RESERVE + 3_000, time.time(), eng.bucket_usage())
         self.assertNotIn(ex, plan, plan)
+
+
+class FMTests(EngineCase):
+    """mm_plan §1/§4 (Piero's OK): the fair maker quotes a bid at fair - e and an ask at fair + e (skewed 0.5c per 1k of
+    inventory), clip 500, never crossing SIG's book; at the 1k inventory cap only the reducing side quotes and it is an
+    exit under rule 0; a 2c / 10 min Polymarket move pulls both quotes for 5 min; 120-s expiry; <= 5 writes/min; 5k at cost;
+    auto-off at realized < -150."""
+
+    def rig(self):
+        fresh_data(layers=dict(position=dict(state="full"), fm=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 60_000)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
+        FAIR[ex] = 0.50
+        self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = eng.px[ex] = (0.48, 0.52, 0.50)      # SIG 0.48 / 0.52: our 0.47 bid and 0.53 ask do not cross (a non-focus market: set the engine's cache too)
+        eng.controls.d["fm_targets"] = [dict(ex=ex, e=0.03, name="t")]
+        for k in list(eng.ledger.orders):                  # the first loop quoted the real targets: forget those writes
+            if eng.ledger.orders[k].get("layer") in ("fm", "fmexit"):
+                eng.ledger.orders[k]["ts"] = 0
+        loop(eng, fake)
+        return fake, eng, ex
+
+    def quotes(self, eng, fake, ex, layer=None):
+        return [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] in ((layer,) if layer else ("fm", "fmexit"))]
+
+    def test_quotes_cap_exit_pull_and_auto_off(self):
+        fake, eng, ex = self.rig()
+        loop(eng, fake)
+        q = self.quotes(eng, fake, ex, "fm")
+        self.assertEqual(len(q), 2, q)
+        bid = next(o for o in q if o["side"] == "yes"); ask = next(o for o in q if o["side"] == "no")
+        self.assertAlmostEqual(bid["price"], 0.47, places=3); self.assertAlmostEqual(1 - ask["price"], 0.53, places=3)
+        self.assertEqual((bid["qty"], ask["qty"]), (500, 500))
+        self.assertEqual(eng.ledger.orders[bid["id"]].get("ttl"), a_config.FM_TTL_S)
+        # never cross: SIG's ask at 0.46 is under our bid -> no bid
+        fake.px[ex] = eng.px[ex] = (0.44, 0.46, 0.45)
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual([o for o in self.quotes(eng, fake, ex, "fm") if o["side"] == "yes"], [], "a bid above SIG's ask would be a take: not quoted")
+        fake.px[ex] = eng.px[ex] = (0.48, 0.52, 0.50)
+        loop(eng, fake); loop(eng, fake)
+        bid = next(o for o in self.quotes(eng, fake, ex, "fm") if o["side"] == "yes")
+        fake.fill(bid["id"], 500)                          # we are long 500 YES: the ask becomes the exit (reduce, rule 0), skewed 0.25c
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(eng.fm_inventory(ex), 500.0)
+        xs = self.quotes(eng, fake, ex, "fmexit")
+        self.assertEqual(len(xs), 1, xs)
+        self.assertLessEqual(xs[0]["qty"], 500)
+        self.assertTrue(any("FM fill" in e["text"] for e in eng.events))
+        eng.ledger.subbooks[ex][f"fm:{ex}"] = 1_000.0        # at the cap: no bid, only the exit
+        eng.ledger.tranches[f"fm:{ex}"] = dict(ex=ex, side="yes", kind="fm", state="open", ts=time.time(), t="x", avg=0.47)
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual([o for o in self.quotes(eng, fake, ex, "fm") if o["side"] == "yes"], [], "at the 1k cap only the reducing side quotes")
+        self.assertTrue(self.quotes(eng, fake, ex, "fmexit"))
+        # a 2c Polymarket move in 10 min pulls both quotes for 5 min
+        eng.fair_hist[ex] = [(time.time() - 300, 0.50)]
+        FAIR[ex] = 0.53
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(self.quotes(eng, fake, ex), [], "pulled on the move")
+        self.assertGreater(eng.fm_block.get(ex, 0), time.time())
+        # auto-off at realized < -150
+        eng.controls.d["fm_stats"]["realized"] = -200.0
+        eng.fm_fill_events([dict(ex=ex, side="yes", action="buy", qty=1.0, price=0.47, layer="fm", realized=0.0, t=stamp_())])
+        self.assertEqual(eng.controls.state("fm"), "off")
+        self.assertTrue(any("FM AUTO-OFF" in e["text"] for e in eng.events))
+
+    def test_writes_budget_and_cost_cap(self):
+        fake, eng, ex = self.rig()
+        now = time.time()
+        for i in range(a_config.FM_WRITES_PER_MIN):
+            eng.ledger.orders[f"fmw{i}"] = dict(id=f"fmw{i}", bot="b", layer="fm", ex="999", side="yes", action="buy", price=0.4, qty=500, filled=0.0, cost=0.0, left=500,
+                                                placed=stamp_(), ts=now - 10 - i, closed=stamp_(), status="cancelled", sub="fm:999", note="")   # 5 distinct seconds = 5 writes
+        self.assertFalse(eng.fm_writes_last_min(now) < a_config.FM_WRITES_PER_MIN)
+        plan = eng.fm_plan(now, eng.cash_hist[-1])
+        self.assertEqual(plan, {}, "5 writes in the last minute: no new market quoted this loop")
+        for i in range(a_config.FM_WRITES_PER_MIN):
+            eng.ledger.orders.pop(f"fmw{i}")
+        eng.ledger.subbooks.setdefault(ex, {})[f"fm:{ex}"] = 9_000.0   # far beyond the cost cap: no entries, only the exit
+        eng.ledger.tranches[f"fm:{ex}"] = dict(ex=ex, side="yes", kind="fm", state="open", ts=now, t="x", avg=0.5)
+        plan = eng.fm_plan(now, eng.cash_hist[-1])
+        self.assertTrue(all(q.get("reduce") for q in plan.get(ex, [])), plan)
 
 
 class SwingTests(EngineCase):

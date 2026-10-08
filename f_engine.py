@@ -54,6 +54,8 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      SLEEVE_CAP, SLEEVE_MIN_FREE, SLEEVE_CLIP, SLEEVE_GAP_S, SLEEVE_TTL_S, SLEEVE_MIN_FAIR, SLEEVE_MIN_EDGE, SLEEVE_NEWS_C, SLEEVE_NEWS_WINDOW_S,
                      SLEEVE_NEWS_HOLD_S, SLEEVE_TARGETS, SWING, SWING_TTL_S, WALL_HOLD_MIN_FREE, WALL_RECYCLE_EXIT_C,
                      REBUILD_MAX_GAP, DUMP_BIG_SWEEP_SH, DUMP_BIG_CLIP, DUMP_V3_WEIGHTS_DAY_BIG,
+                     FM_TARGETS, FM_CLIP, FM_CAP_SH, FM_CAP_COST, FM_TTL_S, FM_WRITES_PER_MIN, FM_SKEW_PER_1K, FM_NEWS_C, FM_NEWS_WINDOW_S, FM_REQUOTE_S,
+                     FM_AGE_LADDER_S, FM_OFF_REALIZED, FM_OFF_MO30, FM_OFF_MIN_FILLS, FM_GLIDE_START, FM_POLL_PULL_S,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
@@ -118,7 +120,7 @@ def host_id():
 
 
 # ====================================================================================================== controls
-LAYERS = ["position", "recycler", "release", "mm", "scalp", "touch", "wall", "sleeve", "swing", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
+LAYERS = ["position", "recycler", "release", "mm", "scalp", "touch", "wall", "sleeve", "swing", "fm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
 TMM_ENABLED = True              # afternoon D-C: the engine's MM is the turnover MM (False: classic MM v2, tests only)
 LAYER_STATES = ("off", "pilot", "full")
 
@@ -386,6 +388,7 @@ class Engine:
         self.sleeve_now, self.sleeve_last, self.sleeve_block, self.sleeve_log = {}, {}, {}, []   # day 9 sleeve (settlement holds)
         self.swing_now, self.swing_block, self.swing_note = {}, 0.0, {}   # day 10 §3: the RI swing
         self.big_sweep, self.big_sweep_t = set(), 0.0                    # day 10 §4.2: big-sweep sides (clips to 4k)
+        self.fm_now, self.fm_block, self.fm_fills, self.fm_note, self.fm_poll = {}, {}, collections.deque(maxlen=5000), {}, None   # mm_plan §1: the fair maker
         self.in_use_hist, self.use_peak, self.rule0_log, self.rule0_blocked, self.lots_cache = collections.deque(maxlen=3000), 0.0, {}, collections.deque(maxlen=5000), (None, {})   # §9
         self.uncovered_since, self.uncovered_log, self.uncovered_n, self.refreshed = {}, {}, collections.deque(maxlen=2000), {}   # day 7 §1.3
         try:
@@ -408,6 +411,10 @@ class Engine:
             self.day10_migrations()
         except Exception as err:
             print(f"day 10 migrations: {err!r}")
+        try:
+            self.mm_migrations()
+        except Exception as err:
+            print(f"mm plan migrations: {err!r}")
         try:                                                # Oct 5 02:30: undo synthetic fills that duplicated a SIG fill
             fixed = self.ledger.dedup_synthetic()          # booked <= quantity per order + phantom netting (no time-window pairing)
             if fixed["removed"] or fixed["netted"]:
@@ -497,7 +504,7 @@ class Engine:
     MARKET_LAYERS = {"exit": "recycler", "recycle": "recycler", "take": "sniper", "mm": "mm",   # "touch" is the day-6 layer (the old MM touch quote is gone)
                      "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs",
                      "release": "release", "fatfinger": "fatfinger", "dump": "dump", "dumpexit": "dump",
-                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall", "sleeve": "sleeve", "swing": "swing", "swingsell": "swing"}
+                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall", "sleeve": "sleeve", "swing": "swing", "swingsell": "swing", "fm": "fm", "fmexit": "fm"}
     REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit", "touchexit", "wallexit"}
 
     def gate(self, b, wants):
@@ -659,6 +666,7 @@ class Engine:
                 self.sleeve_fill_events(new_f)
                 self.swing_fill_events(new_f)
                 self.rule0_fill_check(new_f)
+                self.fm_fill_events(new_f)
                 for f in new_f:                             # an order filled out before any snapshot showed it: no longer "acked, resting"
                     rec = self.ledger.orders.get(str(f.get("order") or ""))
                     if rec and rec.get("filled", 0) >= rec.get("qty", 0) - QTY_TOL:
@@ -739,6 +747,7 @@ class Engine:
             self.wall_now = {}
             self.event("ERR", f"wall plan: {err!r}")
         try:
+            self.fm_now = self.fm_plan(now, cash)          # mm_plan §1: after L0 (the dump plan), before the scalper
             self.scalp_now = self.scalp_plan(now, cash, used)
         except Exception as err:
             self.scalp_now = {}
@@ -1192,7 +1201,7 @@ class Engine:
                     longshot=self.long_now.get(b.ex) or [], long_exits=self.long_view.get(b.ex, []),
                     scalp=self.scalp_now.get(b.ex) or [], scalp_exits=self.scalp_view.get(b.ex, []),
                     touch=self.touch_now.get(b.ex) or [], touch_exits=self.touch_view.get(b.ex, []),
-                    wall=self.wall_now.get(b.ex) or [], wall_exits=self.wall_view.get(b.ex, []), sleeve=self.sleeve_now.get(b.ex) or [], swing=self.swing_now.get(b.ex) or {},
+                    wall=self.wall_now.get(b.ex) or [], wall_exits=self.wall_view.get(b.ex, []), sleeve=self.sleeve_now.get(b.ex) or [], swing=self.swing_now.get(b.ex) or {}, fm=self.fm_now.get(b.ex) or [],
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
                     room={sd: max(0.0, MARKET_MAX_POS - held[sd]) for sd in ("yes", "no")},
@@ -1827,7 +1836,7 @@ class Engine:
     LAYER_TTL = {"mm": TMM_TTL_S, "fatfinger": FAT_TTL_S, "dump": DUMP_TTL_S, "dumpexit": DUMP_TTL_S, "ladder": LADDER_TTL_S,
                  "rebound": LADDER_TTL_S, "release": RECYCLE_TAKE_TTL_S, "take": TAKE_TTL_S, "recycle": RECYCLE_REST_TTL_S,
                  "set": PAIR_TTL_S, "unwind": PAIR_TTL_S, "repair": PAIR_TTL_S,
-                 "longshot": LONG_TTL_S, "longexit": LONG_EXIT_TTL_S, "scalp": SCALP_TTL_S, "scalpexit": SCALP_TTL_S, "touch": TOUCH_TTL_S, "touchexit": TOUCH_TTL_S, "wall": WALL_TTL_S, "wallexit": WALL_HOLD_S, "sleeve": SLEEVE_TTL_S, "swing": SWING_TTL_S, "swingsell": SWING_TTL_S}
+                 "longshot": LONG_TTL_S, "longexit": LONG_EXIT_TTL_S, "scalp": SCALP_TTL_S, "scalpexit": SCALP_TTL_S, "touch": TOUCH_TTL_S, "touchexit": TOUCH_TTL_S, "wall": WALL_TTL_S, "wallexit": WALL_HOLD_S, "sleeve": SLEEVE_TTL_S, "swing": SWING_TTL_S, "swingsell": SWING_TTL_S, "fm": FM_TTL_S, "fmexit": FM_TTL_S}
 
     def vanished_fill(self, oid, rec, q0, now):
         """Shares an order filled since the previous snapshot: it shrank, or it left the book while we didn't cancel it
@@ -4106,7 +4115,7 @@ class Engine:
                 self.night.line(msg)
         return T
 
-    REBUILD_SKIP = ("manual", "pairset:", "recycle:", "sleeve:", "wall:", "swing:")   # day 9/10: sleeve, wall and swing lots have their own exits
+    REBUILD_SKIP = ("manual", "pairset:", "recycle:", "sleeve:", "wall:", "swing:", "fm:")   # day 9/10: sleeve, wall, swing and FM lots have their own exits
 
     def rebuild_plan(self, cash, now, free, pending):
         """Oct 5 22:50 (Piero): while free cash above the floor is under 15k, sell engine lots at the SIG bid: lots the bid
@@ -4392,6 +4401,196 @@ class Engine:
         return dict(slice=cfg["slice"], held=round(held), sold_out=round(sold), in_walls=round(in_walls), swing_sub=round(swing_q),
                     sold_total=round(st.get("sold", 0)), bought_total=round(st.get("bought", 0)), realized=round(st.get("realized", 0), 2), cycles=st.get("cycles", 0))
 
+    # ------------------------------------------------------------------------------------------------ mm_plan §1/§4: the fair maker (FM)
+    def fm_targets(self):
+        """The pilot's targets (a control override wins); none at all when the pilot switch is off (the test package sets SIG_FM_PILOT=0)."""
+        return self.controls.d.get("fm_targets") or (FM_TARGETS if os.environ.get("SIG_FM_PILOT", "1") == "1" else [])
+
+    def fm_inventory(self, ex):
+        """Signed YES inventory of the FM sub (YES buys +, NO buys -)."""
+        return float(self.ledger.subbooks.get(ex, {}).get(f"fm:{ex}", 0.0))
+
+    def fm_cost(self):
+        out = 0.0
+        for t in self.fm_targets():
+            ex = str(t["ex"]); q = self.fm_inventory(ex)
+            if abs(q) >= 1:
+                avg = (self.ledger.tranches.get(f"fm:{ex}") or {}).get("avg") or self.sig_mark(ex, "yes" if q > 0 else "no") or 0.5
+                out += abs(q) * float(avg)
+        return out
+
+    def fm_writes_last_min(self, now):
+        """FM writes in the last minute = distinct placement seconds (one batch write places up to 50 orders)."""
+        return len({int(o["ts"]) for o in self.ledger.orders.values() if o.get("layer") in ("fm", "fmexit") and (o.get("ts") or 0) >= now - 60})
+
+    def fm_poll_block(self, ex, now):
+        """mm_plan §1 election glide: no quotes on a market from its state's last poll close - 10 min (data/election/poll_close.json)."""
+        if self.fm_poll is None:
+            try:
+                rows = json.load(open(os.path.join(DATA, "election", "poll_close.json")))["markets"]
+                self.fm_poll = {str(r["ex"]): r["last_close_et"] for r in rows}
+            except Exception:
+                self.fm_poll = {}
+        lc = self.fm_poll.get(ex)
+        if not lc:
+            return False
+        hh, mm = int(lc[:2]), int(lc[3:5])
+        day = 4 if lc.endswith("+1") else 3
+        close = time.mktime(time.strptime(f"2026-11-{day:02d} {hh:02d}:{mm:02d}:00", "%Y-%m-%d %H:%M:%S")) - 3 * 3600   # ET -> PT (server clock = PT)
+        return now >= close - FM_POLL_PULL_S
+
+    def fm_plan(self, now, cash):
+        """{ex: [quote-spec]}: a bid at fair - e and an ask at fair + e (skewed 0.5c per 1k of inventory), clip 500, never
+        crossing SIG's book; at the inventory cap only the reducing side quotes; the reducing side is an exit (rule 0, and
+        inventory older than 6 h exits at entry + 0.5..1c); pulled on a 2c / 10 min Polymarket move and re-quoted 5 min
+        after it settles; 120-s expiry; <= 5 writes/min; <= 5k at cost; weight 1.0 in the entry budget; cap 0 from Nov 2."""
+        c = self.controls
+        if not c.on("fm") or c.paused or self.fills_blind:
+            return {}
+        glide = now >= time.mktime(time.strptime(FM_GLIDE_START, "%Y-%m-%d %H:%M:%S"))
+        cap_sh = 0 if glide else FM_CAP_SH
+        cost_all = self.fm_cost()
+        writes_ok = self.fm_writes_last_min(now) < FM_WRITES_PER_MIN
+        resting = {}
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"])
+            if rec and rec.get("layer") in ("fm", "fmexit") and o["id"] not in self.ex.cancelling:
+                resting.setdefault(o["ex"], []).append(o)
+        plan = {}
+        for t in self.fm_targets():
+            ex, e = str(t["ex"]), float(t["e"])
+            if ex not in self.owner or self.ex.is_frozen(ex) or ex in self.manual_ex:
+                continue
+            f = self.fair.get(ex)
+            if f is None or self.fm_poll_block(ex, now):
+                continue
+            h = [x for x in self.fair_hist.get(ex, []) if x[0] >= now - FM_NEWS_WINDOW_S]
+            if not h or now - h[-1][0] >= 5:
+                h.append((now, f))
+                self.fair_hist[ex] = h
+            if max(v for _, v in h) - min(v for _, v in h) >= FM_NEWS_C - 1e-9:
+                if self.fm_block.get(ex, 0) < now:
+                    self.event("FM", f"FM {t.get('name', self.name(ex))}: Polymarket moved {(max(v for _, v in h) - min(v for _, v in h)) * 100:.1f}c in 10 min: quotes pulled, re-quote 5 min after it settles")
+                self.fm_block[ex] = now + FM_REQUOTE_S
+            if self.fm_block.get(ex, 0) > now:
+                continue
+            inv = self.fm_inventory(ex)
+            skew = FM_SKEW_PER_1K * inv / 1000.0
+            bid, ask = bots.tick_down(round(f - e - skew, 6)), bots.tick_up(round(f + e - skew, 6))
+            b_sig, a_sig, _ = self.px.get(ex, (None, None, None))
+            quotes = []
+            sub = f"fm:{ex}"
+            t_tr = self.ledger.tranches.get(sub) or {}
+            aged = inv != 0 and t_tr.get("ts") and now - t_tr["ts"] > FM_AGE_LADDER_S
+            avg = t_tr.get("avg")
+            # bid side: an exit while we are short (inv < 0), else an entry (needs room under the share cap and the cost cap)
+            if bid >= MB_MIN_PX and (a_sig is None or bid < a_sig - 1e-9):
+                if inv < 0:
+                    q = int(min(FM_CLIP, -inv))
+                    px = bid if not (aged and avg) else max(min(bid, round(1 - (avg + 0.01), 3)), round(1 - (avg + RULE0_MARGIN), 3))   # the NO lot sells at NO >= entry + 0.5c
+                    quotes.append(dict(reduce=True, held="no", sell_px=round(1 - px, 3), qty=q, sub=sub, ttl=FM_TTL_S, side="yes", px=px))
+                elif inv < cap_sh and cost_all + FM_CLIP * bid <= FM_CAP_COST + 1e-6 and getattr(self, "entry_left", float("inf")) >= FM_CLIP * bid:
+                    quotes.append(dict(side="yes", px=bid, qty=FM_CLIP, sub=sub, ttl=FM_TTL_S))
+            # ask side (sell YES = buy NO at 1 - ask): an exit while long, else an entry
+            if ask <= MB_MAX_PX and (b_sig is None or ask > b_sig + 1e-9):
+                if inv > 0:
+                    q = int(min(FM_CLIP, inv))
+                    sell = ask if not (aged and avg) else max(min(ask, round(avg + 0.01, 3)), round(avg + RULE0_MARGIN, 3))
+                    quotes.append(dict(reduce=True, held="yes", sell_px=round(sell, 3), qty=q, sub=sub, ttl=FM_TTL_S, side="no", px=round(1 - sell, 3)))
+                elif -inv < cap_sh and cost_all + FM_CLIP * (1 - ask) <= FM_CAP_COST + 1e-6 and getattr(self, "entry_left", float("inf")) >= FM_CLIP * (1 - ask):
+                    quotes.append(dict(side="no", px=round(1 - ask, 3), qty=FM_CLIP, sub=sub, ttl=FM_TTL_S))
+            if not writes_ok and not resting.get(ex):
+                continue                                    # the write budget is spent: no new market this loop (resting quotes are re-stated)
+            for qd in quotes:
+                if not qd.get("reduce"):
+                    self.entry_left = max(0.0, getattr(self, "entry_left", float("inf")) - qd["qty"] * qd["px"])
+            if quotes:
+                plan[ex] = quotes
+        return plan
+
+    def fm_fill_events(self, fills):
+        c = self.controls
+        st = c.d.setdefault("fm_stats", dict(fills=0, realized=0.0, edge=0.0, since=stamp()))
+        changed = False
+        for f in fills:
+            if f["layer"] not in ("fm", "fmexit"):
+                continue
+            changed = True
+            ex = f["ex"]; sub = f"fm:{ex}"
+            fv = self.side_fair(ex, f["side"])
+            edge = 0.0 if fv is None else (fv - f["price"]) * f["qty"]   # buying `side` at price vs that side's fair
+            st["fills"] += 1; st["realized"] += f.get("realized") or 0.0; st["edge"] += edge
+            self.fm_fills.append(dict(t=time.time(), ex=ex, side=f["side"], px=f["price"], qty=f["qty"], layer=f["layer"]))
+            q = self.fm_inventory(ex)
+            tr = self.ledger.tranches.get(sub)
+            if abs(q) >= 1:
+                if tr is None or tr.get("state") != "open" or (tr.get("side") != ("yes" if q > 0 else "no")):
+                    tr = self.ledger.tranches[sub] = dict(ex=ex, side="yes" if q > 0 else "no", kind="fm", t=stamp(), ts=time.time(), state="open", avg=f["price"])
+                tr["avg"] = round(self.ledger.tranche_avg(sub, "fm", ex=ex, side=tr["side"], since=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(tr["ts"] - 300))) or f["price"], 5)
+            elif tr is not None:
+                tr["state"] = "closed"
+            msg = (f"FM fill {self.name(ex)}: {'bought' if f['layer'] == 'fm' else 'closed'} {f['qty']:,.0f} {f['side'].upper()} at {f['price']:.3f}"
+                   + ("" if fv is None else f" (fair {fv:.3f}, edge {edge:+,.0f})") + f", realized {(f.get('realized') or 0):+,.0f}; inventory {q:+,.0f} YES")
+            self.event("FM", msg)
+            self.night.line(msg)
+        if changed:
+            with c.lock:
+                c.d["fm_stats"] = st
+                c.save()
+        # auto-off (mm_plan §4)
+        if c.on("fm") and st["fills"]:
+            mo = self.fm_markout(1800)
+            why = None
+            if st["realized"] < FM_OFF_REALIZED:
+                why = f"realized {st['realized']:+,.0f} < {FM_OFF_REALIZED:+,.0f}"
+            elif mo["n"] >= FM_OFF_MIN_FILLS and mo["avg"] < FM_OFF_MO30:
+                why = f"30-min mark-out vs the moving fair {mo['avg'] * 100:+.2f}c over {mo['n']} fills < {FM_OFF_MO30 * 100:+.1f}c"
+            if why:
+                with c.lock:
+                    c.d["layers"].setdefault("fm", dict(state="off", caps={}, killed=None))["state"] = "off"
+                    c.save()
+                msg = f"FM AUTO-OFF: {why}; quotes pulled (Piero decides whether it comes back)"
+                self.event("FM", msg)
+                self.night.line(msg)
+                self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+
+    def fm_markout(self, horizon_s):
+        """Average mark-out vs the MOVING Polymarket fair `horizon_s` after each FM fill (fills old enough only)."""
+        now = time.time(); vals = []
+        for f in self.fm_fills:
+            if now - f["t"] < horizon_s:
+                continue
+            fh = self.fair_at(f["ex"], f["t"] + horizon_s)
+            if fh is None:
+                continue
+            fs = fh if f["side"] == "yes" else 1 - fh
+            vals.append(fs - f["px"])                       # we bought `side` at px: fair of that side later minus px
+        return dict(n=len(vals), avg=(sum(vals) / len(vals)) if vals else 0.0)
+
+    def fm_view(self):
+        st = self.controls.d.get("fm_stats") or {}
+        inv = {str(t["ex"]): self.fm_inventory(str(t["ex"])) for t in self.fm_targets()}
+        return dict(fills=st.get("fills", 0), realized=round(st.get("realized", 0.0), 2), edge=round(st.get("edge", 0.0), 2),
+                    inventory={k: v for k, v in inv.items() if abs(v) >= 1}, cost=round(self.fm_cost(), 2), mo30=self.fm_markout(1800),
+                    writes_last_min=self.fm_writes_last_min(time.time()), on=self.controls.on("fm"))
+
+    def mm_migrations(self):
+        c = self.controls
+        d = c.d.setdefault("mm_plan", {})
+        if d.get("c81") or os.environ.get("SIG_FM_PILOT", "1") != "1":   # the test package sets SIG_FM_PILOT=0: the pilot never switches itself on in a rig
+            return
+        with c.lock:
+            c.d["layers"].setdefault("fm", dict(state="full", caps={}, killed=None))["state"] = "full"
+            c.d.setdefault("fm_stats", dict(fills=0, realized=0.0, edge=0.0, since=stamp()))
+            d["c81"] = stamp()
+            c.save()
+        msg = (f"MM PLAN (C81): fair maker ON — {len(FM_TARGETS)} markets ({', '.join(t['name'] for t in FM_TARGETS)}), quotes at fair ± e (3c), clip {FM_CLIP}, "
+               f"cap {FM_CAP_SH:,} shares per market and {FM_CAP_COST:,} at cost in total, skew 0.5c per 1k, never crossing, the reducing side exits under rule 0, "
+               f"pulled on a 2c / 10 min Polymarket move (re-quote 5 min after), {FM_TTL_S}-s expiry, <= {FM_WRITES_PER_MIN} writes/min, weight 1.0 after L0 before the scalper; "
+               f"auto-off at realized < {FM_OFF_REALIZED:+,.0f} or a 30-min mark-out < -0.5c over >= {FM_OFF_MIN_FILLS} fills; cap 0 from Nov 2 17:00 PT and no quotes from a state's poll close - 10 min")
+        self.event("FM", msg)
+        self.night.line(msg)
+
     def day10_migrations(self):
         """Once: the RI swing config (hold part = the wall lots beyond the 15k slice) and the swing layer on."""
         c = self.controls
@@ -4510,7 +4709,7 @@ class Engine:
     def reserve_ok(self, ex, w):
         """Day 2 §3.2: only these may spend the opportunity reserve (down to the floor): fat-finger levels, sniper takes on
         a new market (< 30 min old), and takes >= 8c through fair."""
-        if w.get("layer") in ("fatfinger", "dump", "longshot", "wall", "sleeve", "swing"):   # a manual wall is bounded by its own cash cut (>= 2k free); the sleeve by its 20k-free rule
+        if w.get("layer") in ("fatfinger", "dump", "longshot", "wall", "sleeve", "swing", "fm"):   # a manual wall is bounded by its own cash cut (>= 2k free); the sleeve by its 20k-free rule
             return True
         if w.get("layer") != "take":
             return False

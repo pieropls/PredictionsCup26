@@ -8,3 +8,4 @@ if not os.environ.get("SIG_DATA"):
     os.environ["SIG_DATA"] = tempfile.mkdtemp(prefix="sig_tests_data_")
 _LIVE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 assert os.path.realpath(os.environ["SIG_DATA"]) != os.path.realpath(_LIVE), "tests must never run on the live data/"
+os.environ["SIG_FM_PILOT"] = "0"   # mm_plan C81: the fair-maker pilot does not switch itself on inside test rigs (FMTests set the layer explicitly)

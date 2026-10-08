@@ -411,6 +411,11 @@ class MarketBot:
                 for x in (s.get("wall") or [])]
         out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], 2 * QTY_TOL, "sleeve", sub=x["sub"], ttl=x["ttl"])   # day 9 sleeve: a limit clip at the touch
                 for x in (s.get("sleeve") or [])]
+        for x in s.get("fm") or []:                          # mm_plan §1: the fair maker's quotes (entries at fair ± e; the reducing side is an exit under rule 0)
+            if x.get("reduce"):
+                reduce_buy(x["held"], x["sell_px"], int(x["qty"]), "fmexit", x["sub"], x["ttl"], band=0.0, a2=False)
+            else:
+                out.append(want(x["side"], "buy", x["px"], int(x["qty"]), x["px"], x["px"], QTY_TOL, "fm", sub=x["sub"], ttl=x["ttl"]))
         sw = s.get("swing") or {}                            # day 10 §3: the RI swing legs (sell leg = reduce from the wall / swing subs, buy leg = entry)
         for x in sw.get("sells") or []:
             reduce_buy(x["side"], x["px"], int(x["qty"]), "swingsell", x["sub"], x["ttl"], band=0.0, a2=False)

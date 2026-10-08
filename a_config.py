@@ -153,6 +153,7 @@ LAYER_CAPS = {
     "wall": {"notional": (50_000, 50_000, 100_000)},          # manual walls (control): bounded by the cash guard, not by this
     "sleeve": {"notional": (10_000, 10_000, 10_000)},         # day 9 (Piero 18:50): settlement holds, 10k at cost in total
     "swing": {"notional": (15_000, 15_000, 15_000)},          # day 10 §3: the RI swing slice
+    "fm": {"notional": (5_000, 5_000, 10_000)},               # mm_plan §1/§4: the fair maker — 5k at cost in the pilot, 10k after the gate
 }
 # fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
 FAT_LEVELS = [0.12]             # Oct 3 (Piero): only the 0.12 level on each side (0.08 / 0.05: 0 fills since day 1)
@@ -189,6 +190,15 @@ RI_SENATE_RACE, RI_SENATE_ADD, RI_SENATE_MIN_EDGE = "Rhode Island Senate", 10_00
 # day 9 (Piero 18:50) sleeve = settlement holds: take resting liquidity with limit clips, held to settlement under rule 0
 SLEEVE_CAP, SLEEVE_MIN_FREE, SLEEVE_CLIP, SLEEVE_GAP_S, SLEEVE_TTL_S = 10_000, 20_000, 1_500, 120, 110   # 10k at cost; only cash above 20k free; clips <= 1,500, >= 2 min apart
 SLEEVE_MIN_FAIR, SLEEVE_MIN_EDGE, SLEEVE_NEWS_C, SLEEVE_NEWS_WINDOW_S, SLEEVE_NEWS_HOLD_S = 0.98, 0.10, 0.02, 600, 1800   # our side's fair >= 0.98 and edge >= 10c; news guard 2c / 10 min
+# mm_plan §1 + §4 (Piero, Oct 7 18:30): the fair maker (FM) — a two-sided sweep catcher in the competitive races; pilot = the study's top 10
+FM_TARGETS = [dict(ex="983", e=0.03, name="Texas Senate R"), dict(ex="1038", e=0.03, name="WI-01 House D"), dict(ex="896", e=0.03, name="CO-04 House D"),
+              dict(ex="1066", e=0.03, name="Alaska Senate D"), dict(ex="982", e=0.03, name="Texas Senate D"), dict(ex="871", e=0.03, name="Nevada Governor D"),
+              dict(ex="876", e=0.03, name="Oregon Governor D"), dict(ex="1017", e=0.03, name="FL-22 House D"), dict(ex="960", e=0.03, name="Maine Senate R"),
+              dict(ex="885", e=0.03, name="Texas Governor R")]
+FM_CLIP, FM_CAP_SH, FM_CAP_COST, FM_TTL_S, FM_WRITES_PER_MIN = 500, 1_000, 5_000, 120, 5   # clip 500; 1k shares per market; 5k at cost in total; 120-s expiry; <= 5 writes/min
+FM_SKEW_PER_1K, FM_NEWS_C, FM_NEWS_WINDOW_S, FM_REQUOTE_S, FM_AGE_LADDER_S = 0.005, 0.02, 600, 300, 6 * 3600   # skew 0.5c per 1k inventory; pull on 2c/10 min, re-quote 5 min after; > 6 h inventory joins the ladder
+FM_OFF_REALIZED, FM_OFF_MO30, FM_OFF_MIN_FILLS = -150.0, -0.005, 20   # auto-off: realized < -150, or 30-min mark-out vs the moving fair < -0.5c over >= 20 fills
+FM_GLIDE_START, FM_POLL_PULL_S = "2026-11-02 17:00:00", 600   # election glide: cap 0 from Nov 2 17:00 PT; no quotes from a state's last poll close - 10 min
 # day 10 §3 (Piero D2): the RI swing — a 15k slice of the RI Senate R wall lots cycles with the ring
 SWING = dict(ex="1077", side="no", slice=15_000, wall_subs=["wall:1077:no:w1791342782", "wall:1077:no:w1791342929"], sell_px=0.865, buy_px=0.845,
              min_edge=0.14, max_fair_yes=0.03, news_c=0.02, news_window_s=600, news_hold_s=1800)
