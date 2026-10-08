@@ -9,6 +9,7 @@ No network, nothing sent.   python3 -m unittest tests.test_engine
 """
 import os as _os
 _os.environ["SIG_FM_PILOT"] = "0"
+_os.environ["SIG_RESERVOIR"] = "0"   # C84c: the RI reservoir never switches itself on inside a rig (ReservoirTests set it explicitly)
 _os.environ["SIG_SM_PILOT"] = "0"   # turnover_plan C84: the spread-maker pilot never switches itself on inside a rig (SMTests set the layer explicitly)
 _os.environ["SIG_TM_PILOT"] = "0"   # day 11 C83: the touch-maker pilot never switches itself on inside a rig (TMTests set the layer explicitly)   # mm_plan C81: the fair-maker pilot never switches itself on inside a rig (FMTests set targets explicitly); set here because `unittest discover tests` imports this module without tests/__init__.py
 import collections
@@ -4223,6 +4224,108 @@ class ReadBudgetTests(EngineCase):
         self.assertEqual(set(row["marks"]), {"60", "300", "1800"})
         self.assertIn(row["outcome"], ("done", "filled", "closed", "cancelled", "expired"))
         self.assertNotIn(bid["id"], eng.lifecycle)
+
+
+class ReservoirTests(EngineCase):
+    """Piero 10:10 Oct 8 (C84c): RI Senate R is a reservoir — the core lot is never offered; the tradable lots rest NO asks at 0.860
+    (clips <= 3k, rule 0 per lot); rebuys at 0.815 / 0.810 / 0.800 for 40/30/30 of what was sold, never above the last sell - 4c,
+    sized to free cash - the 2k guard; the rebuild triggers stop the selling and rebuy to the full size at <= 0.85."""
+
+    def rig(self, cash_above_floor=30_000):
+        fresh_data(layers=dict(position=dict(state="full"), swing=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + cash_above_floor)
+        eng = engine(fake); eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and eng.fair[b.ex] <= 0.10
+                  and eng.meta[b.ex].get("race") != a_config.RI_SENATE_RACE)
+        FAIR[ex] = 0.0065; self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = (0.16, 0.165, 0.1625)                # NO 0.835 / 0.84: the 0.860 ask rests above the touch, the rebuys below it
+        subs = [f"wall:{ex}:no:wA", f"wall:{ex}:no:wB", f"swing:{ex}:no"]
+        eng.ledger.subbooks[ex] = {"inventory": -20_144.0, subs[0]: -11_900.0, subs[1]: -3_100.0, subs[2]: -11_805.0}
+        for s_, avg in zip(subs, (0.85, 0.85, 0.834)):
+            eng.ledger.tranches[s_] = dict(ex=ex, side="no", kind="wall" if "wall" in s_ else "swing", state="open", ts=time.time(), t="x", avg=avg)
+        fake.pos[ex] = -46_949
+        eng.meta[ex]["race"] = a_config.RI_SENATE_RACE; eng.ri_held_cap = 43_539.0   # the RI room: cap at cost + 10k in flight (day 11 §1.4)
+        eng.controls.d["swing"] = dict(a_config.SWING, ex=ex, wall_subs=subs[:2], hold_qty=0.0, stats=dict(sold=0.0, bought=0.0, realized=0.0, cycles=0, legs=[]))
+        r = dict(a_config.RESERVOIR, ex=ex, tradable_subs=subs, mode="trade", fair0=0.0065, since=stamp_(), stats=dict(sold_sh=0.0, bought_sh=0.0, realized=0.0, cycles=0, sold_val=0.0, bought_val=0.0, legs=[]))
+        eng.controls.d["reservoir"] = r
+        eng.res_p10, eng.res_p10_t = 0.80, time.time() + 1e9      # the tape's p10 is pinned under the trigger
+        loop(eng, fake); loop(eng, fake)
+        return fake, eng, ex, subs
+
+    def legs(self, eng, fake, ex, layer):
+        return [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == layer]
+
+    def test_core_never_offered_one_clip_at_086_and_rule0_per_lot(self):
+        fake, eng, ex, subs = self.rig()
+        sells = self.legs(eng, fake, ex, "swingsell")
+        self.assertEqual(len(sells), 1, sells)
+        self.assertAlmostEqual(1 - sells[0]["price"], 0.860, places=3, msg="a NO ask at 0.860 = a YES bid at 0.140")
+        self.assertEqual(sells[0]["qty"], a_config.RESERVOIR["sell_clip"])
+        self.assertEqual(eng.ledger.orders[sells[0]["id"]]["sub"], subs[0], "from the largest tradable lot")
+        self.assertFalse(any(eng.ledger.orders[o["id"]].get("sub") == "inventory" for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders), "the core is never offered")
+        self.assertEqual(self.legs(eng, fake, ex, "wallexit"), [], "the walls' buy-backs retire")
+        self.assertEqual(self.legs(eng, fake, ex, "swing"), [], "nothing sold yet: no rebuy")
+        # rule 0 per lot: a wall lot with entry 0.858 (+0.5c > 0.860) is never offered
+        eng.ledger.tranches[subs[0]]["avg"] = 0.858
+        plan = eng.swing_plan(time.time())[ex]
+        self.assertTrue(all(x["sub"] != subs[0] for x in plan["sells"]), plan["sells"])
+        self.assertTrue(plan["sells"] and plan["sells"][0]["sub"] == subs[2], "the swing lot (0.834) sells instead")
+
+    def test_rebuy_only_what_was_sold_under_the_last_sell_and_the_2k_guard(self):
+        fake, eng, ex, subs = self.rig()
+        sell = self.legs(eng, fake, ex, "swingsell")[0]
+        fake.fill(sell["id"], sell["qty"])                     # 3,000 sold at 0.860
+        loop(eng, fake); loop(eng, fake)
+        r = eng.controls.d["reservoir"]
+        self.assertEqual(r["stats"]["sold_sh"], 3000.0); self.assertAlmostEqual(r["last_sell_px"], 0.860, places=3)
+        self.assertTrue(any("RESERVOIR sold" in e["text"] for e in eng.events))
+        buys = sorted(self.legs(eng, fake, ex, "swing"), key=lambda o: -o["price"])
+        self.assertEqual([round(o["price"], 3) for o in buys], [0.815, 0.81, 0.80])
+        self.assertEqual([o["qty"] for o in buys], [1200, 900, 900], "40 / 30 / 30 of the 3,000 sold")
+        self.assertLessEqual(sum(o["qty"] for o in buys), 3000, "never more than was sold")
+        self.assertTrue(all(o["price"] <= 0.860 - 0.04 + 1e-9 for o in buys), "never above the last sell - 4c")
+        self.assertGreater(eng.reservoir_resting(), 0, "the rebuys are reserved first among entries")
+        # the 2k guard: free 1.5k -> no rebuy
+        cash_was = eng.cash_hist; eng.cash_hist = [a_config.CASH_RESERVE + 1_500]
+        plan = eng.swing_plan(time.time()).get(ex, {})
+        self.assertEqual(plan.get("buys", []), [], "free < 2k: no rebuy")
+        eng.cash_hist = cash_was
+        # a rebuy fill closes the cycle with c per share
+        fake.fill(buys[0]["id"], 1200); fake.fill(buys[1]["id"], 900); fake.fill(buys[2]["id"], 900)
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(r["stats"]["cycles"], 1)
+        self.assertTrue(any("cycle 1:" in e["text"] and "c per share" in e["text"] for e in eng.events))
+
+    def test_rebuild_triggers_stop_selling_and_rebuy_to_full(self):
+        fake, eng, ex, subs = self.rig()
+        self.assertTrue(self.legs(eng, fake, ex, "swingsell"))
+        FAIR[ex] = 0.03                                        # PM fair moved 2.35c from the deploy
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(eng.controls.d["reservoir"]["mode"], "rebuild")
+        self.assertTrue(any("RESERVOIR -> REBUILD" in e["text"] for e in eng.events))
+        self.assertEqual(self.legs(eng, fake, ex, "swingsell"), [], "selling stops")
+        eng.ledger.subbooks[ex][subs[2]] = -5_805.0; fake.pos[ex] = -40_949   # 6,000 missing to the full 46,949
+        loop(eng, fake); loop(eng, fake)
+        buys = self.legs(eng, fake, ex, "swing")
+        self.assertEqual(len(buys), 1, buys)
+        self.assertLessEqual(buys[0]["price"], a_config.RESERVOIR["rebuild_px"] + 1e-9)
+        self.assertEqual(buys[0]["qty"], 6000, "rebuy up to the full size")
+        # the p10 trigger on a fresh rig
+        fake, eng, ex, subs = self.rig()
+        eng.res_p10 = 0.86
+        loop(eng, fake)
+        self.assertEqual(eng.controls.d["reservoir"]["mode"], "rebuild")
+
+    def test_entry_guard_hysteresis(self):
+        fake, eng, ex, subs = self.rig()
+        self.assertEqual(eng.entry_budget(a_config.CASH_RESERVE + 1_900), 0.0)
+        self.assertTrue(eng.entries_off)
+        self.assertEqual(eng.entry_budget(a_config.CASH_RESERVE + 2_500), 0.0, "between 2k and 3k: still off")
+        self.assertGreater(eng.entry_budget(a_config.CASH_RESERVE + 3_000), 0.0, "resumes at 3k")
+        self.assertFalse(eng.entries_off)
 
 
 class FastPathTests(EngineCase):

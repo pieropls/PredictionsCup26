@@ -432,8 +432,7 @@ class MarketBot:
         sw = s.get("swing") or {}                            # day 10 §3: the RI swing legs (sell leg = reduce from the wall / swing subs, buy leg = entry)
         for x in sw.get("sells") or []:
             reduce_buy(x["side"], x["px"], int(x["qty"]), "swingsell", x["sub"], x["ttl"], band=0.0, a2=False)
-        if sw.get("buy"):
-            x = sw["buy"]
+        for x in ([sw["buy"]] if sw.get("buy") else []) + list(sw.get("buys") or []):   # C84c: the reservoir rests several rebuy levels
             out.append(want(x["side"], "buy", x["px"], int(x["qty"]), x["px"], x["px"], 2 * QTY_TOL, "swing", sub=x["sub"], ttl=x["ttl"]))
         for x in s.get("wall_exits") or []:
             q = min(abs(subs.get(x["sub"], 0)), x.get("qty", float("inf")))   # day 10 §3: at most the hold part when the swing owns the slice
