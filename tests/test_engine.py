@@ -4188,7 +4188,7 @@ class ReadBudgetTests(EngineCase):
         import os as os_
         ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
         eng.controls.d["sm_markets"] = [ex]
-        eng.sample_t = {}
+        eng.sample_t = {}; eng.boot_t = 0.0                    # past the 2-min start-up hold on optional reads
         n = eng.book_sampler(time.time())
         self.assertGreaterEqual(n, 1)
         self.assertIn(ex, eng.sm_depth); self.assertIn(ex, eng.tm_depth)
@@ -4211,7 +4211,7 @@ class ReadBudgetTests(EngineCase):
         bid = next(o for o in q if o["side"] == "yes")
         r = eng.lifecycle.get(bid["id"])
         self.assertIsNotNone(r, "an SM order is tracked from placement")
-        self.assertEqual(r["queue_ahead"], 1_000.0, "shares at our level from the latest book sample (the sampler read the fake's 1,000-share touch)")
+        self.assertEqual(r["queue_ahead"], 1_234.0, "shares at our level from the latest book sample (the rig's cached sample; the sampler holds off for 2 min after a start)")
         self.assertIsNotNone(r["mid0"])
         fake.fill(bid["id"], bid["qty"])
         r["t_place"] -= 1801                                   # all three marks are due
@@ -4260,23 +4260,22 @@ class ReservoirTests(EngineCase):
 
     def test_core_never_offered_one_clip_at_086_and_rule0_per_lot(self):
         fake, eng, ex, subs = self.rig()
-        sells = self.legs(eng, fake, ex, "swingsell")
-        self.assertEqual(len(sells), 1, sells)
-        self.assertAlmostEqual(1 - sells[0]["price"], 0.860, places=3, msg="a NO ask at 0.860 = a YES bid at 0.140")
-        self.assertEqual(sells[0]["qty"], a_config.RESERVOIR["sell_clip"])
-        self.assertEqual(eng.ledger.orders[sells[0]["id"]]["sub"], subs[0], "from the largest tradable lot")
+        sells = sorted(self.legs(eng, fake, ex, "swingsell"), key=lambda o: -o["price"])
+        self.assertEqual([round(1 - o["price"], 3) for o in sells], [0.855, 0.86, 0.865], "Piero 15:35 (1a): three NO asks laddered 0.855 / 0.860 / 0.865")
+        self.assertEqual([o["qty"] for o in sells], [3000, 3000, 3000])
+        self.assertTrue(all(eng.ledger.orders[o["id"]]["sub"] in subs for o in sells), "every level from a tradable lot (largest remaining first), never the core")
         self.assertFalse(any(eng.ledger.orders[o["id"]].get("sub") == "inventory" for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders), "the core is never offered")
         self.assertEqual(self.legs(eng, fake, ex, "wallexit"), [], "the walls' buy-backs retire")
         self.assertEqual(self.legs(eng, fake, ex, "swing"), [], "nothing sold yet: no rebuy")
-        # rule 0 per lot: a wall lot with entry 0.858 (+0.5c > 0.860) is never offered
+        # rule 0 per lot: a wall lot with entry 0.858 (+0.5c = 0.863) may only sit at 0.865; the 0.855 / 0.860 levels come from the swing lot
         eng.ledger.tranches[subs[0]]["avg"] = 0.858
         plan = eng.swing_plan(time.time())[ex]
-        self.assertTrue(all(x["sub"] != subs[0] for x in plan["sells"]), plan["sells"])
-        self.assertTrue(plan["sells"] and plan["sells"][0]["sub"] == subs[2], "the swing lot (0.834) sells instead")
+        by_px = {round(x["px"], 3): x["sub"] for x in plan["sells"]}
+        self.assertEqual(by_px.get(0.855), subs[2]); self.assertEqual(by_px.get(0.86), subs[2]); self.assertEqual(by_px.get(0.865), subs[0])
 
     def test_rebuy_only_what_was_sold_under_the_last_sell_and_the_2k_guard(self):
         fake, eng, ex, subs = self.rig()
-        sell = self.legs(eng, fake, ex, "swingsell")[0]
+        sell = next(o for o in self.legs(eng, fake, ex, "swingsell") if abs(1 - o["price"] - 0.860) < 1e-9)
         fake.fill(sell["id"], sell["qty"])                     # 3,000 sold at 0.860
         loop(eng, fake); loop(eng, fake)
         r = eng.controls.d["reservoir"]
@@ -4333,6 +4332,80 @@ class ReservoirTests(EngineCase):
         self.assertEqual(eng.entry_budget(a_config.CASH_RESERVE + 2_500), 0.0, "between 2k and 3k: still off")
         self.assertGreater(eng.entry_budget(a_config.CASH_RESERVE + 3_000), 0.0, "resumes at 3k")
         self.assertFalse(eng.entries_off)
+
+
+class RingWindowTests(EngineCase):
+    """Piero 15:35 Oct 8 (1c): inside a ring window no new TM / SM entries (exits keep running), their reserves drop to what they
+    hold, the allocator puts L0 / L1 first; the TM / SM exit floor is the newest held lot's entry + 0.5c (item 2); a pair-set
+    leg is judged with the pair's net lock."""
+
+    def rig(self):
+        fresh_data(layers=dict(position=dict(state="full"), sm=dict(state="pilot"), tm=dict(state="pilot"), dump=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 60_000)
+        eng = engine(fake); eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        return fake, eng
+
+    def in_window(self, on):
+        self.addCleanup(setattr, f_engine, "RING_WINDOWS", f_engine.RING_WINDOWS)
+        f_engine.RING_WINDOWS = [("00:00", "23:59")] if on else [("00:00", "00:00")]
+
+    def test_no_new_tm_sm_entries_reserves_zero_l0_l1_first(self):
+        fake, eng = self.rig()
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
+        FAIR[ex] = 0.50; self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = eng.px[ex] = (0.46, 0.47, 0.465)
+        eng.controls.d["sm_markets"] = [ex]; eng.sm_depth[ex] = eng.tm_depth[ex] = (time.time() + 1e9, [(0.46, 50_000.0)], [(0.47, 50_000.0)])
+        self.in_window(False)
+        loop(eng, fake); loop(eng, fake)
+        self.assertGreater(eng.sm_reserve() + eng.tm_reserve(), 0)
+        self.in_window(True)
+        self.assertTrue(eng.ring_window(time.time()))
+        self.assertTrue(any("RING WINDOW on" in e["text"] for e in eng.events))
+        self.assertEqual(eng.tm_plan(time.time(), eng.cash_hist[-1], eng.bucket_usage()), {}, "no new TM entries")
+        self.assertEqual([q for qs in eng.sm_plan(time.time(), eng.cash_hist[-1]).values() for q in qs if not q.get("reduce")], [], "no new SM entries")
+        self.assertEqual((eng.tm_reserve(), eng.sm_reserve()), (0.0, 0.0), "reserves drop to what they hold")
+        # an SM lot still exits inside the window
+        eng.ledger.subbooks.setdefault(ex, {})[f"sm:{ex}"] = 500.0; fake.pos[ex] = 500; fake.avg_cost[ex] = 0.46
+        eng.ledger.tranches[f"sm:{ex}"] = dict(ex=ex, side="yes", kind="sm", state="open", ts=time.time(), t="x", avg=0.46)
+        plan = eng.sm_plan(time.time(), eng.cash_hist[-1])
+        self.assertTrue(any(q.get("reduce") for q in plan.get(ex, [])), plan)
+        # the allocator: L0 / L1 before deeper levels in the window
+        def row(i, lname, px, qty, w, edge, l0=False):
+            return (i, False, "x", dict(side="yes", px=px, qty=qty, sub=f"dump:x:yes:{lname}{i}", level=i, edge=edge, arena=False, l0=l0, ttl=600, weight=w, lname=lname, px_rest=None))
+        rows = [row(2, "L3", 0.80, 1000, a_config.ENTRY_WEIGHTS["L3"], 0.09), row(0, "L1", 0.85, 1000, a_config.ENTRY_WEIGHTS["L1"], 0.03)]
+        out, cut, spent = eng.allocate_levels(rows, 1e9, 1e9)
+        self.assertEqual([w["lname"] for _, _, _, w in out], ["L1", "L3"], "L1 ahead of the better-edge L3 inside the window")
+        self.in_window(False)
+        out, cut, spent = eng.allocate_levels(rows, 1e9, 1e9)
+        self.assertEqual([w["lname"] for _, _, _, w in out], ["L3", "L1"], "by expected edge outside it")
+
+    def test_tm_exit_floor_is_the_newest_lot_plus_half_a_cent(self):
+        fake, eng = self.rig()
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
+        FAIR[ex] = 0.50; self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = eng.px[ex] = (0.46, 0.47, 0.465)
+        sub = f"tm:{ex}:yes"
+        eng.ledger.subbooks.setdefault(ex, {})[sub] = 500.0; fake.pos[ex] = 500; fake.avg_cost[ex] = 0.47
+        eng.ledger.tranches[sub] = dict(ex=ex, side="yes", kind="tm", state="open", ts=time.time(), t="x", avg=0.465, last_px=0.485)   # the newest lot was bought at 0.485
+        eng.track_tm(time.time())
+        xs = eng.tm_view.get(ex, [])
+        self.assertTrue(xs and xs[0]["px"] >= 0.485 + 0.005 - 1e-9, xs)
+        # the fill event records the newest entry
+        eng.tm_fill_events([dict(ex=ex, side="yes", action="buy", qty=100.0, price=0.49, layer="tm", realized=0.0, t=stamp_())])
+        self.assertAlmostEqual(eng.ledger.tranches[sub]["last_px"], 0.49, places=3)
+
+    def test_pair_set_leg_judged_with_the_pairs_lock(self):
+        fake, eng = self.rig()
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.1 <= eng.fair[b.ex] <= 0.3)
+        eng.ledger.orders["pA"] = dict(id="pA", bot="pair", layer="set", ex=ex, side="yes", action="buy", price=0.18, qty=100, filled=100.0, cost=18.0, left=0, placed="x", ts=time.time() - 60, closed="x", status="done", sub="pairset:77", note="")
+        eng.ledger.orders["pB"] = dict(id="pB", bot="pair", layer="set", ex="other", side="no", action="buy", price=0.79, qty=100, filled=100.0, cost=79.0, left=0, placed="x", ts=time.time() - 60, closed="x", status="done", sub="pairset:77", note="")
+        eng.ledger.baskets.append(dict(id="77", orders=["pA", "pB"], legs=2, repairs={}))
+        lock = eng.pair_lock("77")
+        self.assertIsNotNone(lock); self.assertAlmostEqual(lock["lock"], 0.03, places=6, msg="1 - (0.18 + 0.79) = +3c per share")
+        self.assertIn("@ 0.180", lock["legs"]); self.assertIn("@ 0.790", lock["legs"])
 
 
 class FastPathTests(EngineCase):

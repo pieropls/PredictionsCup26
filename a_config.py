@@ -284,9 +284,13 @@ SWING_BAND = dict(lo=27_000, hi=42_000, sell_over_entry=0.01, buy_min_edge=0.14,
 # shares (Piero's instruction). Rebuild triggers (stop selling, rebuy to the full size at <= 0.85): 24-h p10 of RI NO prints >= 0.85,
 # PM fair moved >= 2c from the deploy, or Oct 30 00:00 PT. Gate after 48 h: realized >= 0.8k/day -> tradable 40k; < 0.3k/day -> re-tune.
 RESERVOIR = dict(ex="1077", side="no", core_sub="inventory", tradable_subs=["wall:1077:no:w1791342782", "wall:1077:no:w1791342929", "swing:1077:no"],
-                 sell_px=0.860, sell_clip=3_000, rebuy=[[0.815, 0.40], [0.810, 0.30], [0.800, 0.30]], rebuy_under_sell=0.04,
+                 sell_px=0.860, sell_clip=3_000, sell_levels=[[0.855, 3_000], [0.860, 3_000], [0.865, 3_000]],   # Piero 15:35 (1a): asks laddered from 16:00 Oct 8
+                 rebuy=[[0.815, 0.40], [0.810, 0.30], [0.800, 0.30]], rebuy_under_sell=0.04,
                  full_qty=46_949, rebuild_px=0.85, trig_p10=0.85, trig_fair_move=0.02, trig_date="2026-10-30 00:00:00", gate_h=48)
 ENTRY_RESUME_FREE = 3_000       # C84c: once entries stopped under the 2k guard they resume only at 3k free (no flapping: 92 SM placements + 88 cancels in one hour on Oct 8 08:00)
+# Piero 15:35 Oct 8 (1c): the ring-window cash order — 19:30-21:00 and 03:30-06:00 PT no new TM / SM entries (exits keep running, their
+# reserves drop to what they hold); cash goes first to the reservoir's rebuys, then the catcher's L0 / L1 levels, then TM / SM.
+RING_WINDOWS = [("19:30", "21:00"), ("03:30", "06:00")]
 DUMP_BIG_SWEEP_SH, DUMP_BIG_CLIP = 50_000, 4_000   # day 10 §4.2: sides whose 72-h median sweep >= 50k shares get L0/L1/L2 clips up to 4,000 (from 2,000)
 DUMP_V3_WEIGHTS_DAY_BIG = [0.45, 0.30, 0.05, 0.20]   # on those sides L3's share is trimmed to pay for it (L1 0.45, L2 0.30, L3 0.05, L4 0.20)
 # wall layer (Piero's manual pilot, Oct 5 23:40): one big resting order placed by control, with its buy-back, hold and news guard
