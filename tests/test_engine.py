@@ -9,6 +9,7 @@ No network, nothing sent.   python3 -m unittest tests.test_engine
 """
 import os as _os
 _os.environ["SIG_FM_PILOT"] = "0"
+_os.environ["SIG_SM_PILOT"] = "0"   # turnover_plan C84: the spread-maker pilot never switches itself on inside a rig (SMTests set the layer explicitly)
 _os.environ["SIG_TM_PILOT"] = "0"   # day 11 C83: the touch-maker pilot never switches itself on inside a rig (TMTests set the layer explicitly)   # mm_plan C81: the fair-maker pilot never switches itself on inside a rig (FMTests set targets explicitly); set here because `unittest discover tests` imports this module without tests/__init__.py
 import collections
 import contextlib
@@ -205,7 +206,7 @@ class EngineCase(unittest.TestCase):
         fresh_data()
         self.addCleanup(setattr, f_engine, "LIQUIDATE", f_engine.LIQUIDATE)
         f_engine.LIQUIDATE = {}                           # the AK sale (day 4 §3) has its own test
-        for k in ("PNL_READ_S", "ORDERS_READ_S"):         # day 4 §4 read caching has its own test; the rest read fresh each loop
+        for k in ("PNL_READ_S", "ORDERS_READ_S", "FILLS_READ_S", "POSITIONS_READ_S"):   # day 4 §4 / Oct 8 read caching have their own tests; the rigs (no realtime feed) read fresh each loop
             self.addCleanup(setattr, f_engine, k, getattr(f_engine, k))
             setattr(f_engine, k, 0)
         self.out = contextlib.redirect_stdout(io.StringIO())   # the engine narrates every order; keep test output short
@@ -2652,7 +2653,7 @@ class DashV4PayloadTests(EngineCase):
         sd = s["sigday"]
         self.assertTrue(sd["ok"])
         rows = s["strategies4"]
-        self.assertEqual([r["key"] for r in rows], ["dump", "tm", "fm", "swing", "sleeve", "wall", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])   # day 11: the touch maker
+        self.assertEqual([r["key"] for r in rows], ["dump", "tm", "sm", "fm", "swing", "sleeve", "wall", "touch", "scalp", "mm", "sniper", "fatfinger", "longshot", "pairs", "recycler", "release", "position"])   # day 11: the touch maker; turnover_plan: the spread maker
         self.assertEqual(next(r for r in rows if r["key"] == "mm")["trades_today"], 1)
         self.assertAlmostEqual(sum(r["pnl_today"] for r in rows) + sd["drift"], sd["today"], delta=25, msg="Strategies total = Live today")
         self.assertAlmostEqual(sum(h["value_sig"] for h in s["holdings4"]), s["capital4"]["holdings"], places=2, msg="Holdings total = Capital in holdings")
@@ -3967,6 +3968,259 @@ class TMTests(EngineCase):
         self.assertEqual(eng.tm_sizes()["clip"], a_config.TM_CLIP_PILOT)
 
 
+class SMTests(EngineCase):
+    """turnover_plan §1 (C84): the spread maker joins the best bid and the best ask on the bounce universe, keeps each order while it
+    is at the touch or a tick behind, re-pegs >= 2 ticks away, refills a filled side, skews once long (bid a tick lower, the ask
+    an exit under rule 0), holds the rich side at one clip, pulls on PM moves and sweeps, respects +/- 1k, 10k and 10 writes/min;
+    the universe is the bounce ranking from our own tape."""
+
+    def rig(self, fair=0.50, book=(0.48, 0.49, 0.485)):
+        fresh_data(layers=dict(position=dict(state="full"), sm=dict(state="pilot")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 60_000)
+        eng = engine(fake)
+        eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
+        FAIR[ex] = fair
+        self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = eng.px[ex] = book
+        eng.controls.d["sm_markets"] = [ex]
+        eng.sm_depth[ex] = (time.time() + 1e9, [(book[0], 50_000.0)], [(book[1], 50_000.0)])
+        loop(eng, fake); loop(eng, fake)
+        return fake, eng, ex
+
+    def quotes(self, eng, fake, ex, layer=None):
+        return [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] in ((layer,) if layer else ("sm", "smexit"))]
+
+    def test_two_sided_at_the_touch_queue_kept_and_repegged(self):
+        fake, eng, ex = self.rig()
+        q = self.quotes(eng, fake, ex, "sm")
+        self.assertEqual(len(q), 2, q)
+        bid = next(o for o in q if o["side"] == "yes"); ask = next(o for o in q if o["side"] == "no")
+        self.assertAlmostEqual(bid["price"], 0.48, places=3); self.assertAlmostEqual(1 - ask["price"], 0.49, places=3)
+        self.assertEqual((bid["qty"], ask["qty"]), (a_config.SM_CLIP_PILOT, a_config.SM_CLIP_PILOT))
+        self.assertEqual(eng.ledger.orders[bid["id"]].get("ttl"), a_config.SM_TTL_S)
+        self.assertLess(bid["price"], 1 - ask["price"], "never crossing")
+        fake.px[ex] = eng.px[ex] = (0.485, 0.49, 0.4875)      # the bid moved up one tick (our ask is the touch): both orders keep their place
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual({o["id"] for o in self.quotes(eng, fake, ex, "sm")}, {bid["id"], ask["id"]}, "one tick behind the touch: kept (queue)")
+        fake.px[ex] = eng.px[ex] = (0.49, 0.50, 0.495)        # two ticks: re-pegged
+        loop(eng, fake); loop(eng, fake)
+        q = self.quotes(eng, fake, ex, "sm")
+        self.assertEqual(len(q), 2, q)
+        self.assertFalse({o["id"] for o in q} & {bid["id"], ask["id"]})
+        self.assertAlmostEqual(next(o for o in q if o["side"] == "yes")["price"], 0.49, places=3)
+        self.assertAlmostEqual(1 - next(o for o in q if o["side"] == "no")["price"], 0.50, places=3)
+        self.assertIn("quoted", eng.sm_cov)
+
+    def test_fill_skews_the_bid_exits_under_rule0_and_counts_the_round_trip(self):
+        fake, eng, ex = self.rig()
+        bid = next(o for o in self.quotes(eng, fake, ex, "sm") if o["side"] == "yes")
+        fake.fill(bid["id"], bid["qty"])
+        loop(eng, fake); loop(eng, fake); loop(eng, fake)
+        self.assertEqual(eng.sm_inventory(ex), 500.0)
+        self.assertEqual(eng.controls.d["sm_stats"]["entries"], 1)
+        xs = self.quotes(eng, fake, ex, "smexit")
+        self.assertEqual(len(xs), 1, xs)
+        self.assertAlmostEqual(1 - xs[0]["price"], 0.49, places=3, msg="the ask stays at the touch (>= entry 0.48 + 0.5c)")
+        self.assertEqual(xs[0]["qty"], 500)
+        nb = [o for o in self.quotes(eng, fake, ex, "sm") if o["side"] == "yes"]
+        self.assertEqual(len(nb), 1, nb)
+        self.assertAlmostEqual(nb[0]["price"], 0.475, places=3, msg="once long the bid steps a tick lower")
+        # rule 0: the touch ask under entry + 0.5c -> the exit rests at entry + 0.5c
+        fake.px[ex] = eng.px[ex] = (0.47, 0.475, 0.4725)
+        loop(eng, fake); loop(eng, fake)
+        xs = self.quotes(eng, fake, ex, "smexit")
+        self.assertTrue(xs and all(1 - o["price"] >= 0.485 - 1e-9 for o in xs), xs)
+        fake.px[ex] = eng.px[ex] = (0.48, 0.49, 0.485)
+        loop(eng, fake); loop(eng, fake)
+        xs = self.quotes(eng, fake, ex, "smexit")
+        fake.fill(xs[0]["id"], xs[0]["qty"])                   # the round trip
+        loop(eng, fake); loop(eng, fake)
+        self.assertLess(abs(eng.sm_inventory(ex)), 1)
+        st = eng.controls.d["sm_stats"]
+        self.assertEqual((st["round_trips"], st["filled_sh"], st["rt_sh"]), (1, 500.0, 500.0))
+        g = eng.sm_gate(time.time())
+        self.assertIn("round-trip share 100%", g["why"])
+        # the rich side holds at most one clip: long 500 with YES rich vs fair -> no bid
+        FAIR[ex] = 0.47
+        eng.ledger.subbooks.setdefault(ex, {})[f"sm:{ex}"] = 500.0; fake.pos[ex] = 500; fake.avg_cost[ex] = 0.48
+        eng.ledger.tranches[f"sm:{ex}"] = dict(ex=ex, side="yes", kind="sm", state="open", ts=time.time(), t="x", avg=0.48)
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual([o for o in self.quotes(eng, fake, ex, "sm") if o["side"] == "yes"], [], "rich side at one clip: no more bids")
+        self.assertTrue(self.quotes(eng, fake, ex, "smexit"))
+
+    def test_guards_caps_and_write_budget(self):
+        fake, eng, ex = self.rig()
+        self.assertEqual(len(self.quotes(eng, fake, ex)), 2)
+        eng.fair_hist[ex] = [(time.time() - 300, 0.50)]
+        FAIR[ex] = 0.53                                        # a 3c Polymarket move: pulled 5 min
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(self.quotes(eng, fake, ex), [], "pulled on the move")
+        self.assertGreater(eng.sm_block.get(ex, 0), time.time())
+        FAIR[ex] = 0.50; eng.sm_block.pop(ex, None); eng.fair_hist[ex] = []
+        fake.px[ex] = eng.px[ex] = (0.48, 0.49, 0.55)          # a print 6.5c off the touch: a sweep -> pulled 10 min
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(self.quotes(eng, fake, ex), [])
+        self.assertTrue(any("a sweep" in e["text"] for e in eng.events))
+        eng.sm_block.pop(ex, None)
+        fake.px[ex] = eng.px[ex] = (0.48, 0.49, 0.485)
+        # inventory cap: +1k held -> no bid, the exit still quotes
+        eng.ledger.subbooks.setdefault(ex, {})[f"sm:{ex}"] = float(a_config.SM_CAP_SH_PILOT); fake.pos[ex] = a_config.SM_CAP_SH_PILOT; fake.avg_cost[ex] = 0.48
+        eng.ledger.tranches[f"sm:{ex}"] = dict(ex=ex, side="yes", kind="sm", state="open", ts=time.time(), t="x", avg=0.48)
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual([o for o in self.quotes(eng, fake, ex, "sm") if o["side"] == "yes"], [])
+        self.assertTrue(self.quotes(eng, fake, ex, "smexit"))
+        eng.ledger.subbooks.get(ex, {}).pop(f"sm:{ex}", None); eng.ledger.tranches.pop(f"sm:{ex}", None); fake.pos[ex] = 0
+        # the reserve off the top and the write budget
+        self.assertAlmostEqual(eng.sm_reserve(), a_config.SM_CAP_COST_PILOT - eng.sm_cost(), delta=1.0)
+        now = time.time()
+        for i in range(a_config.SM_WRITES_PER_MIN):
+            eng.ledger.orders[f"sw{i}"] = dict(id=f"sw{i}", bot="b", layer="sm", ex="x", side="yes", action="buy", price=0.3, qty=100, filled=0, cost=0.0, left=100,
+                                                 placed=stamp_(), ts=now - 30 + i, closed=None, status="open", sub="sm:x", note="")
+        for o in self.quotes(eng, fake, ex):
+            fake.cancel(o["id"]) if hasattr(fake, "cancel") else None
+        loop(eng, fake)
+        self.assertNotIn(ex, eng.sm_plan(now, eng.cash_hist[-1]), "no write budget: no new quotes")
+
+    def test_touch_maker_steps_aside_in_sm_markets(self):
+        """ideas_backlog #4 (C84): no two of our quotes on the same side and level — the TM never quotes an SM market."""
+        fresh_data(layers=dict(position=dict(state="full"), sm=dict(state="pilot"), tm=dict(state="pilot")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 60_000)
+        eng = engine(fake); eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
+        FAIR[ex] = 0.50; self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = eng.px[ex] = (0.46, 0.47, 0.465)            # 4c under fair: a TM candidate
+        eng.off24[ex] = collections.deque([(time.time(), 1e9)])
+        eng.controls.d["sm_universe"] = dict(day=time.strftime("%Y-%m-%d"), markets=[], stats={})   # no SM market yet (the rig's tape may hold another test's file)
+        loop(eng, fake)                                            # the fair and the book reach the engine
+        self.assertIn((ex, "yes"), {(r[1], r[2]) for r in eng.tm_candidates()})
+        eng.controls.d["sm_markets"] = [ex]
+        self.assertNotIn((ex, "yes"), {(r[1], r[2]) for r in eng.tm_candidates()}, "an SM market: the TM steps aside")
+        eng.controls.d["layers"]["sm"]["state"] = "off"
+        self.assertIn((ex, "yes"), {(r[1], r[2]) for r in eng.tm_candidates()}, "SM off: the TM may quote it again")
+
+    def test_universe_is_the_bounce_ranking_from_the_tape(self):
+        fake, eng, ex = self.rig()
+        import os as os_
+        mk = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.2 <= eng.fair[b.ex] <= 0.8]
+        a, b = mk[0], mk[1]
+        ri = next((e for e, m in eng.meta.items() if m.get("race") in a_config.RI_RACES), None)
+        path = os_.path.join(f_engine.DATA, "intel", "trades", time.strftime("%Y-%m-%d") + ".jsonl")
+        os_.makedirs(os_.path.dirname(path), exist_ok=True)
+        now = time.time()
+        with open(path, "w") as fh:
+            for i in range(60):                                # a: 30 bounces of 1k shares a leg; b: 5; ri: 100 (excluded)
+                for e_, n in ((a, 30), (b, 5), (ri, 100)):
+                    if e_ and i < 2 * n:
+                        fh.write(json.dumps(dict(ex=e_, ts=now - 3600 + i * 10, p=0.50 if i % 2 == 0 else 0.505, q=1000.0, fair=0.5)) + "\n")
+        u = eng.sm_universe_calc(now)
+        self.assertEqual(u["markets"][:2], [a, b], u)
+        self.assertNotIn(ri, u["markets"])
+        self.assertGreaterEqual(u["stats"][a]["bounces"], 25)
+        eng.controls.d.pop("sm_markets", None); eng.controls.d.pop("sm_universe", None)
+        self.assertEqual(eng.sm_universe(now)[:2], [a, b])
+        self.assertTrue(any("SM universe refreshed" in e["text"] for e in eng.events))
+
+
+class ReadBudgetTests(EngineCase):
+    """ideas_backlog (Oct 8): fills are read on a realtime fill / order notification or every 60 s, positions after fills or order
+    reads or every 120 s (prices every loop); optional reads run up to READ_BUDGET - SPARE_KEEP; reads are counted by purpose;
+    the book sampler covers the SM universe + RI Senate R every ~60 s and feeds the depth caches; the order-lifecycle log."""
+
+    def rig(self):
+        fresh_data(layers=dict(position=dict(state="full"), sm=dict(state="pilot")))
+        fake = new_fake(writes_per_min=10_000)
+        base = fake.pnl()
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 60_000)
+        eng = engine(fake); eng.ex.capacity = 6000.0
+        loop(eng, fake)
+        return fake, eng
+
+    def test_fills_and_positions_are_polled_on_events_or_fallback(self):
+        fake, eng = self.rig()
+        for k, v in (("FILLS_READ_S", a_config.FILLS_READ_S), ("POSITIONS_READ_S", a_config.POSITIONS_READ_S), ("ORDERS_READ_S", a_config.ORDERS_READ_S), ("PNL_READ_S", a_config.PNL_READ_S)):
+            self.addCleanup(setattr, f_engine, k, getattr(f_engine, k)); setattr(f_engine, k, v)
+        eng.open_wsig = (eng.ex.sent_orders, len(eng.ex.gone), len(eng.ex.cancelling)); eng.open_read_t = time.time()
+        n_f, n_p = [0], [0]
+        real_f, real_p = fake.fills, fake.positions_raw
+        fake.fills = lambda *a, **k: (n_f.__setitem__(0, n_f[0] + 1), real_f(*a, **k))[1]
+        fake.positions_raw = lambda *a, **k: (n_p.__setitem__(0, n_p[0] + 1), real_p(*a, **k))[1]
+        loop(eng, fake)                                        # the first loop after the switch: reads (fallback timer starts)
+        f0, p0 = n_f[0], n_p[0]
+        eng.last_fill_exs = set()
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(n_f[0], f0, "no notification, under 60 s: fills not polled")
+        self.assertEqual(n_p[0], p0, "positions not polled either (no fills, no order read)")
+        eng.rt_event("fills", set(), time.time())              # a fill notification wakes the fills read, then positions
+        loop(eng, fake)
+        self.assertEqual((n_f[0], n_p[0]), (f0 + 1, p0 + 1))
+        eng.fills_read_t -= a_config.FILLS_READ_S + 1          # the 60-s fallback
+        loop(eng, fake)
+        self.assertEqual(n_f[0], f0 + 2)
+        self.assertEqual(a_config.READ_BUDGET, 95)
+
+    def test_reads_by_purpose_and_the_hourly_line(self):
+        fake, eng = self.rig()
+        import importlib.util as ilu
+        spec = ilu.spec_from_file_location("b_sig_real", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "b_sig.py")); b_sig = ilu.module_from_spec(spec); spec.loader.exec_module(b_sig)
+        b_sig._calls.append((time.time(), "read", 0.1, 200, "prices")); b_sig._calls.append((time.time(), "read", 0.1, 200, "book"))
+        rb = b_sig.reads_by_purpose(60)
+        self.assertGreaterEqual(rb.get("prices", 0), 1); self.assertGreaterEqual(rb.get("book", 0), 1)
+        self.assertEqual(b_sig.spare_reads.__defaults__, (None,), "optional reads run up to READ_BUDGET - SPARE_KEEP")
+        self.assertEqual(b_sig._purpose("/tournaments/x/portfolio/fills"), "fills"); self.assertEqual(b_sig._purpose("/exchanges/12/orderbook"), "book")
+        eng.reads_report_t = time.time() - 3601
+        loop(eng, fake)
+        self.assertTrue(any(e["text"].startswith("READS last 60 min") for e in eng.events))
+
+    def test_book_sampler_writes_samples_and_feeds_the_depth_caches(self):
+        fake, eng = self.rig()
+        import os as os_
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
+        eng.controls.d["sm_markets"] = [ex]
+        eng.sample_t = {}
+        n = eng.book_sampler(time.time())
+        self.assertGreaterEqual(n, 1)
+        self.assertIn(ex, eng.sm_depth); self.assertIn(ex, eng.tm_depth)
+        path = os_.path.join(f_engine.DATA, "intel", "books", time.strftime("%Y-%m-%d") + ".jsonl")
+        rows = [json.loads(l) for l in open(path)]
+        self.assertTrue(any(r["ex"] == ex and r["bids"] and r["asks"] for r in rows), rows[-1])
+        self.assertEqual(eng.book_sampler(time.time()), 0, "sampled within the last 60 s: nothing due")
+
+    def test_order_lifecycle_log(self):
+        fake, eng = self.rig()
+        import os as os_
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
+        FAIR[ex] = 0.50; self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = eng.px[ex] = (0.48, 0.49, 0.485)
+        eng.controls.d["sm_markets"] = [ex]
+        eng.sm_depth[ex] = eng.tm_depth[ex] = (time.time(), [(0.48, 1_234.0)], [(0.49, 2_000.0)])
+        loop(eng, fake); loop(eng, fake)
+        q = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "sm"]
+        self.assertTrue(q)
+        bid = next(o for o in q if o["side"] == "yes")
+        r = eng.lifecycle.get(bid["id"])
+        self.assertIsNotNone(r, "an SM order is tracked from placement")
+        self.assertEqual(r["queue_ahead"], 1_000.0, "shares at our level from the latest book sample (the sampler read the fake's 1,000-share touch)")
+        self.assertIsNotNone(r["mid0"])
+        fake.fill(bid["id"], bid["qty"])
+        r["t_place"] -= 1801                                   # all three marks are due
+        loop(eng, fake); loop(eng, fake)
+        errs = [e["text"] for e in eng.events if e["text"].startswith("lifecycle")]
+        self.assertEqual(errs, [], errs)
+        path = os_.path.join(f_engine.DATA, "intel", "orders", time.strftime("%Y-%m-%d", time.localtime(r["t_place"])) + ".jsonl")
+        rows = [json.loads(l) for l in open(path)]
+        row = next(x for x in rows if x["id"] == bid["id"])
+        self.assertEqual(set(row["marks"]), {"60", "300", "1800"})
+        self.assertIn(row["outcome"], ("done", "filled", "closed", "cancelled", "expired"))
+        self.assertNotIn(bid["id"], eng.lifecycle)
+
+
 class FastPathTests(EngineCase):
     """mm_plan §2 / §8.1: on a SIG fill notification the fast step reads the fills once, re-bids a filled L0 level at the new
     best bid while it is >= 5c under fair (<= 3 per side per 10 min), re-quotes a filled FM side, and pulls a market's FM
@@ -4202,6 +4456,32 @@ class SwingTests(EngineCase):
 
     def legs(self, eng, fake, ex, layer):
         return [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == layer]
+
+    def test_band_trades_the_no_inventory_at_the_touch(self):
+        """turnover_plan §2.1: with the band on, a NO ask rests at the NO touch ask while held > lo (>= entry + 1c), a NO bid at the
+        NO touch bid while held < hi and >= 14c under fair; clips 1k; the queue is kept within a tick."""
+        fake, eng, ex = self.rig()
+        eng.controls.d["swing"]["band"] = dict(a_config.SWING_BAND, lo=15_000, hi=25_000)
+        loop(eng, fake); loop(eng, fake)
+        sells = self.legs(eng, fake, ex, "swingsell")
+        self.assertEqual(len(sells), 1, sells)
+        self.assertAlmostEqual(1 - sells[0]["price"], 0.865, places=3, msg="NO ask at the NO touch ask (0.865 >= 0.85 + 1c)")
+        self.assertEqual(sells[0]["qty"], a_config.SWING_BAND["clip"])
+        self.assertEqual(self.legs(eng, fake, ex, "swing"), [], "NO bid 0.86 is 13.35c under fair NO: no buy")
+        FAIR[ex] = 0.0
+        loop(eng, fake); loop(eng, fake)
+        buys = self.legs(eng, fake, ex, "swing")
+        self.assertEqual(len(buys), 1, buys)
+        self.assertAlmostEqual(buys[0]["price"], 0.86, places=3, msg="NO bid at the NO touch bid, 14c under fair")
+        self.assertLess(buys[0]["price"], 1 - sells[0]["price"], "the bid stays under our ask")
+        fake.px[ex] = (0.13, 0.135, 0.1325)                   # NO touch 0.865 / 0.87: one tick: both legs keep their place
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual({o["id"] for o in self.legs(eng, fake, ex, "swingsell")}, {sells[0]["id"]})
+        self.assertEqual({o["id"] for o in self.legs(eng, fake, ex, "swing")}, {buys[0]["id"]})
+        # under lo: no sells; at hi: no buys
+        eng.controls.d["swing"]["band"] = dict(a_config.SWING_BAND, lo=25_000, hi=25_000)
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(self.legs(eng, fake, ex, "swingsell"), [])
 
     def test_sell_leg_buy_leg_hold_part_and_guards(self):
         fake, eng, ex = self.rig()

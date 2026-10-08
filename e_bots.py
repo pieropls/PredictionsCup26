@@ -419,6 +419,11 @@ class MarketBot:
             q = abs(subs.get(x["sub"], 0))
             if q >= MIN_QTY:
                 reduce_buy(x["side"], x["px"], int(q), "tmexit", x["sub"], TM_TTL_S, band=0.0, a2=False)
+        for x in s.get("sm") or []:                          # turnover_plan §1: the spread maker's two quotes at the touch (the reducing side is an exit under rule 0)
+            if x.get("reduce"):
+                reduce_buy(x["held"], x["sell_px"], int(x["qty"]), "smexit", x["sub"], x["ttl"], band=0.0, a2=False)
+            else:
+                out.append(want(x["side"], "buy", x["px"], int(x["qty"]), x["px"], x["px"], QTY_TOL, "sm", sub=x["sub"], ttl=x["ttl"]))
         for x in s.get("fm") or []:                          # mm_plan §1: the fair maker's quotes (entries at fair ± e; the reducing side is an exit under rule 0)
             if x.get("reduce"):
                 reduce_buy(x["held"], x["sell_px"], int(x["qty"]), "fmexit", x["sub"], x["ttl"], band=0.0, a2=False)

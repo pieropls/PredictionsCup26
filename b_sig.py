@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-from a_config import BASE_URL, API_KEY, TOURNAMENT, DRY_RUN, WRITES_PER_MIN, READ_TIMEOUT_S
+from a_config import BASE_URL, API_KEY, TOURNAMENT, DRY_RUN, WRITES_PER_MIN, READ_TIMEOUT_S, READ_BUDGET, SPARE_KEEP
 
 
 class RateLimited(Exception):
@@ -41,17 +41,18 @@ def _req(method, path, timeout=None, **kw):
                 raise RuntimeError("write budget exhausted")
             _writes.append(time.time())
     kind = "read" if method == "GET" else "write"
+    purpose = _purpose(path)
     for attempt in range(3 if method == "GET" else 1):          # reads retry; writes are reconciled next loop instead
         t0 = time.time()
         try:
             r = S.request(method, BASE_URL + path, timeout=timeout, **kw)
         except (requests.Timeout, requests.ConnectionError):
-            _calls.append((t0, kind, time.time() - t0, 0))
+            _calls.append((t0, kind, time.time() - t0, 0, purpose))
             if method != "GET" or attempt == 2:
                 raise
             time.sleep(1 + attempt)
             continue
-        _calls.append((t0, kind, time.time() - t0, r.status_code))
+        _calls.append((t0, kind, time.time() - t0, r.status_code, purpose))
         if r.status_code < 500 or method != "GET":
             break
         time.sleep(1 + attempt)
@@ -64,6 +65,39 @@ def _req(method, path, timeout=None, **kw):
     if not r.ok:
         raise RuntimeError(f"{method} {path} -> {r.status_code} {r.text[:300]}")
     return r.json() if r.content else {}
+
+
+def _purpose(path):
+    """A read's purpose, for the per-minute breakdown (ideas_backlog: report reads by purpose before / after the polling cuts)."""
+    if "/exchanges/prices" in path:
+        return "prices"
+    if "/orderbook" in path:
+        return "book"
+    if "/portfolio/fills" in path:
+        return "fills"
+    if "/portfolio/positions" in path:
+        return "positions"
+    if "/portfolio/pnl" in path:
+        return "pnl"
+    if "/trades" in path:
+        return "tape"
+    if "/leaderboard" in path:
+        return "leaders"
+    if "/orders" in path:
+        return "orders"
+    if "/exchanges" in path:
+        return "markets"
+    return "other"
+
+
+def reads_by_purpose(window_s=60):
+    """{purpose: reads per minute} over the window."""
+    now, out = time.time(), {}
+    for c in list(_calls):
+        if c[1] == "read" and c[0] >= now - window_s:
+            k = c[4] if len(c) > 4 else "other"
+            out[k] = out.get(k, 0) + 1
+    return {k: round(v * 60 / window_s, 1) for k, v in sorted(out.items(), key=lambda kv: -kv[1])}
 
 
 def _pages(path, params, timeout=None):
@@ -87,7 +121,8 @@ def health(window_s=600):
                          bad_rate=round(bad / len(xs), 3) if xs else 0.0)
     out["reads_last_min"] = sum(1 for c in calls if c[1] == "read" and c[0] >= now - 60)
     out["writes_last_min"] = WRITES_PER_MIN - writes_left()
-    out["read_limit"], out["write_limit"] = 100, 30
+    out["read_limit"], out["write_limit"] = READ_BUDGET, 30
+    out["reads_by_purpose"] = reads_by_purpose(60)
     out["throttled"] = sum(1 for t in list(_throttled) if t >= now - window_s)
     out["last_ok"] = max((c[0] + c[2] for c in calls if 0 < c[3] < 500), default=None)
     return out
@@ -98,11 +133,11 @@ def reads_last_min():
     return sum(1 for x in list(_calls) if x[1] == "read" and x[0] >= now - 60)
 
 
-def spare_reads(keep=30):
-    """Day 2 §6: optional reads (queue and depth reads, pair books, the market scan, leaders) go only while >= keep of
-    SIG's 100 reads a minute are left, so the loop's own reads (orders, positions, fills, prices: fills and exits) never
-    hit a 429."""
-    return reads_last_min() <= 100 - keep
+def spare_reads(keep=None):
+    """Day 2 §6: optional reads (queue and depth reads, pair books, the market scan, leaders, the book sampler) go only while
+    >= keep of our READ_BUDGET (95/min since Oct 8, Piero's call) is left, so the loop's own reads never hit a 429."""
+    keep = SPARE_KEEP if keep is None else keep
+    return reads_last_min() <= READ_BUDGET - keep
 
 
 def order(oid):

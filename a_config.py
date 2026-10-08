@@ -154,7 +154,8 @@ LAYER_CAPS = {
     "sleeve": {"notional": (10_000, 10_000, 10_000)},         # day 9 (Piero 18:50): settlement holds, 10k at cost in total
     "swing": {"notional": (15_000, 15_000, 15_000)},          # day 10 §3: the RI swing slice
     "fm": {"notional": (5_000, 5_000, 10_000)},
-    "tm": {"notional": (8_000, 8_000, 20_000)},               # day 11 §2: the touch maker — 8k at cost in the pilot, 20k at full size               # mm_plan §1/§4: the fair maker — 5k at cost in the pilot, 10k after the gate
+    "tm": {"notional": (8_000, 8_000, 20_000)},               # day 11 §2: the touch maker — 8k at cost in the pilot, 20k at full size
+    "sm": {"notional": (10_000, 10_000, 20_000)},             # turnover_plan §1: the spread maker — 10k at cost in the pilot, 20k after the gate               # mm_plan §1/§4: the fair maker — 5k at cost in the pilot, 10k after the gate
 }
 # fat-finger catcher (morning_plan Part 1, day 2 §4): cheap deep bids on every side worth a lot
 FAT_LEVELS = [0.12]             # Oct 3 (Piero): only the 0.12 level on each side (0.08 / 0.05: 0 fills since day 1)
@@ -207,11 +208,11 @@ SWING_TTL_S, WALL_HOLD_MIN_FREE, WALL_RECYCLE_EXIT_C = 3600, 30_000, 0.02   # da
 SLEEVE_TARGETS = [dict(ex="1075", side="no", limit=0.865, cap=5_000, name="Delaware Senate R NO"),   # buy NO <= 0.865, 5k at cost
                   dict(ex="963", side="no", limit=0.890, cap=5_000, name="Montana Senate D NO")]     # buy NO <= 0.89, 5k at cost   # day 9 §9.4 (Piero): +10k at cost on RI Senate beyond the Oct 6 holdings, only on levels >= 15c under fair
 DUMP_L0_MIN_FAIR, DUMP_L0_GAP, DUMP_L0_CLIP = 0.90, 0.05, 2_000   # day 7 §2.1: L0 joins the SIG best bid when it sits >= 5c under a >= 90% fair
-DUMP_L0_REFILLS, DUMP_L0_WINDOW_S = 5, 600            # mm_plan §8.2 (C82): at most 5 refills per side per 10 min while the tranche is open (was 3)
+DUMP_L0_REFILLS, DUMP_L0_WINDOW_S = 5, 600            # mm_plan §8.2 (C82, live Oct 8 01:1x): at most 5 refills per side per 10 min while the tranche is open (was 3)
 UNCOVERED_LOG_S = 30            # §1.3: an eligible side without its level for > 30 s is logged
 # Oct 5 22:50 (Piero): hard cash guards after the floor breach
 ENTRY_CASH_MULT, ENTRY_NEAR_TOUCH, ENTRY_NEAR_WEIGHT, ENTRY_MIN_FREE = 1.5, 0.01, 3.0, 2_000   # day 8 §2: sum(resting cost x weight) <= 1.5 x free cash above the floor; < 2k free: none
-ENTRY_WEIGHTS = dict(L0=1.0, L1=0.5, L2=0.3, L3=0.15, L4=0.15, scalp=1.0, wall=1.0, fatfinger=0.05, longshot=0.05, tm=1.0, fm=1.0)   # day 11 §2: TM weight 1.0 after L0, before the FM and L1-L4
+ENTRY_WEIGHTS = dict(L0=1.0, L1=0.5, L2=0.3, L3=0.15, L4=0.15, scalp=1.0, wall=1.0, fatfinger=0.05, longshot=0.05, tm=1.0, fm=1.0, sm=1.0)   # day 11 §2: TM weight 1.0 after L0, before the FM and L1-L4
 DUMP_REACH = dict(L0=1.0, L1=0.40, L2=0.05, L3=0.10, L4=0.014)    # day 10 §4.2 (C80): re-weighted from 24 h of live fills — L0 1.47 fills per level-hour (160x the assumption: it rests only during sweeps), L2 5x below its assumption, L3 and L1 within 2x (kept)
 BUDGET_K_MAX, BUDGET_K_MIN, BUDGET_K_STEP = 2.0, 1.0, 0.5          # day 9 §2: k x free; k_max from the replay (set before C71's build)
 BUDGET_K_TABLE = [(20_000, 3.0), (15_000, 3.0), (0, 2.0)]          # day 9 §9.2: k_max by free cash above the floor (>= 20k: 3.0; 15-20k: the replay-passing value; below: 2.0)
@@ -219,10 +220,10 @@ BUDGET_K_TIER_HYST = 1_000                                         # move up a t
 BUDGET_K_DOWN_S, BUDGET_K_UP_S, BUDGET_K_PEAK_DOWN, BUDGET_K_PEAK_UP = 1800, 7200, 0.70, 0.40   # -0.5 after 30 min > 70% or constrained; +0.5 after 2 h < 40%
 DUMP_WANT_BAND_LO, DUMP_WANT_BAND_HI, DUMP_GAP_LOG_S = 0.01, 0.005, 30   # day 9 §4: a resting level within [px - 1c, px + 0.5c] is kept; gaps > 30 s logged with cause   # day 8 §2 (replay reach 40/25/10/1%; ours since C64: L0 15%, L1 0.1%, L2-L3 0)
 DUMP_NEAR_TTL_S, DUMP_NEAR_GAP = 1200, 0.02      # L0 and levels within 2c of the touch: 20-min TTL (make-before-break); deeper 60 min
-DUMP_L0_BUDGET = 15_000         # mm_plan §8.2 (C82): L0 holds <= 15k at cost across all sides (was 8k); refills only under it
+DUMP_L0_BUDGET = 15_000         # mm_plan §8.2 (C82, live Oct 8 01:1x): L0 holds <= 15k at cost across all sides (was 8k); refills only under it
 # mm_plan §2 / §8.1 (C82): the event-driven fast path — on a SIG fill notification act within ~1 s (one fills read, one book read, one batch write),
 # before the full loop; reconcile on the next loop; a mismatch sends that market back to the slow path for 10 min
-FAST_PATH_ON, FAST_REARMS_PER_10M, FAST_WRITES_RESERVE, FAST_SLOW_S, FAST_PM_MOVE_C = True, 3, 5, 600, 0.02   # mm_plan §8 (C82): the fast path ON
+FAST_PATH_ON, FAST_REARMS_PER_10M, FAST_WRITES_RESERVE, FAST_SLOW_S, FAST_PM_MOVE_C = True, 3, 5, 600, 0.02   # mm_plan §8 (C82, live Oct 8 01:1x): the fast path ON
 REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2 = 15_000, 0.07, 0.10   # rebuild free cash to 15k: engine lots above entry + 0.5c at the bid, lowest gap first
 REBUILD_MARGIN, REBUILD_MARGIN_GAP = -0.01, 0.05 # Piero 23:00: lots <= 5c under fair may go down to entry - 1c for the rebuild
 REBUILD_EXC_FREE = 10_000       # day 8 §1.5: that exception runs only while free cash above the floor is under 10k
@@ -259,6 +260,23 @@ TM_CAP_LOG_STEP = 500           # TM cap = base (8k pilot / 20k full) + max(0, f
 TM_RT_HI, TM_RT_LO, TM_RT_GRACE_S = 0.50, 0.20, 1800   # per-market 24-h round-trip share (shares sold / bought, buys older than 30 min): >= 50% -> clip 1k & cap 3k; < 20% -> cap 1k
 TM_CLIP_HI, TM_INV_HI, TM_INV_LO = 1_000, 3_000, 1_000
 ROTATION_EDGE_LEFT, ROTATION_FUND_EDGE, ROTATION_MARKETS = 0.06, 0.08, 3   # turnover_plan §2.2: under BUFFER, lots with < 6c left to settlement rest an ask AT THE TOUCH (not a market order) at >= entry + 0.5c (never >= 8c under fair; never manual / wall / sleeve / pair-set / swing / fm / recycle lots), lowest edge first, only to fund cut entries with >= 8c edge
+
+# turnover_plan §1 (C84): the spread maker (SM) — two-sided quoting at the touch on the bounciest markets, queue kept, refilled on fill
+SM_CLIP, SM_CLIP_PILOT = 1_000, 500            # clip = min(this, 30% of the touch level's size)
+SM_DEPTH_SHARE, SM_MIN_QTY = 0.30, 100
+SM_CAP_SH, SM_CAP_SH_PILOT = 2_000, 1_000      # inventory per market: +/- 1k shares in the pilot, +/- 2k after the gate
+SM_CAP_COST, SM_CAP_COST_PILOT = 20_000, 10_000   # capital at cost
+SM_MARKETS, SM_MARKETS_PILOT = 40, 20          # the top N by 24-h bounces x matched shares from our own tape, refreshed daily
+SM_FAIR_LO, SM_FAIR_HI = 0.05, 0.95            # never a sweep market (fair outside 5-95%), never RI, never an FM target
+SM_TTL_S, SM_REPEG_TICKS = 1200, 2             # 20-min expiry; keep the order at the touch or one tick behind, re-peg >= 2 ticks away
+SM_WRITES_PER_MIN = 10                         # batched refills; cancels only for re-pegs and pulls
+SM_NEWS_C, SM_NEWS_WINDOW_S, SM_REQUOTE_S = 0.02, 600, 300   # pull on a 2c / 10 min Polymarket move, back 5 min after
+SM_SWEEP_C, SM_SWEEP_HOLD_S = 0.05, 600        # pull on any SIG print >= 5c from the touch (a sweep is the catcher's job), 10 min
+SM_GLIDE_START = FM_GLIDE_START                # inventory -> 0 from Nov 2 17:00 PT; no SM from a state's poll close - 10 min
+SM_DEPTH_CACHE_S = 300
+SM_GATE_RT, SM_GATE_PER_RT, SM_GATE_MO30 = 0.40, 0.003, -0.005   # gates: round-trip share >= 40% of filled shares, realized > 0 and >= +0.3c per round-trip share, 30-min mark-out vs the SIG mid >= -0.5c, writes within budget, no I2 trims
+# turnover_plan §2.1: the RI Senate R band replaces the fixed swing legs — trade the NO inventory inside [27k, 42k] shares at the touch
+SWING_BAND = dict(lo=27_000, hi=42_000, sell_over_entry=0.01, buy_min_edge=0.14, clip=1_000)
 DUMP_BIG_SWEEP_SH, DUMP_BIG_CLIP = 50_000, 4_000   # day 10 §4.2: sides whose 72-h median sweep >= 50k shares get L0/L1/L2 clips up to 4,000 (from 2,000)
 DUMP_V3_WEIGHTS_DAY_BIG = [0.45, 0.30, 0.05, 0.20]   # on those sides L3's share is trimmed to pay for it (L1 0.45, L2 0.30, L3 0.05, L4 0.20)
 # wall layer (Piero's manual pilot, Oct 5 23:40): one big resting order placed by control, with its buy-back, hold and news guard
@@ -319,12 +337,20 @@ RELEASE_MAX_COST = 0.05         # day 4 §3 (release on demand): a holding is re
 RELEASE_QUIET_HOURS = (7, 8)    # no release 07:00-08:00 PT (Piero's daily review sees the book untouched)
 LIQUIDATE = {"AK-GOV-D": dict(slices=3, over_fair=0.01)}   # day 4 §3 (Piero): the day-1 AK NO sold at max(fair + 1c, SIG bid)
 # day 4 §4 reads
-PNL_READ_S = 60                 # /portfolio/pnl every 60 s (was every loop)
-ORDERS_READ_S = 30              # open orders: after our own writes or fills, else a full read every 30 s
+PNL_READ_S = 150                # ideas_backlog (Oct 8): /portfolio/pnl every 150 s as a fallback (every loop while cash is near the floor)
+ORDERS_READ_S = 150             # open orders: after our own writes or fills / order notifications, else a full read every 150 s (was 30)
 PRICE_ROTATE = 100              # prices: markets with our orders/holdings every loop; the rest rotate, one read (100) a loop
 LEADERS_EVERY_S = 900           # leaders logger every 15 min (was 10)
 LEADERS_DAY_EVERY_S, JUMP_MIN = 300, 1_000   # day 6 §6: the daily board every 5 min; a gain >= 1k between reads is a jump
 TAPE_MIN_PER_MIN = 6            # tape collector: guaranteed 6 reads/min
+# ideas_backlog (Piero Oct 8 00:50): the read budget may go up to 95/min; the 429 backoff stays. Polling the realtime feed already
+# covers is cut: fills are read on a fill / order notification (else every 60 s), positions after fills (else every 120 s).
+READ_BUDGET = 95                # SIG reads per minute we allow ourselves (SIG's limit is 100)
+SPARE_KEEP = 20                 # optional reads (depth, tape, sampler, pairs, leaders) run while reads_last_min <= READ_BUDGET - SPARE_KEEP
+FILLS_READ_S, POSITIONS_READ_S = 60, 120
+SAMPLER_EVERY_S, SAMPLER_PER_LOOP, SAMPLER_DEPTH = 60, 6, 5   # book sampler: the SM universe + RI Senate R, depth at the touch +/- 2 ticks, every ~60 s each, data/intel/books/
+LIFECYCLE_LAYERS = ("sm", "smexit", "tm", "tmexit")            # order-lifecycle log (+ dump L0 levels): queue ahead at placement, time to fill / expiry, mid and fair at +1/5/30 min, data/intel/orders/
+LIFECYCLE_MARKS_S = (60, 300, 1800)
 BACKOFF_429_S, BACKOFF_LOOP_S = 120, 20.0   # after a 429: 20 s loops for 2 min
 
 # A7. files ---------------------------------------------------------------------------------------------------------
