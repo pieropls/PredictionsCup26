@@ -3698,8 +3698,8 @@ class Engine:
         """ERR events in the last 10 min (the events carry a same-day HH:MM:SS stamp)."""
         n, lt = 0, time.localtime(now)
         for e in self.events[-400:]:
-            if e.get("kind") != "ERR":
-                continue
+            if e.get("kind") != "ERR" or "429" in str(e.get("text", "")) or "RATE_LIMITED" in str(e.get("text", "")):
+                continue                                    # rate-limit answers count under api_errors, not here
             try:
                 hh, mm, ss = (int(x) for x in str(e.get("t", "")).split(":"))
             except ValueError:
