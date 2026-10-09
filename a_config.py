@@ -291,12 +291,12 @@ RESERVOIR_TRIG_DATE = "2026-10-30 00:00:00"
 # 24-h p10 of NO prints >= trig_p10, PM fair moved >= 2c from the deploy, or Oct 30 00:00 PT.
 RESERVOIRS = {
     # RI Senate R (resized): core = the 10,000 highest-cost inventory lots; ~37k tradable — swing + the other inventory lots at 0.850, walls at 0.855
-    "1077": dict(ex="1077", side="no", core_sub="inventory", core_qty=0, ver="16:50",
-                 # Piero 16:50 Oct 8: a partial unwind — 20,000 NO offered as passive asks at 0.845 (>= the position average 0.840), joining the touch,
-                 # clips <= 5k, never taking; the other ~27,000 held (the walls included: their own buy-backs stay retired)
+    "1077": dict(ex="1077", side="no", core_sub="inventory", core_qty=0, ver="17:15",
+                 # Piero 17:15 Oct 8: after the immediate 20,000 sale at 0.840 (the 'sell_now' control), 15,000 NO rest at 0.845 joining the touch
+                 # (queue kept, clips <= 5k); the rest (~12,093 incl. both walls) held, not offered; rebuys 0.820 / 0.815 / 0.810 only up to what was sold
                  offers=[["swing:1077:no", 0.845], ["inventory", 0.845]], hold_subs=["wall:1077:no:w1791342782", "wall:1077:no:w1791342929"],
-                 max_out=20_000, join_touch=True,
-                 clip=5_000, rebuy=[[0.820, 0.40], [0.815, 0.30], [0.810, 0.30]], rebuy_under_sell=0.03,
+                 rest_qty=15_000, join_touch=True,
+                 clip=5_000, rebuy=[[0.820, 0.40], [0.815, 0.30], [0.810, 0.30]], rebuy_under_sell=0.02,
                  full_qty=46_949, rebuild_px=0.85, trig_p10=0.85, trig_fair_move=0.02, trig_date=RESERVOIR_TRIG_DATE, gate_h=48),
     # Delaware Senate R and RI Governor R (the 10:17 study): levels from the last 72 h of tape — sell at p80 0.880 (>= entry 0.870 + 1c), rebuy 3c under it (p20 0.85-0.86)
     "1075": dict(ex="1075", side="no", core_sub="inventory", core_qty=0, offers=[["swing:1075:no", 0.880], ["inventory", 0.880]],

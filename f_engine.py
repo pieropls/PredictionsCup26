@@ -799,6 +799,10 @@ class Engine:
             self.feed_report(now)                           # C86: the markets feed's 30-min line
         except Exception as err:
             self.event("ERR", f"feed report: {err!r}")
+        try:
+            self.run_sell_now(now)                          # Piero 17:15: an immediate fill-or-cancel sale, when one is queued
+        except Exception as err:
+            self.event("ERR", f"sell_now: {err!r}")
         self.controller(now)
         kappa, _ = self.kappa()
         used = self.bucket_usage()
@@ -4856,6 +4860,68 @@ class Engine:
         st = r.get("stats") or {}
         return max(0.0, float(st.get("sold_sh") or 0) - float(st.get("bought_sh") or 0))
 
+    def run_sell_now(self, now):
+        """Piero 17:15 Oct 8: run a 'sell_now' instruction — cancel the market's resting reservoir asks, send the clips (limit buy of the
+        complement at 1 - px: never worse than px), cancel whatever did not fill once its TTL passed (not chased, not left resting), then log
+        the fills with SIG's position average before / after and the free cash right after. Piero's order: the per-lot rule 0 is his call
+        here (the sale is at the position average)."""
+        c = self.controls
+        sn = c.d.get("sell_now") or {}
+        if sn.get("state") not in ("pending", "sent"):
+            return
+        ex, side = str(sn["ex"]), sn["side"]
+        close = "yes" if side == "no" else "no"
+        buy_px = round(1 - float(sn["px"]), 3)
+        if sn["state"] == "pending":
+            r = self.reservoirs().get(ex) or {}
+            subs = sn.get("subs") or [sub for sub, _ in (r.get("offers") or [])] or ["inventory"]
+            books = self.ledger.subbooks.get(ex, {})
+            for o in list(self.open):                       # the resting reservoir asks go first (no oversell of the same lots)
+                rec = self.ledger.orders.get(o["id"]) or {}
+                if o["ex"] == ex and rec.get("layer") == "swingsell" and o["id"] not in self.ex.cancelling:
+                    self.ex.cancel(o, reason="sell_now: resting asks pulled first", front=True)
+            self.ex.step_cancels()
+            left, items = int(sn["qty"]), []
+            for sub in subs:
+                q = int(abs(books.get(sub, 0.0))) if (books.get(sub, 0.0) < 0) == (side == "no") else 0
+                while q >= MIN_QTY and left >= MIN_QTY:
+                    take = int(min(q, left, sn["clip"]))
+                    items.append((self.owner[ex].name, sub, "swingsell", (ex, close, "buy", buy_px, take)))
+                    q -= take; left -= take
+            row = (self.book.get(ex) or {}).get("row") or {}
+            sn.update(state="sent", sent_t=now, avg_before=row.get("avgCost"), held_before=(self.book.get(ex) or {}).get("pos"),
+                      free_before=self.free_cash(), sent_qty=sum(it[3][4] for it in items))
+            with c.lock:
+                c.d["sell_now"] = sn; c.save()
+            if items:
+                self.ex.place(items, ttl_s=max(5.0, float(sn["ttl_s"])))
+                self.ex.step_placements()
+            msg = (f"SELL NOW {self.name(ex)}: {sn['sent_qty']:,} {side.upper()} at {float(sn['px']):.3f} sent in {len(items)} clips (limit buy {close.upper()} at {buy_px:.3f}, "
+                   f"fill-or-cancel after {sn['ttl_s']:.0f} s); position {sn['held_before']} at average {sn['avg_before']}, free {sn['free_before']:,.0f}")
+            self.event("SWING", msg); self.night.line(msg)
+            return
+        if now - float(sn.get("sent_t") or now) < float(sn["ttl_s"]) + 5:
+            return
+        mine = [o for o in self.open if o["ex"] == ex and o["action"] == "buy" and o["side"] == close and abs(o["price"] - buy_px) < 1e-9
+                and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "swingsell" and float((self.ledger.orders.get(o["id"]) or {}).get("ts") or 0) >= float(sn["sent_t"]) - 2]
+        for o in mine:
+            if o["id"] not in self.ex.cancelling:
+                self.ex.cancel(o, reason="sell_now: the unfilled rest is cancelled, not chased", front=True)
+        self.ex.step_cancels()
+        t0 = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(sn["sent_t"]) - 2))
+        fills = [f for f in self.ledger.fills if f["ex"] == ex and f["layer"] == "swingsell" and f["t"] >= t0 and f["side"] == close and abs(f["price"] - buy_px) < 0.0051]
+        q = sum(f["qty"] for f in fills)
+        avg_px = (sum((1 - f["price"]) * f["qty"] for f in fills) / q) if q else None
+        row = (self.book.get(ex) or {}).get("row") or {}
+        sn.update(state="done", done_t=stamp(), filled=q, avg_fill=avg_px, avg_after=row.get("avgCost"), held_after=(self.book.get(ex) or {}).get("pos"),
+                  free_after=self.free_cash(), cancelled=len(mine), realized=round(sum(f.get("realized") or 0 for f in fills), 2))
+        with c.lock:
+            c.d["sell_now"] = sn; c.save()
+        msg = (f"SELL NOW {self.name(ex)} done: filled {q:,.0f} of {sn['sent_qty']:,} {side.upper()}" + (f" at an average {avg_px:.4f}" if avg_px else "")
+               + f" ({len(fills)} fills, realized {sn['realized']:+,.0f}); {len(mine)} unfilled clip(s) cancelled; position {sn['held_before']} -> {sn['held_after']}, "
+               f"SIG average {sn['avg_before']} -> {sn['avg_after']}; free cash {sn['free_before']:,.0f} -> {sn['free_after']:,.0f}")
+        self.event("SWING", msg); self.night.line(msg); self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+
     def reservoirs_plan(self, now):
         out = {}
         for ex, r in self.reservoirs().items():
@@ -4889,6 +4955,11 @@ class Engine:
         if r.get("mode", "trade") == "trade":
             avail = self.reservoir_avail(r)
             out_room = (float(r["max_out"]) - self.reservoir_out(r)) if r.get("max_out") is not None else float("inf")   # Piero 16:50: at most 20,000 out at a time
+            if r.get("rest_qty") is not None:
+                out_room = min(out_room, float(r["rest_qty"]))   # Piero 17:15: at most 15,000 resting at a time, whatever is out
+            sn = self.controls.d.get("sell_now") or {}
+            if str(sn.get("ex")) == ex and sn.get("state") in ("pending", "sent"):
+                out_room = 0.0                              # an immediate sale is running on this market: no resting asks meanwhile
             resting = collections.defaultdict(list)
             for o in self.open:
                 rec = self.ledger.orders.get(o["id"]) or {}
@@ -8125,6 +8196,16 @@ class EngineControls:
             self.eng.event("WALL", msg)
             self.eng.night.line(msg)
             return msg
+        if action == "sell_now":                           # Piero 17:15 Oct 8: an immediate sale, fill-or-cancel: {ex, side, px (held-side), qty, clip=5000, ttl_s=10}
+            ex, side = str(args.get("ex")), str(args.get("side", "no")).lower()
+            px, qty = float(args["px"]), int(args["qty"])
+            if ex not in self.eng.owner or side not in ("yes", "no") or not (0.01 <= px <= 0.99) or qty < MIN_QTY:
+                raise ValueError("sell_now needs a known market, side yes/no, px 0.01-0.99 (the held side's sale price) and qty >= 10")
+            with c.lock:
+                c.d["sell_now"] = dict(ex=ex, side=side, px=px, qty=qty, clip=int(args.get("clip", 5_000)), ttl_s=float(args.get("ttl_s", 10)),
+                                       subs=list(args.get("subs") or []), state="pending", t=stamp())
+                c.save()
+            return f"sell_now {self.eng.name(ex)}: {qty:,} {side.upper()} at {px:.3f}, fill-or-cancel, queued for the next loop"
         if action == "wall_cancel":
             wid = str(args.get("id"))
             with c.lock:

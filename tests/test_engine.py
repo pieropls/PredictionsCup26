@@ -4252,7 +4252,7 @@ class ReservoirTests(EngineCase):
         fake.pos[ex] = -46_931
         eng.meta[ex]["race"] = a_config.RI_SENATE_RACE; eng.ri_held_cap = 43_539.0
         r = json.loads(json.dumps(a_config.RESERVOIRS["1077"]))
-        r.update(ex=ex, offers=[[subs[0], 0.850], ["inventory", 0.850], [subs[2], 0.855], [subs[3], 0.855]], max_out=None, join_touch=False, hold_subs=[], core_qty=10_000,
+        r.update(ex=ex, offers=[[subs[0], 0.850], ["inventory", 0.850], [subs[2], 0.855], [subs[3], 0.855]], max_out=None, rest_qty=None, join_touch=False, hold_subs=[], core_qty=10_000,
                  mode="trade", fair0=0.0065, since=stamp_(),
                  stats=dict(sold_sh=0.0, bought_sh=0.0, realized=0.0, cycles=0, sold_val=0.0, bought_val=0.0, legs=[]))
         eng.controls.d["reservoirs"] = {ex: r}
@@ -4295,7 +4295,7 @@ class ReservoirTests(EngineCase):
         and the rest held (no wall buy-back); after a sale only (20,000 - out) is offered."""
         fake, eng, ex, subs = self.rig()
         r = eng.controls.d["reservoirs"][ex]
-        r.update(offers=[[subs[0], 0.845], ["inventory", 0.845]], hold_subs=subs[2:], max_out=20_000, join_touch=True, core_qty=0)
+        r.update(offers=[[subs[0], 0.845], ["inventory", 0.845]], hold_subs=subs[2:], max_out=20_000, rest_qty=None, join_touch=True, core_qty=0)
         fake.px[ex] = eng.px[ex] = (0.155, 0.16, 0.1575)       # NO bid 0.84 / ask 0.845: the level is the touch
         plan = eng.reservoir_plan(time.time(), r)
         self.assertEqual(sum(x["qty"] for x in plan["sells"]), 20_000)
@@ -4310,6 +4310,39 @@ class ReservoirTests(EngineCase):
         r["stats"]["sold_sh"] = 6_000.0                         # 6,000 out: only 14,000 more offered
         plan = eng.reservoir_plan(time.time(), r)
         self.assertEqual(sum(x["qty"] for x in plan["sells"]), 14_000)
+
+    def test_sell_now_fill_or_cancel_and_the_15k_resting_cap(self):
+        """Piero 17:15: 20,000 NO at 0.840 now (limit buy YES 0.160, clips <= 5k), the unfilled rest cancelled after its TTL; the resting
+        asks pulled first and paused while it runs; then at most 15,000 rest at 0.845; the fills logged with the average before / after."""
+        fake, eng, ex, subs = self.rig()
+        r = eng.controls.d["reservoirs"][ex]
+        r.update(offers=[[subs[0], 0.845], ["inventory", 0.845]], hold_subs=subs[2:], rest_qty=15_000, max_out=None, join_touch=True, core_qty=0, rebuy_under_sell=0.02)
+        fake.px[ex] = eng.px[ex] = (0.155, 0.16, 0.1575)
+        loop(eng, fake); loop(eng, fake)
+        resting = [o for o in self.legs(eng, fake, ex, "swingsell")]
+        self.assertEqual(sum(o["qty"] for o in resting), 15_000, "at most 15,000 resting")
+        ctl = f_engine.EngineControls(eng)
+        ctl._apply("sell_now", dict(ex=ex, side="no", px=0.840, qty=20_000, clip=5_000, ttl_s=10))
+        loop(eng, fake)
+        sn = eng.controls.d["sell_now"]
+        self.assertEqual(sn["state"], "sent")
+        new = [o for o in self.legs(eng, fake, ex, "swingsell") if abs(o["price"] - 0.16) < 1e-9]
+        self.assertEqual(sum(o["qty"] for o in new), 20_000)
+        self.assertTrue(all(o["qty"] <= 5_000 and o["side"] == "yes" for o in new), "limit buy YES at 0.160, clips <= 5k")
+        self.assertFalse([o for o in self.legs(eng, fake, ex, "swingsell") if abs(o["price"] - 0.155) < 1e-9], "the 0.845 asks are pulled while it runs")
+        fake.fill(new[0]["id"], new[0]["qty"]); fake.fill(new[1]["id"], 3_000)   # 8,000 fill at once
+        loop(eng, fake)
+        sn["sent_t"] -= 20                                    # the TTL passed
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(sn["state"], "done")
+        self.assertEqual(sn["filled"], 8_000.0)
+        self.assertFalse([o for o in self.legs(eng, fake, ex, "swingsell") if abs(o["price"] - 0.16) < 1e-9], "the unfilled rest is cancelled, not left resting")
+        line = next(e["text"] for e in eng.events if e["text"].startswith("SELL NOW") and "done" in e["text"])
+        self.assertIn("filled 8,000 of 20,000", line); self.assertIn("SIG average", line); self.assertIn("free cash", line)
+        loop(eng, fake); loop(eng, fake)
+        self.assertLessEqual(sum(o["qty"] for o in self.legs(eng, fake, ex, "swingsell")), 15_000, "back to at most 15,000 resting at 0.845")
+        buys = sorted(self.legs(eng, fake, ex, "swing"), key=lambda o: -o["price"])
+        self.assertEqual([round(o["price"], 3) for o in buys], [0.82, 0.815, 0.81], "rebuys unchanged (last sell 0.840 - 2c = 0.820)")
 
     def test_an_ask_never_crosses_the_bid(self):
         fake, eng, ex, subs = self.rig()
@@ -4374,7 +4407,7 @@ class ReservoirTests(EngineCase):
         self.assertEqual(rs["1077"]["stats"]["sold_sh"], 6000.0, "the live RI state carries over (shares out)")
         self.assertAlmostEqual(rs["1077"]["last_sell_px"], 0.86, places=3)
         self.assertNotIn("reservoir", eng.controls.d)
-        self.assertEqual((rs["1077"]["max_out"], rs["1077"]["ver"]), (20_000, "16:50"), "Piero 16:50: at most 20,000 out")
+        self.assertEqual((rs["1077"]["rest_qty"], rs["1077"]["ver"]), (15_000, "17:15"), "Piero 17:15: at most 15,000 resting")
 
     def test_fair_reference_pinned_on_the_first_priced_loop(self):
         fake, eng, ex, subs = self.rig()
