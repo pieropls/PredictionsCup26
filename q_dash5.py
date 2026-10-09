@@ -293,11 +293,12 @@ def replay(evs, cash_ev=()):
       - a buy that adds to the position is the buying strategy's lot, and it pays the cash;
       - a buy that reduces it sells lots: the order's owner first (its sub-book), then the acting strategy's, then 'held', then the
         largest; the owners get the proceeds, so every strategy's P&L = its cash + the value of its lots;
-      - rotation sells other strategies' lots: the owners get the lots' value at Polymarket fair at fill time and rotation keeps the
-        difference (the price it gave up against fair; 0 where the fill's fair is not on record).
+      - rotation sells other strategies' lots: the owners get their cost back (SIG average) and rotation keeps its own realized
+        (Piero 21:20); what it gave up against Polymarket fair at fill time is tracked apart (giveup), where the fill's fair is known.
     -> dict(realized_day, cash (from 0), cash_b, lots {ex: {bucket: shares}}, pos (signed YES shares), avg)."""
     pos, avg = collections.defaultdict(float), collections.defaultdict(float)   # signed YES shares; average cost of the held side
     lots = collections.defaultdict(lambda: collections.defaultdict(float))
+    giveup = collections.defaultdict(float)
     realized_day = collections.defaultdict(float)
     cash, cash_b = 0.0, collections.defaultdict(float)
     for ev in evs:
@@ -330,9 +331,11 @@ def replay(evs, cash_ev=()):
                 continue
             L[k] -= take
             need -= take
-            if b == ROTATION and k != ROTATION and fair is not None:
-                cash_b[k] += (1 - fair) * take            # the owner: its lot at fair
-                cash_b[b] += (fair - p) * take            # rotation: what it gave up against fair
+            if b == ROTATION and k != ROTATION:
+                cash_b[k] += avg[ex] * take                # the owner gets its cost back (SIG average)
+                cash_b[b] += ((1 - p) - avg[ex]) * take    # rotation: its own realized on the sale (Piero 21:20: its board P&L)
+                if fair is not None:
+                    giveup[b] += (p - fair) * take         # and, on hover only, what it gave up against fair
             else:
                 cash_b[k] += (1 - p) * take
         if need > 1e-9:                                    # lots short of the position (should not happen): the acting strategy
@@ -352,7 +355,7 @@ def replay(evs, cash_ev=()):
     for ts, amt in cash_ev:                                  # fees and other account cash: shown with the holdings
         cash += amt
         cash_b["held"] += amt
-    return dict(realized_day=dict(realized_day), cash=cash, cash_b=dict(cash_b), pos={k: v for k, v in pos.items() if abs(v) >= 0.5}, avg=dict(avg),
+    return dict(realized_day=dict(realized_day), cash=cash, cash_b=dict(cash_b), pos={k: v for k, v in pos.items() if abs(v) >= 0.5}, avg=dict(avg), giveup=dict(giveup),
                 lots={ex: {k: v for k, v in L.items() if v >= 0.5} for ex, L in lots.items() if abs(pos.get(ex, 0)) >= 0.5})
 
 
@@ -602,6 +605,7 @@ def bucket_totals(eng, pos_rows):
         rows = load_archive()
         tx = load_tx()
         evs, cash_ev, info = events(rows, tx, order_buckets(eng), sell_orders(eng), order_owner(eng), fill_fair(eng))
+        evs = [(e[0], e[1], e[2], e[3], e[4], "ri", e[6], "ri", e[8]) if e[1] in RI_EX else e for e in evs]   # Piero 21:20: the RI card is the whole RI position
         rep = replay(evs, cash_ev)
         rep["info"] = info
         rep["n_tx"] = len(tx)
@@ -635,7 +639,7 @@ def bucket_totals(eng, pos_rows):
         o["board"] = round(o["cash"] + o["value"], 2)
         o["fair"] = round(o["cash"] + o["value_fair"], 2)
     return out, dict(fills=n, first=first, last=last, cash_replayed=round(INITIAL + rep["cash"], 2), realized_day=rep["realized_day"], n_tx=rep.get("n_tx"),
-                     info=rep.get("info"), pos=rep.get("pos"))
+                     info=rep.get("info"), pos=rep.get("pos"), giveup=rep.get("giveup") or {})
 
 
 SNAP = "dash5_snap.json"
@@ -953,12 +957,10 @@ MARKET_KINDS = {"NEWS", "EVENT", "NEW", "SWEEP"}
 
 
 def activity(eng, n=40):
+    """The newest trades (exits phrased as sales of the held side, with cents vs entry) grouped when a strategy prints several
+    tiny fills (<= 5 shares) on one market-side within an hour, plus alerts and market events."""
     out = []
-    fills = list(eng.ledger.fills[-400:])
-    group = None
-    def flush():
-        if group:
-            out.append(group)
+    fills = list(eng.ledger.fills[-600:])
     rows = []
     for f in reversed(fills):
         if f.get("before_engine") or f.get("action") not in ("buy", "sell"):
@@ -971,25 +973,35 @@ def activity(eng, n=40):
         side, px = f["side"], f["price"]
         if red and f.get("action") == "buy":                # an exit placed as a buy of the other side: we sold the held side at 1 - p
             side, px, fs = ("no" if side == "yes" else "yes"), round(1 - px, 4), (None if fs is None else 1 - fs)
-        rows.append(dict(t=local_ts(f["t"]), ex=f["ex"], side=side, qty=f["qty"], px=px, layer=f.get("layer"), strat=b, fair=fs, sold=red))
-    i = 0
-    while i < len(rows) and len(out) < n:
-        r = rows[i]
-        j = i
+        vs_entry = (f.get("realized") or 0.0) / f["qty"] if red and f.get("qty") else None
+        rows.append(dict(t=local_ts(f["t"]), ex=f["ex"], side=side, qty=f["qty"], px=px, layer=f.get("layer"), strat=b, fair=fs, sold=red, vs_entry=vs_entry))
+    small = collections.defaultdict(list)
+    for r in rows:
         if r["qty"] <= 5:
-            while j + 1 < len(rows) and rows[j + 1]["qty"] <= 5 and rows[j + 1]["ex"] == r["ex"] and rows[j + 1]["side"] == r["side"] and rows[j + 1]["sold"] == r["sold"] and abs(rows[j + 1]["t"] - r["t"]) <= 600:
-                j += 1
-        if j > i:
-            g = rows[i:j + 1]
+            small[(r["strat"], r["ex"], r["side"], r["sold"], int(r["t"] // 3600))].append(r)
+    done = set()
+    for r in rows:
+        if len(out) >= n:
+            break
+        if id(r) in done:
+            continue
+        g = small.get((r["strat"], r["ex"], r["side"], r["sold"], int(r["t"] // 3600))) if r["qty"] <= 5 else None
+        if g and len(g) >= 2:
+            for x in g:
+                done.add(id(x))
+            sh = sum(x["qty"] for x in g)
             out.append(dict(id=f"g{r['t']}{r['ex']}", t=r["t"], kind="trade", strat=r["strat"],
-                            text=f"{name_of(r['strat'])} {'sold' if r['sold'] else 'bought'} {len(g)} fills of {', '.join(sorted({str(int(x['qty'])) for x in g}))} share{'s' if any(x['qty'] > 1 for x in g) else ''}, "
-                                 f"{eng.name(r['ex'])} {r['side'].upper()} at {r['px']:.3f}, {time.strftime('%H:%M', time.localtime(g[-1]['t']))}–{time.strftime('%H:%M', time.localtime(g[0]['t']))}"))
+                            text=f"{name_of(r['strat'])} {'sold' if r['sold'] else 'bought'} {int(sh):,} {r['side'].upper()} {eng.name(r['ex'])} in {len(g)} tiny fills, "
+                                 f"{min(x['px'] for x in g):.3f}–{max(x['px'] for x in g):.3f}, {time.strftime('%H:%M', time.localtime(g[-1]['t']))}–{time.strftime('%H:%M', time.localtime(g[0]['t']))}"))
+            continue
+        done.add(id(r))
+        if r["sold"]:
+            tail = "" if r["vs_entry"] is None else f", {r['vs_entry'] * 100:+.1f}c vs entry"
         else:
             fs = r["fair"]
-            under = "" if fs is None else f", {abs(fs - r['px']) * 100:.1f}¢ {'under' if fs >= r['px'] else 'over'} fair"
-            out.append(dict(id=f"f{r['t']}{r['ex']}{r['qty']}", t=r["t"], kind="trade", strat=r["strat"],
-                            text=f"{name_of(r['strat'])} {'sold' if r['sold'] else 'bought'} {int(r['qty']):,} {r['side'].upper()} {eng.name(r['ex'])} at {r['px']:.3f}{under}"))
-        i = j + 1
+            tail = "" if fs is None else f", {abs(fs - r['px']) * 100:.1f}c {'under' if fs >= r['px'] else 'over'} fair"
+        out.append(dict(id=f"f{r['t']}{r['ex']}{r['qty']}", t=r["t"], kind="trade", strat=r["strat"],
+                        text=f"{name_of(r['strat'])} {'sold' if r['sold'] else 'bought'} {int(r['qty']):,} {r['side'].upper()} {eng.name(r['ex'])} at {r['px']:.3f}{tail}"))
     for e in list(eng.events)[-300:]:
         k = str(e.get("kind") or "")
         kind = "alert" if k in ALERT_KINDS else "market" if k in MARKET_KINDS else None
@@ -1005,7 +1017,7 @@ def activity(eng, n=40):
 
 
 # ------------------------------------------------------------------------------------------------ strategies (Live §3.2)
-def strategy_cards(eng, totals, snap, pos_rows):
+def strategy_cards(eng, totals, snap, pos_rows, rep=None):
     now = time.time()
     resting = collections.defaultdict(lambda: [0, 0])                # [entries, exits] by bucket
     REDUCING = getattr(eng, "REDUCING", set())
@@ -1068,6 +1080,20 @@ def strategy_cards(eng, totals, snap, pos_rows):
                               today=None if tot.get("board") is None or sb.get("board") is None else round(tot["board"] - sb["board"], 2),
                               today_fair=None if tot.get("fair") is None or sb.get("fair") is None else round(tot["fair"] - sb["fair"], 2),
                               entries=resting[k][0], exits=resting[k][1], last_fill_t=last_fill.get(k), fills=fills))
+            c_ = cards[-1]
+            if k == "catcher":                              # Piero 21:20: two lines, held lots and the budget for new bids
+                c_["held_lots"] = round(cost.get(k, 0.0), 2)
+                c_["budget_new"] = round(float((getattr(eng, "dump_cov", None) or {}).get("budget") or 0), 2)
+            if k == "ri":                                   # the whole RI position
+                rows_ = [p for p in pos_rows if p["ex"] in RI_EX]
+                if rows_:
+                    sh = sum(p["shares"] for p in rows_)
+                    red = getattr(eng, "REDUCING", set())
+                    offered = sum(o["qty"] for o in list(eng.open) if o["ex"] in RI_EX and (eng.ledger.orders.get(o["id"]) or {}).get("layer") in red)
+                    c_["position"] = dict(shares=round(sh), side=rows_[0]["side"], value=round(sum(p["value"] for p in rows_), 2),
+                                          offered=round(min(offered, sh)), held=round(max(0.0, sh - offered)))   # Piero 21:37: held + offered
+            if k == "rotation":                             # its own board P&L on the card; what it gave up vs fair on hover
+                c_["giveup"] = round(float(((rep or {}).get("giveup") or {}).get("rotation") or 0.0), 2)
     return cards
 
 
@@ -1238,7 +1264,7 @@ def build(eng, api, v4=None):
                          pos_mismatch=sum(1 for p in pos_rows if abs((rep.get("pos") or {}).get(p["ex"], 0.0) - (p["shares"] if p["side"] == "yes" else -p["shares"])) > 1)
                          + sum(1 for ex in (rep.get("pos") or {}) if ex not in {p["ex"] for p in pos_rows})))
         # Live
-        cards = strategy_cards(eng, totals, snap, pos_rows)
+        cards = strategy_cards(eng, totals, snap, pos_rows, rep)
         sdays, shist = cached("sdays", 120, lambda: strategy_days(eng)) if True else ({}, [])
         out["v5lv"] = dict(
             server=dict(state=st, reason=why, **server, loop_age=loop_age, sig_ms=round(1000 * (h.get("read") or {}).get("p50"), 0) if (h.get("read") or {}).get("p50") else None,

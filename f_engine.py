@@ -66,8 +66,8 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      FM_TARGETS, FM_CLIP, FM_CAP_SH, FM_CAP_COST, FM_TTL_S, FM_WRITES_PER_MIN, FM_SKEW_PER_1K, FM_NEWS_C, FM_NEWS_WINDOW_S, FM_REQUOTE_S,
                      FM_AGE_LADDER_S, FM_OFF_REALIZED, FM_OFF_MO30, FM_OFF_MIN_FILLS, FM_GLIDE_START, FM_POLL_PULL_S,
                      FAST_PATH_ON, FAST_REARMS_PER_10M, FAST_WRITES_RESERVE, FAST_SLOW_S, FAST_PM_MOVE_C,
-                     TM_BUFFER_RESUME, TM_ENTRY_STOPS, SM_REGIME_WIN_S, SM_REGIME_EVERY_S, SM_REGIME, SM_QUOTE_REGIMES, SM_LOSS_MARKET_DAY, SM_LOSS_24H,
-                     SM_TUNE_AT, SM_TUNE_BOUNDS, SM_TUNE_MIN_GAIN, SM_TUNE_MIN_FILLS, RETIRED_LAYERS,
+                     TM_BUFFER_RESUME, TM_PAUSE_FREE, D5_EXCLUDE_LAYERS, TM_ENTRY_STOPS, SM_REGIME_WIN_S, SM_REGIME_EVERY_S, SM_REGIME, SM_QUOTE_REGIMES, SM_LOSS_MARKET_DAY, SM_LOSS_24H,
+                     SM_TUNE_AT, SM_TUNE_BOUNDS, SM_TUNE_MIN_GAIN, SM_TUNE_MIN_FILLS, RETIRED_LAYERS, DUMP_DEEP_OFF, DUMP_L0_CAP_RESTING, DUMP_THIN_SIDES,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -1793,7 +1793,7 @@ class Engine:
         self.auto_resume(now)
         # D5 loss stop and the SIG 5xx pause
         bot_24h = sum(self.fill_pnl_fair(f) for f in self.fills_since(now - 86400)
-                      if self.strategy_of(f["bot"], f["layer"]) not in ("position", "old engine"))
+                      if self.strategy_of(f["bot"], f["layer"]) not in ("position", "old engine") and f["layer"] not in D5_EXCLUDE_LAYERS)   # C87: Piero's RI / wall orders are not bot P&L
         if bot_24h < -LOSS_STOP and not c.paused:
             c.set_paused(True, f"D5 loss stop: bot P&L at fair {bot_24h:+,.0f} over 24 h")
             c.decide(f"loss stop tripped at {time.strftime('%H:%M')} ({bot_24h:+,.0f}): resume new risk?")
@@ -2564,6 +2564,19 @@ class Engine:
             out += o["qty"] * o["price"] * ENTRY_WEIGHTS.get(rec.get("layer"), 1.0)   # day 8 §2 weights
         return out
 
+    def l0_resting(self):
+        """Our resting L0 bids at notional across all sides (Piero 21:20: the L0 cap counts only these)."""
+        out = 0.0
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"])
+            if rec and rec.get("layer") == "dump" and str(rec.get("sub", "")).endswith(":L0") and o["id"] not in self.ex.cancelling:
+                out += o["qty"] * o["price"]
+        return out
+
+    def l0_cap_used(self):
+        """What counts against DUMP_L0_BUDGET: resting L0 bids (catcher fix #1), else the held L0 tranches (before C87)."""
+        return self.l0_resting() if DUMP_L0_CAP_RESTING else self.l0_held()
+
     def l0_held(self):
         """L0 tranches held at cost across all sides (the 8k L0 budget)."""
         return sum(abs(q) * float((self.ledger.tranches.get(sub) or {}).get("avg") or self.sig_mark(ex, "yes" if q > 0 else "no") or 0)
@@ -2620,7 +2633,8 @@ class Engine:
 
     def dump_levels(self, ex, side, fs, rs, cost, room=None, l0_ok=True):
         """[(i, price, shares)]: L1/L2/L3 = ref - 1 / 2 / 3.5c, each <= fair_side - 3c and <= best bid + 1 tick (join or
-        improve, never cross the ask); shares by weight 40 / 35 / 25 of `cost`."""
+        improve, never cross the ask); shares by weight 40 / 35 / 25 of `cost`. Catcher fix #1 (Piero 21:20): L3 / L4 off;
+        on the top-20 thin sides L1 joins the touch (its own order next to L0, <= fair_side - 3c) with L3 / L4's weight added."""
         bid_s, ask_s = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)
         out, used = [], set()
         day = self.day_window(time.time())                  # day 6 §1.3: L4 (ref - 5c) and 45/25/15/15 in the day window
@@ -2632,14 +2646,22 @@ class Engine:
             if q0 >= MIN_QTY:
                 out.append((4, bid_s, q0))
                 used.add(bid_s)
+        thin = (str(ex), side) in self.thin_sides()
         for i, (off, w) in enumerate(zip(offs, ws)):
-            px = min(rs - off, fs - DUMP_FAIR_GAP)
-            if bid_s is not None:
-                px = min(px, bid_s + TICK)
+            if DUMP_DEEP_OFF and i >= 2:
+                continue                                    # catcher fix #1: L3 / L4 off
+            touch = thin and i == 0 and bid_s is not None
+            if touch:                                       # catcher fix #1: L1 at the touch of a thin side, with L3 / L4's weight
+                px = min(bid_s, fs - DUMP_FAIR_GAP)
+                w = w + (sum(ws[2:]) if DUMP_DEEP_OFF else 0.0)
+            else:
+                px = min(rs - off, fs - DUMP_FAIR_GAP)
+                if bid_s is not None:
+                    px = min(px, bid_s + TICK)
             if ask_s is not None:
                 px = min(px, ask_s - TICK)
             px = bots.tick_down(px)
-            if px < 0.01 or px in used:
+            if px < 0.01 or (px in used and not touch):
                 continue
             used.add(px)
             q = int(cost * w / px)
@@ -2648,6 +2670,11 @@ class Engine:
             if q >= MIN_QTY:
                 out.append((i, px, q))
         return out
+
+    def thin_sides(self):
+        """The top-20 thin sides (a control 'thin_sides' [[ex, side], ...] overrides the config list)."""
+        ov = self.controls.d.get("thin_sides")
+        return {(str(a), str(b)) for a, b in (ov or DUMP_THIN_SIDES)}
 
     def dump_plan(self, now, cash, used):
         """{ex: [want-spec]} for dump catcher v3: every eligible side, size = funded reserve / 8 (1.5k..6k, arena x 1.5,
@@ -2668,7 +2695,7 @@ class Engine:
             self.record_ri_cap()                            # day 11 §1.4 (C81c): once, on the first priced loop after the deploy
         half = 0.5 if self.controls.state("dump") == "pilot" else 1.0
         arena = self.dump_arena(now)
-        l0_ok = self.l0_held() < DUMP_L0_BUDGET              # L0 holds <= 8k at cost across all sides
+        l0_ok = True if DUMP_L0_CAP_RESTING else self.l0_held() < DUMP_L0_BUDGET   # catcher fix #1: the cap counts resting L0 bids (enforced in allocate_levels)
         cands = []
         for b in self.bots:
             if b.kind != "market":
@@ -2734,7 +2761,8 @@ class Engine:
                 if sub in rest_q and 0.5 * rest_q[sub] <= q <= 2.0 * rest_q[sub]:
                     q = int(rest_q[sub])                    # C72: quantity hysteresis — a resting level keeps its size within x0.5..x2 (no re-size churn)
                 near = i == 4 or (best_s is not None and px >= best_s - DUMP_NEAR_GAP - 1e-9)
-                rows.append((i, i in resting.get(key, set()), ex, dict(side=side, px=px, qty=q, sub=sub, level=i, edge=fs - px, arena=ex in arena, l0=i == 4,
+                at_touch = i == 0 and best_s is not None and px >= best_s - 1e-9 and (str(ex), side) in self.thin_sides()
+                rows.append((i, i in resting.get(key, set()), ex, dict(side=side, px=px, qty=q, sub=sub, level=i, edge=fs - px, arena=ex in arena, l0=i == 4, touch=at_touch,
                                                                         ttl=DUMP_NEAR_TTL_S if near else DUMP_TTL_S,
                                                                         weight=ENTRY_WEIGHTS["L0" if i == 4 else f"L{i + 1}"], lname="L0" if i == 4 else f"L{i + 1}",
                                                                         px_rest=rest_px.get(sub))))   # day 8 §2 / C72: the resting price, if any
@@ -2770,7 +2798,7 @@ class Engine:
         # (hysteresis: a resting level loses its slot only when the resting set alone no longer fits), L0 first within its
         # 8k cap (held + resting), then by expected edge = (fair - price) x reach / weight.
         budget = max(0.0, self.entry_budget(cash) - self.wall_resting() - self.fm_reserve() - self.tm_reserve() - self.sm_reserve() - self.reservoir_resting())   # C84c: the reservoir's rebuys come first   # C70: Piero's walls, (C81b) the FM's cap and (C83) the TM's cap come off the top (weight 1.0)
-        out, cut, spent = self.allocate_levels(rows, budget, max(0.0, DUMP_L0_BUDGET - self.l0_held()))
+        out, cut, spent = self.allocate_levels(rows, budget, float(DUMP_L0_BUDGET) if DUMP_L0_CAP_RESTING else max(0.0, DUMP_L0_BUDGET - self.l0_held()))   # fix #1: the L0 rows themselves (resting + new) fit the cap
         self.entry_spent = round(spent)
         self.entry_left = max(0.0, budget - spent)
         for lvl, is_resting, ex, w in out:
@@ -3010,8 +3038,8 @@ class Engine:
         """Day 9 §3 allocation: -> (out, cut, spent). rows = (lvl, is_resting, ex, spec). Resting levels first (hysteresis),
         then new ones; within each group L0 first (its cost capped by l0_room), then by expected edge (fair - price) x reach /
         weight (+0.5c for arena markets). A level that does not fit is cut (a resting one gets cancelled by the reconcile)."""
-        def xe(w):
-            return w["edge"] * DUMP_REACH[w["lname"]] / w["weight"] + (0.005 if w.get("arena") else 0.0)
+        def xe(w):                                          # catcher fix #1: an L1 at the touch of a thin side reaches like L0
+            return w["edge"] * DUMP_REACH["L0" if w.get("touch") else w["lname"]] / w["weight"] + (0.005 if w.get("arena") else 0.0)
         # C72 (§3 target >= 60 sides): among NEW levels, the best level of a side that has no level yet goes before any
         # second level of a side that already has one
         has = {(ex, w["side"]) for _, is_resting, ex, w in rows if is_resting}
@@ -4659,9 +4687,12 @@ class Engine:
         > max_fair_yes or after a >= 2c Polymarket rise in 10 min (30 min)."""
         c = self.controls
         if self.reservoirs():
-            if not c.on("swing") or c.paused or self.fills_blind:
+            if not c.on("swing") or self.fills_blind:
                 return {}
-            return self.reservoirs_plan(now)                # C84g: the reservoirs replace the swing legs and the band
+            out = self.reservoirs_plan(now)                 # C84g: the reservoirs replace the swing legs and the band
+            if c.paused:                                    # C87: a pause stops new risk only; the reservoir's asks (reductions) keep resting
+                out = {ex: dict(p, buys=[], buy=None) for ex, p in out.items() if p.get("sells")}
+            return out
         cfg = self.swing_cfg()
         if not cfg or not c.on("swing") or c.paused or self.fills_blind:
             return {}
@@ -4929,7 +4960,7 @@ class Engine:
                 out_room -= q
                 while q >= MIN_QTY:
                     take = int(min(q, r["clip"]))
-                    x_ = dict(side=side, px=ask_px, qty=take, sub=sub, ttl=SWING_TTL_S)
+                    x_ = dict(side=side, px=ask_px, qty=take, sub=sub, ttl=float(r.get("ask_ttl_s") or SWING_TTL_S))   # C87: Piero's 'queue kept' asks live 12 h
                     if r.get("avg_floor"):
                         x_["rule0_margin"] = -1.0           # the engine's rule-0 filter lets these lots go at the position-average floor (Piero's order)
                     plan["sells"].append(x_)
@@ -5272,7 +5303,7 @@ class Engine:
         side = rec["side"]
         key = (ex, side)
         self.fast_rearms[key] = [t for t in self.fast_rearms[key] if t >= now - 600]
-        if len(self.fast_rearms[key]) >= FAST_REARMS_PER_10M or self.l0_held() >= DUMP_L0_BUDGET or self.l0_refills(rec.get("sub"), now) >= DUMP_L0_REFILLS + 1:
+        if len(self.fast_rearms[key]) >= FAST_REARMS_PER_10M or self.l0_cap_used() >= DUMP_L0_BUDGET or self.l0_refills(rec.get("sub"), now) >= DUMP_L0_REFILLS + 1:
             self.fast_stats["l0_capped"] += 1
             return 0
         fs = self.side_fair(ex, side)
@@ -5550,7 +5581,7 @@ class Engine:
         now = time.time()
         if not self.controls.on("tm") or self.ring_window(now) or self.tm_entry_stop(now) or (TM_BUFFER_GATE and getattr(self, "tm_buf_paused", False)):
             return 0.0                                      # (1c / C87) no entries: nothing reserved off the top
-        return max(0.0, self.tm_cap(now, log=False) - self.tm_cost())
+        return max(0.0, min(self.tm_cap(now, log=False) - self.tm_cost(), self.free_cash() - TM_PAUSE_FREE))   # Piero 21:37: never the catcher's last 10k
 
     def tm_entry_stop(self, now):
         """C87 (Piero 19:56 a): no TM entries from 60 min before each ring (20:00, 04:00, 13:00 PT) to the end of its window."""
@@ -5561,13 +5592,13 @@ class Engine:
         """C87 (Piero 19:56 a): TM entries pause while free < BUFFER and resume at BUFFER + 1k; logged on each change. True = paused."""
         if not TM_BUFFER_GATE:
             return False
-        free, buf = self.free_cash(), self.buffer()
+        free, buf = self.free_cash(), float(TM_PAUSE_FREE)   # Piero 21:37: the floor is 10k (was BUFFER)
         was = getattr(self, "tm_buf_paused", False)
         now_paused = free < buf if not was else free < buf + TM_BUFFER_RESUME
         if now_paused != was:
             self.tm_buf_paused = now_paused
-            msg = (f"TM entries PAUSED: free {free:,.0f} < BUFFER {buf:,.0f} (resting TM bids cancelled; exits keep running)" if now_paused
-                   else f"TM entries resume: free {free:,.0f} >= BUFFER {buf:,.0f} + {TM_BUFFER_RESUME:,}")
+            msg = (f"TM entries PAUSED: free {free:,.0f} < {buf:,.0f} (resting TM bids cancelled; exits keep running)" if now_paused
+                   else f"TM entries resume: free {free:,.0f} >= {buf:,.0f} + {TM_BUFFER_RESUME:,}")
             self.event("TM", msg); self.night.line(msg)
         return now_paused
 
@@ -5575,8 +5606,8 @@ class Engine:
         return (min(self.cash_hist) if getattr(self, "cash_hist", None) else 0.0) - CASH_RESERVE
 
     def tm_e_min(self):
-        """Piero 22:15 Oct 7 (C82 item 1): e_min 2c while free cash >= BUFFER, 4c below it."""
-        return TM_E_MIN if self.free_cash() >= self.buffer() else TM_E_MIN_LOW
+        """C87 (Piero 19:56 a): every side >= 2c cheap vs fair (the C82 4c-under-BUFFER rule ended with the 10k entry floor)."""
+        return TM_E_MIN
 
     def tm_cap(self, now, log=True):
         """Piero 22:15 Oct 7 (C82 item 2): TM cap = base (8k pilot / 20k full) + max(0, free - BUFFER), recomputed each loop, logged on change."""
@@ -5731,6 +5762,7 @@ class Engine:
             if rec and rec.get("layer") == "tm" and o["id"] not in self.ex.cancelling:
                 existing[(o["ex"], o["side"])] = o
         cost_all = self.tm_cost()
+        tm_new = 0.0
         party = dash4.party_exposure(self)
         cands = self.tm_candidates()
         top = cands[: sz["sides"]] if sz["sides"] else cands
@@ -5789,6 +5821,7 @@ class Engine:
             room = self.race_room(ex, side, fs)
             q = min(q, int(room / p)) if room > 0 else 0
             q = min(q, int((cap_cost - cost_all) / p))
+            q = min(q, int(max(0.0, self.free_cash() - TM_PAUSE_FREE - tm_new) / p))   # Piero 21:37: the catcher keeps first claim on the last 10k
             depth = self.tm_touch_depth(ex, side, now)
             if depth is not None:
                 q = min(q, int(TM_DEPTH_SHARE * depth))
@@ -5801,6 +5834,7 @@ class Engine:
                 batched = True                              # placements of one loop batch into one write
             plan.setdefault(ex, []).append(dict(side=side, px=p, qty=q, sub=sub, ttl=TM_TTL_S))
             cost_all += q * p
+            tm_new += q * p
             quoted += 1
         self.tm_cov = dict(quoted=quoted, available=len(cands), top=len(top), writes_left=writes, writes_used=w_used)
         return plan
@@ -7696,7 +7730,7 @@ class Engine:
         since = {l: (c.layer(l).get("since") or night_t) if c.on(l) else night_t for l in LAYERS}
         stats = self.layer_stats(since)
         bot_24h = sum(self.fill_pnl_fair(f) for f in self.fills_since(time.time() - 86400)
-                      if self.strategy_of(f["bot"], f["layer"]) not in ("position", "old engine"))
+                      if self.strategy_of(f["bot"], f["layer"]) not in ("position", "old engine") and f["layer"] not in D5_EXCLUDE_LAYERS)
         layers = []
         for l in LAYERS:
             v, st = c.layer(l), stats.get(l, {})

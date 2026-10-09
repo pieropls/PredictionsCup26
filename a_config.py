@@ -263,7 +263,9 @@ ROTATION_EDGE_LEFT, ROTATION_FUND_EDGE, ROTATION_MARKETS = 0.06, 0.08, 3   # (C8
 ROTATION_RET_LEFT, ROTATION_STOP_ABOVE = 0.08, 5_000   # Piero 06:35 Oct 8 (C84b): rotation by return, all day — lots with < 8% return left to settlement ((fair - ask) / ask), lowest first, an ask at the touch, while free < BUFFER; stops once free >= BUFFER + 5k (never >= 8c under fair; never manual / wall / sleeve / pair-set / swing / fm / recycle lots), lowest edge first, only to fund cut entries with >= 8c edge
 
 # Piero 19:56 Oct 8 strategy release (C87)
-TM_BUFFER_RESUME = 1_000        # TM entries pause while free < BUFFER and resume at BUFFER + 1k (no flapping); exits always run
+TM_BUFFER_RESUME = 1_000        # TM entries pause while free < the floor below and resume 1k above it (no flapping); exits always run
+TM_PAUSE_FREE = 10_000          # Piero 21:37: TM entries pause only when free < 10k (was BUFFER 18k); the catcher keeps first claim on the last 10k
+D5_EXCLUDE_LAYERS = ("swing", "swingsell", "wall", "wallexit")   # Piero's position orders (RI reservoir, walls) are not bot P&L for the D5 loss stop
 TM_ENTRY_STOPS = [("19:00", "21:00"), ("03:00", "06:00"), ("12:00", "14:00")]   # no TM entries from 60 min before each ring (20:00, 04:00, 13:00 PT) to the window's end: cash back for the catcher
 SM_REGIME_WIN_S, SM_REGIME_EVERY_S = 1800, 60   # live regime per SM market: the trailing 30 min of prints, recomputed every minute (mm_playbook v0 rules)
 SM_REGIME = dict(sweep_ticks=10, news_c=0.02, quiet_prints=5, trend_ticks=3, trend_bounce_max=0.40, bounce_prints=20, bounce_share=0.50)   # = research/params.py REGIME
@@ -272,6 +274,12 @@ SM_LOSS_MARKET_DAY, SM_LOSS_24H = -50.0, -150.0   # a market under -50 on the SI
 SM_TUNE_AT = "03:00"            # nightly re-tune (clip / skew / re-peg per market), applied only if the replay beats the current settings
 SM_TUNE_BOUNDS = dict(clip=(100, 1000), repeg=(1, 4), skew=(0, 2))   # = research/params.py BOUNDS
 SM_TUNE_MIN_GAIN, SM_TUNE_MIN_FILLS = 2.0, 20   # a change must beat the current setting by >= 2 a day in the replay, on >= 20 replayed fills
+# Piero 21:20 Oct 8: catcher fix #1 from docs/catcher_diagnosis.md ("touch, not depth"), shipped with C87
+DUMP_DEEP_OFF = True            # L3 / L4 off (per 1k of budget-hour Oct 5-8: L0 89, L1 6, L2 3, L3 1.7, L4 0)
+DUMP_L0_CAP_RESTING = True      # the L0 cap (DUMP_L0_BUDGET) counts only resting L0 bids, not held L0 lots
+DUMP_THIN_SIDES = [             # top 20 sides by touch-level value a day, Oct 6-8, RI excluded (docs/catcher_diagnosis.md §6): their L1 joins the touch
+    ("1075", "no"), ("840", "yes"), ("1028", "no"), ("995", "no"), ("987", "yes"), ("1061", "no"), ("1044", "yes"), ("1043", "no"), ("963", "no"), ("899", "no"),
+    ("1072", "no"), ("1071", "no"), ("1042", "yes"), ("986", "yes"), ("951", "no"), ("1027", "yes"), ("981", "yes"), ("865", "yes"), ("1065", "no"), ("985", "no")]
 RETIRED_LAYERS = ("fm", "scalp")   # deleted (code in releases/archive/); their leftover lots: FM's offered at max(entry + 0.5c, touch), the scalper's moved to 'held'
 
 # turnover_plan §1 (C84): the spread maker (SM) — two-sided quoting at the touch on the bounciest markets, queue kept, refilled on fill

@@ -330,7 +330,7 @@ ui.tab = "overview"; draw();
 if (!out("ovBand").includes("+1,375") || !out("ovBand").includes("+11,157") || !out("ovBand").includes("realized")) fail("overview: the three P&L figures");
 if ((out("ovDays").match(/<rect class="b5/g) || []).length < 8) fail("overview: daily bars");
 if (!out("ovDays").includes("hatch5")) fail("overview: today hatched");
-if (!out("ovRank").includes("#277 of 1,341") || !out("ovRank").includes("Top 25 line") || !out("ovRank").includes("19:23")) fail("overview: ranking table");
+if (!out("ovRank").includes("#277 / 1,341") || !out("ovRank").includes("#25 line") || !out("ovRank").includes("Gap at fair") || !out("ovRank").includes("19:23")) fail("overview: ranking table");
 if (!out("ovRankC").includes("top 25")) fail("overview: rank chart lines");
 if (!out("ovPort").includes("101,375") || !out("ovPort").includes("Cash available") || !out("ovPort").includes("Other (1 markets)")) fail("overview: donut + table");
 ui.v5.oexp = true; draw(); if (!out("ovPort").includes("Small market")) fail("overview: Other expands"); ui.v5.oexp = false;

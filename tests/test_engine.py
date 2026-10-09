@@ -1561,7 +1561,8 @@ class DumpV3Tests(EngineCase):
         day = eng.day_window(time.time())
         offs, ws = (a_config.DUMP_V3_OFFSETS_DAY, a_config.DUMP_V3_WEIGHTS_DAY) if day else (a_config.DUMP_V3_OFFSETS, a_config.DUMP_V3_WEIGHTS)
         l0 = fs >= a_config.DUMP_L0_MIN_FAIR and bid <= fs - a_config.DUMP_L0_GAP + 1e-9
-        self.assertEqual(len(mine), len(offs) + (1 if l0 else 0), mine)
+        n_lv = min(len(offs), 2) if a_config.DUMP_DEEP_OFF else len(offs)          # C87 catcher fix #1: L3 / L4 off
+        self.assertEqual(len(mine), n_lv + (1 if l0 else 0), mine)
         if l0:
             self.assertAlmostEqual(mine[0]["price"], bid, places=3, msg="L0 joins the best bid")
             mine = mine[1:]
@@ -1574,7 +1575,7 @@ class DumpV3Tests(EngineCase):
         size = min(max(a_config.DUMP_SIDE_MIN, min(a_config.DUMP_SIDE_MAX, funded / a_config.DUMP_SIDE_DIV)) * 1.5, a_config.DUMP_ARENA_MAX, funded / 2)
         self.assertLessEqual(cost, size + 60, "<= per-side size (day 5: funded / 4, x1.5 if arena, <= 15k, <= funded / 2)")
         shares = [o["qty"] for o in mine]
-        self.assertGreater(shares[0] * mine[0]["price"], shares[2] * mine[2]["price"], "40 / 35 / 25 weights")
+        self.assertGreater(shares[0] * mine[0]["price"], shares[-1] * mine[-1]["price"], "L1 weighs more than the deeper level")
         # pilot: half size
         fake2, eng2, favs2 = self.rig(state="pilot")
         self.settle(eng2, fake2, favs2, 6)
@@ -3077,7 +3078,8 @@ class CashGuardTests(EngineCase):
             loop(eng, fake)
         after = {o["id"]: (o["price"], o["qty"]) for o in self.entries(eng, fake) if eng.ledger.orders[o["id"]]["layer"] == "dump"}
         kept = set(before) & set(after)
-        self.assertGreaterEqual(len(kept), 0.6 * len(before), f"{len(kept)} of {len(before)} resting levels kept after a 25% cash move (the smaller budget cuts some)")
+        self.assertGreaterEqual(len(kept), 0.5 * len(before), f"{len(kept)} of {len(before)} resting levels kept after a 25% cash move (the smaller budget cuts some; "
+                                                             f"with L3 / L4 off since C87 the cheap deep levels that used to survive are gone)")
         same = sum(1 for i in kept if before[i] == after[i])
         self.assertGreaterEqual(same, 0.95 * len(kept), f"{same} of {len(kept)} surviving levels kept their price and size (no re-size churn)")
 
@@ -3619,7 +3621,8 @@ class TMTests(EngineCase):
     def test_caps_news_guard_write_budget_and_reserve(self):
         fake, eng, ex = self.rig()
         loop(eng, fake)
-        self.assertAlmostEqual(eng.tm_reserve(), eng.tm_cap(time.time()) - eng.tm_cost(), delta=1.0, msg="the cap (base + free above BUFFER) is reserved off the top")
+        self.assertAlmostEqual(eng.tm_reserve(), min(eng.tm_cap(time.time()) - eng.tm_cost(), eng.free_cash() - a_config.TM_PAUSE_FREE), delta=1.0,
+                               msg="the cap (base + free above BUFFER) is reserved off the top, never the catcher's last 10k (Piero 21:37)")
         self.assertGreaterEqual(eng.tm_cap(time.time()), a_config.TM_CAP_COST_PILOT)
         self.assertGreater(a_config.ENTRY_WEIGHTS["tm"], 0.99)
         # per market-side inventory cap: only the exit quotes
@@ -3694,9 +3697,9 @@ class TMTests(EngineCase):
         self.assertEqual([r[0] for r in cands], sorted([r[0] for r in cands], reverse=True))
         self.assertAlmostEqual(cands[0][0], (cands[0][3] - cands[0][4]) / cands[0][4], places=6, msg="score = edge / price")
         eng.cash_hist = [a_config.CASH_RESERVE + 10_000]       # under BUFFER: 4c
-        self.assertEqual(eng.tm_e_min(), a_config.TM_E_MIN_LOW)
-        fake.px[ex] = eng.px[ex] = (0.47, 0.475, 0.4725)       # 3c under fair: enough above BUFFER, not below
-        self.assertNotIn((ex, "yes"), {(r[1], r[2]) for r in eng.tm_candidates()})
+        self.assertEqual(eng.tm_e_min(), a_config.TM_E_MIN, "C87: every side >= 2c whatever the cash (entries stop under 10k free instead)")
+        fake.px[ex] = eng.px[ex] = (0.47, 0.475, 0.4725)       # 3c under fair: since C87 enough at any cash (entries stop under 10k free instead)
+        self.assertIn((ex, "yes"), {(r[1], r[2]) for r in eng.tm_candidates()})
         eng.cash_hist = [a_config.CASH_RESERVE + 60_000]
         self.assertIn((ex, "yes"), {(r[1], r[2]) for r in eng.tm_candidates()})
 
@@ -4580,6 +4583,51 @@ class C87Tests(EngineCase):
         self.assertEqual(f_engine.DATA, old)
 
 
+class CatcherFix1Tests(EngineCase):
+    """Piero 21:20 (catcher fix #1, docs/catcher_diagnosis.md): L3 / L4 off; the L0 cap counts only resting L0 bids (held L0 lots
+    no longer block new L0 bids); on the top-20 thin sides L1 joins the touch as its own order (next to L0) with L3 / L4's weight
+    and L0's reach in the allocation."""
+
+    def rig(self):
+        return DumpV3Tests.rig(self)
+
+    def test_no_deep_levels_and_thin_side_l1_at_the_touch(self):
+        fake, eng, favs = self.rig()
+        DumpV3Tests.settle(self, eng, fake, favs, 6)
+        ex = favs[0]
+        fs = eng.fair[ex]; side = "yes"
+        bid = eng.px[ex][0]
+        levels = eng.dump_levels(ex, side, fs, eng.ref(ex), 6_000.0, room=50_000.0)
+        self.assertFalse([l for l in levels if l[0] in (2, 3)], f"no L3 / L4: {levels}")
+        eng.controls.d["thin_sides"] = [[ex, side]]
+        levels = eng.dump_levels(ex, side, fs, eng.ref(ex), 6_000.0, room=50_000.0)
+        l1 = [l for l in levels if l[0] == 0]
+        self.assertTrue(l1, levels)
+        self.assertAlmostEqual(l1[0][1], bots.tick_down(min(bid, fs - a_config.DUMP_FAIR_GAP)), places=3, msg="L1 joins the touch on a thin side")
+        day = eng.day_window(time.time())
+        ws = a_config.DUMP_V3_WEIGHTS_DAY if day else a_config.DUMP_V3_WEIGHTS
+        self.assertEqual(l1[0][2], int(6_000.0 * (ws[0] + sum(ws[2:])) / l1[0][1]), "L1 carries L3 / L4's weight")
+        if any(l[0] == 4 for l in levels):
+            self.assertEqual(sum(1 for l in levels if abs(l[1] - l1[0][1]) < 1e-9), 2, "L0 and L1 both rest at the touch")
+
+    def test_l0_cap_counts_resting_bids_not_held_lots(self):
+        fake, eng, favs = self.rig()
+        DumpV3Tests.settle(self, eng, fake, favs, 3)
+        ex = favs[0]
+        eng.ledger.subbooks.setdefault(ex, {})[f"dump:{ex}:yes:L0"] = 40_000.0      # far more held L0 than the cap
+        eng.ledger.tranches[f"dump:{ex}:yes:L0"] = dict(ex=ex, side="yes", kind="dump", ts=time.time(), state="open", avg=0.9)
+        self.assertGreater(eng.l0_held(), a_config.DUMP_L0_BUDGET)
+        self.assertLess(eng.l0_cap_used(), a_config.DUMP_L0_BUDGET, "held lots do not count")
+        self.assertEqual(eng.l0_cap_used(), eng.l0_resting())
+
+    def test_allocation_ranks_a_touch_l1_like_l0(self):
+        fake, eng, favs = self.rig()
+        w_touch = dict(edge=0.05, lname="L1", weight=0.5, touch=True, l0=False, px=0.9, qty=1000, side="yes")
+        w_deep = dict(edge=0.05, lname="L1", weight=0.5, touch=False, l0=False, px=0.88, qty=1000, side="yes")
+        out, cut, spent = eng.allocate_levels([(0, False, "a", w_deep), (0, False, "b", w_touch)], 0.9 * 1000 * 0.5 + 1, 15_000)
+        self.assertEqual([x[2] for x in out], ["b"], "with room for one, the touch L1 wins")
+
+
 class Dash5Tests(EngineCase):
     """Dashboard v5 (docs/dashboard_v5.md): §0 P&L by SIG day (00:00 UTC; realized at SIG's average cost; realized + open = the day
     exactly; past days fixed), the strategy registry and the cash-flow buckets that add up to account - 100,000, the status turning
@@ -4629,11 +4677,30 @@ class Dash5Tests(EngineCase):
         self.assertAlmostEqual(r["realized_day"]["2026-10-02"], 500 * (0.60 - 0.42), places=6)
         self.assertAlmostEqual(r["realized_day"]["2026-10-03"], 200 * (0.62 - 0.42), places=6)
         self.assertAlmostEqual(r["cash"], -420 + 300 - 30 + 124, places=6)
-        self.assertAlmostEqual(r["cash_b"]["catcher"], -420 + 300 + 0.65 * 200, places=6, msg="the owner gets its lot at fair")
-        self.assertAlmostEqual(r["cash_b"]["rotation"], (0.62 - 0.65) * 200, places=6, msg="rotation keeps what it gave up against fair")
+        self.assertAlmostEqual(r["cash_b"]["catcher"], -420 + 300 + 0.42 * 200, places=6, msg="the owner gets its cost back (SIG average)")
+        self.assertAlmostEqual(r["cash_b"]["rotation"], (0.62 - 0.42) * 200, places=6, msg="rotation keeps its own realized (Piero 21:20)")
+        self.assertAlmostEqual(r["giveup"]["rotation"], (0.65 - 0.62) * 200, places=6, msg="given up vs fair, for the hover")
         self.assertAlmostEqual(r["cash_b"]["held"], -30, places=6)
         self.assertEqual(r["lots"], {"1": {"catcher": 300.0}, "2": {"held": 100.0}})
         self.assertAlmostEqual(sum(r["cash_b"].values()), r["cash"], places=6)
+
+    def test_activity_phrases_exits_as_sales_and_groups_tiny_fills(self):
+        import q_dash5
+        fresh_data(layers=dict(position=dict(state="full"), dump=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS)
+        t = lambda m: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - m * 60))
+        base = dict(before_engine=False, fair=0.10)
+        eng.ledger.fills.extend([dict(base, key="a", order="o1", ex=ex, side="yes", qty=450.0, price=0.115, action="buy", realized=4.5, t=t(3), layer="dumpexit"),
+                                 dict(base, key="b", order="o2", ex=ex, side="no", qty=1.0, price=0.9, action="buy", realized=0.0, t=t(20), layer="dump"),
+                                 dict(base, key="c", order="o3", ex=ex, side="no", qty=1.0, price=0.905, action="buy", realized=0.0, t=t(25), layer="dump"),
+                                 dict(base, key="d", order="o4", ex=ex, side="no", qty=300.0, price=0.89, action="buy", realized=0.0, t=t(22), layer="dump")])
+        eng.ledger.fills.sort(key=lambda f: f["t"])
+        acts = [a["text"] for a in q_dash5.activity(eng) if a["kind"] == "trade"]
+        self.assertTrue(any(a.startswith(f"Catcher sold 450 NO {eng.name(ex)} at 0.885, +1.0c vs entry") for a in acts), acts[:4])
+        self.assertTrue(any("in 2 tiny fills" in a for a in acts), "two 1-share catches 5 min apart (not adjacent) are one row")
 
     def test_daily_table_adds_up_past_days_fixed_and_the_nov_1_boundary(self):
         import q_dash5

@@ -60,7 +60,7 @@ table.t5 tr.hl td{background:var(--chip)}table.t5 tr.cl{cursor:pointer}table.t5 
 .fil5 button.on{background:var(--sigb);color:#fff;border-color:var(--sigb)}
 .wrap5.mk5{max-height:72vh;overflow:auto}.mk5 th{position:sticky;top:0;background:var(--panel);z-index:1}.mk5 td.race{white-space:normal;min-width:150px;font-weight:500}.mk5 .grp td{background:var(--chip);font-weight:600;cursor:pointer}
 .pill5{display:inline-block;padding:1px 8px;border-radius:10px;background:var(--sigb);color:#fff;font-size:12.5px}
-.why5{white-space:normal;min-width:180px;max-width:300px;color:var(--mute);font-size:12.5px}
+.why5,table.t5 td.why5{white-space:normal;overflow-wrap:anywhere;min-width:200px;max-width:340px;color:var(--mute);font-size:12.5px}table.t5.rk5 td,table.t5.rk5 th{padding:6px 5px}
 .tiles5{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:6px}.tile5{height:44px;border-radius:5px;border:3px solid var(--rule);font-size:10.5px;padding:2px 4px;overflow:hidden;cursor:pointer;line-height:1.2}
 .modal5{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:40;display:flex;align-items:center;justify-content:center}.modal5 .b{background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:20px;max-width:440px;margin:16px}
 .btn5{border:1px solid var(--rule);background:var(--panel);color:var(--ink);border-radius:6px;padding:5px 12px;font:inherit;cursor:pointer}.btn5.pri{background:var(--sigb);color:#fff;border-color:var(--sigb)}.btn5.dng{background:var(--loss);color:#fff;border-color:var(--loss)}
@@ -159,10 +159,11 @@ function ov_rank() {
   const r = obj(V("v5ov").rank); if (!r.total) return na5(r.error);
   const ov = obj(V("v5ov")), b = obj(ov.board), t = obj(ov.today), d = obj(r.day);
   const top = p => p == null ? "–" : "top " + num(p * 100, 1) + "%";
-  let s = `<div class="wrap5"><table class="t5"><thead><tr><th></th><th class="n">Rank</th><th class="n">P&L (board)</th><th class="n">Percentile</th><th class="n">Gap at marks</th><th class="n">Gap at fair</th></tr></thead><tbody>`;
-  s += `<tr><td><b>Us, overall</b></td><td class="n">#${num(r.rank)} of ${num(r.total)}</td><td class="n ${cls(b.pnl)}">${sgn(b.pnl)}</td><td class="n">${top(r.pct)}</td><td class="n">—</td><td class="n">—</td></tr>`;
-  s += `<tr><td><b>Us, today</b></td><td class="n">${d.rank ? `#${num(d.rank)} of ${num(d.total)} on today's board` : "–"}</td><td class="n ${cls(t.board)}">${sgn(t.board)}</td><td class="n">${d.pct ? top(d.pct) + " of today's board" : "–"}</td><td class="n">—</td><td class="n">—</td></tr>`;
-  for (const l of arr(r.lines)) s += `<tr><td>Top ${l.n} line</td><td class="n">#${l.n}</td><td class="n">${sgn(l.pnl)}</td><td class="n">${top(l.pct)}</td><td class="n">${sgn(l.gap_marks)}</td><td class="n ${val(l.gap_fair) < 0 ? "good" : ""}">${sgn(l.gap_fair)}</td></tr>`;
+  const pc = p => p == null ? "–" : num(p * 100, 1) + "%";
+  let s = `<div class="wrap5"><table class="t5 rk5"><thead><tr><th></th><th class="n">Rank</th><th class="n">P&L</th><th class="n">Top</th><th class="n">Gap at marks</th><th class="n">Gap at fair</th></tr></thead><tbody>`;
+  s += `<tr><td><b>Us</b></td><td class="n">#${num(r.rank)} / ${num(r.total)}</td><td class="n ${cls(b.pnl)}">${sgn(b.pnl)}</td><td class="n">${pc(r.pct)}</td><td class="n">—</td><td class="n">—</td></tr>`;
+  s += `<tr><td><b>Us, today</b></td><td class="n">${d.rank ? `#${num(d.rank)} / ${num(d.total)}` : "–"}</td><td class="n ${cls(t.board)}">${sgn(t.board)}</td><td class="n">${pc(d.pct)}</td><td class="n">—</td><td class="n">—</td></tr>`;
+  for (const l of arr(r.lines)) s += `<tr><td>#${l.n} line</td><td class="n">#${l.n}</td><td class="n">${sgn(l.pnl)}</td><td class="n">${pc(l.pct)}</td><td class="n">${sgn(l.gap_marks)}</td><td class="n ${val(l.gap_fair) < 0 ? "good" : ""}">${sgn(l.gap_fair)}</td></tr>`;
   return s + `</tbody></table></div><div class="sub5" style="margin-top:8px">Thresholds as of ${esc(String(r.as_of || "–").slice(11, 16))} · a negative gap at fair means we'd be above that line if every market settled at today's Polymarket fair</div>`;
 }
 function ov_rankchart() {
@@ -227,13 +228,16 @@ function lv_strip() {
     reads <b>${num(s.reads)} / ${num(s.read_limit)}</b> per min · writes <b>${num(s.writes)} / ${num(s.write_limit)}</b> · rate-limit errors <b class="${s.rl_1h ? "bad" : ""}">${num(s.rl_1h)}</b> (1 h) · CPU <b>${s.cpu == null ? "–" : num(s.cpu) + "%"}</b> · memory <b>${s.mem == null ? "–" : num(s.mem) + "%"}</b> · disk <b>${s.disk == null ? "–" : num(s.disk) + "%"}</b> · Mac mirror <b>${s.mirror_age_s == null ? "–" : tsAgo(Date.now() / 1000 - s.mirror_age_s) + " ago"}</b></div>`;
 }
 function card5(c) {
-  const capS = c.cap ? `${k1(c.in_use)} of ${k1(c.cap)}` : `${k1(c.in_use)} in use`, w = c.cap ? Math.min(100, 100 * (c.in_use || 0) / c.cap) : 0;
+  let capS = c.cap ? `${k1(c.in_use)} of ${k1(c.cap)} allotted` : `${k1(c.in_use)} in use`, w = c.cap ? Math.min(100, 100 * (c.in_use || 0) / c.cap) : 0;
+  if (c.key === "catcher" && c.held_lots != null) capS = `held lots <b>${k1(c.held_lots)}</b><br>budget for new bids <b>${k1(c.budget_new)}</b>`;
+  if (c.key === "ri" && c.position) capS = `position <b>${num(c.position.shares)} ${esc(String(c.position.side || "").toUpperCase())}</b> · ${k1(c.position.value)} at marks<br><b>${num(c.position.held)}</b> held + <b>${num(c.position.offered)}</b> offered`;
+  const tip = `at fair since inception <b>${sgn(c.pnl_fair)}</b> · today ${sgn(c.today_fair)}` + (c.giveup != null ? `<br>given up vs fair on its sales since Oct 1: <b>${sgn(-c.giveup)}</b>` : "");
   const glow = ui.v5.glowT[c.key] && Date.now() - ui.v5.glowT[c.key] < 1200 ? " glow5" : "";
   const thick = Math.max(1, Math.min(10, Math.sqrt(Math.max(0, c.in_use || 0)) / 12));
-  return `<div class="sc5${glow}" data-card="${esc(c.key)}"${tipAttr(`at fair since inception <b>${sgn(c.pnl_fair)}</b> · today ${sgn(c.today_fair)}`)}><i class="flow" style="border-top-width:${f1(thick)}px;width:14px"></i>
+  return `<div class="sc5${glow}" data-card="${esc(c.key)}"${tipAttr(tip)}><i class="flow" style="border-top-width:${f1(thick)}px;width:14px"></i>
     <div><span class="nm">${esc(c.name)}</span><span class="chip5 ${esc(c.status)}" title="${esc(c.reason || "")}">${esc(c.status)}</span></div>
     <div class="pl ${cls(c.pnl)}">${sgn(c.pnl)}</div><div class="sub5">today <b class="${cls(c.today)}">${sgn(c.today)}</b> · since Oct 1 on the board</div>
-    <div class="bar5"><i style="width:${f1(w)}%"></i></div><div class="meta">${capS}${c.cap ? " allotted" : ""} · ${num(c.entries)} entries, ${num(c.exits)} exits resting · last fill ${c.last_fill_t ? tsAgo(c.last_fill_t) + " ago" : "–"}</div></div>`;
+    <div class="bar5"><i style="width:${f1(w)}%"></i></div><div class="meta">${capS} · ${num(c.entries)} entries, ${num(c.exits)} exits resting · last fill ${c.last_fill_t ? tsAgo(c.last_fill_t) + " ago" : "–"}</div></div>`;
 }
 function lv_pipe() {
   const L = V("v5lv"), cards = arr(L.cards); if (!cards.length) return na5();
