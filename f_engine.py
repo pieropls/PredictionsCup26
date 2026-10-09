@@ -3284,7 +3284,7 @@ class Engine:
                 continue
             wk = min(members, key=lambda kk: members[kk].get("edge_c") if members[kk].get("edge_c") is not None else 9.0)
             w = members[wk]
-            if w.get("edge_c") is not None and fs - avg >= float(w["edge_c"]) + CORE_SWAP_C - 1e-9 and used - float(w["cost"]) + cost <= CORE_CAP_COST * 1.05:
+            if w.get("edge_c") is not None and fs - avg >= float(w["edge_c"]) + CORE_SWAP_C - 1e-9 and used - float(w["cost"]) + cost <= CORE_CAP_COST + 1e-6:   # C88b: the cap is exact
                 members.pop(wk); swap_out[wk] = dict(t=now, why=f"swapped for {k}")
                 members[k] = m; used += cost - float(w["cost"]); swaps += 1
                 changes.append(f"SWAP: {self.name(w['ex'])} {w['sub']} ({float(w['edge_c']) * 100:.1f}c) out at the touch, never below entry + 0.5c, for {self.name(ex)} {sub} ({(fs - avg) * 100:.1f}c)")
@@ -3448,7 +3448,8 @@ class Engine:
             rec = self.ledger.orders.get(str(f.get("order") or "")) or {}
             sub = rec.get("sub") or "inventory"
             strat = dash5.bucket_of_layer(f.get("layer"), sub, f["ex"])
-            book = "core" if ((f["ex"], sub) in core_subs or (f["ex"], sub) in sold_core) else "trading"
+            apart = strat in ("ri", "walls") or sub.startswith(CORE_SKIP_SUBS) or f["ex"] in dash5.RI_EX or f.get("bot") in self.position_names
+            book = "apart" if apart else "core" if ((f["ex"], sub) in core_subs or (f["ex"], sub) in sold_core) else "trading"   # Piero's position orders are neither book
             exit_ = f.get("action") == "sell" or f.get("layer") in self.REDUCING
             e = float(f["edge"]) * float(f["qty"])
             for scope in (("since",) + (("today",) if t >= day0 else ())):
@@ -3476,7 +3477,7 @@ class Engine:
             res[scope] = {}
             for grp in ("strategy", "book"):
                 res[scope][grp] = {k: dict((x, round(y, 2)) for x, y in v.items()) | {"net": round(v["bought"] - v["given"], 2)} for k, v in out[scope][grp].items()}
-        today_net = sum(v["net"] for v in res["today"]["strategy"].values())
+        today_net = sum(v["net"] for k, v in res["today"]["book"].items() if k != "apart")   # the target is for the two books; Piero's own orders are apart
         frac = max(0.05, (now - day0) / 86400)
         res.update(t=stamp(), target_day=SCOREBOARD_TARGET_DAY, today_net=round(today_net, 2), pace_day=round(today_net / frac, 2), core_cost=(self.controls.d.get("core") or {}).get("cost"))
         self.scoreboard = res
@@ -6581,7 +6582,7 @@ class Engine:
     def sm_reserve(self):
         if not self.controls.on("sm") or self.ring_window(time.time()):
             return 0.0                                      # (1c) in a ring window nothing is reserved for new SM entries
-        return max(0.0, float(self.sm_sizes()["cap"]) - self.sm_cost())
+        return max(0.0, min(float(self.sm_sizes()["cap"]) - self.sm_cost(), self.free_cash() - TM_PAUSE_FREE))   # C88b: never the catcher's last 10k (Piero 01:55 / 21:37)
 
     def sm_writes_last_min(self, now):
         secs, cancels = set(), 0
@@ -7506,8 +7507,13 @@ class Engine:
             pb.last_shot = now
             books, key = {}, "bids" if side == "no" else "asks"
             try:                                                                # a bad read skips this pair, not the loop
-                with ThreadPoolExecutor(max_workers=len(pb.legs)) as pool:      # every leg's book at once
-                    fetched = list(pool.map(api.orderbook, pb.legs))
+                feed_bks = {ex: self.feed_book(ex) for ex in pb.legs}           # C88b: the feed's books first (zero reads); REST only for a leg the feed lacks
+                missing = [ex for ex in pb.legs if feed_bks[ex] is None]
+                if missing:
+                    with ThreadPoolExecutor(max_workers=len(missing)) as pool:  # every missing leg's book at once
+                        for ex, bk in zip(missing, pool.map(api.orderbook, missing)):
+                            feed_bks[ex] = bk
+                fetched = [feed_bks[ex] for ex in pb.legs]
             except Exception as err:
                 self.event("ERR", f"{pb.race} order book: {str(err)[:120]}")
                 continue
