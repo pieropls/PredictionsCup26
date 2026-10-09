@@ -2775,8 +2775,8 @@ class Engine:
                     continue                                # day 9 §9.4 / day 11 §1.4: on the RI races only levels >= 15c under fair
                 sub = f"dump:{ex}:{side}:{'L0' if i == 4 else i}"
                 if abs(books.get(sub, 0)) >= MIN_QTY:
-                    if i != 4 or self.l0_refills(sub, now) >= DUMP_L0_REFILLS + 1:   # the first fill + 3 refills per 10 min
-                        continue                            # its tranche is being sold back: re-arms when that fills (L0: 3 refills / 10 min)
+                    if i != 4 or self.l0_refills(sub, now) >= DUMP_L0_REFILLS + 1 or (str(ex), sub) in self.core_set:   # the first fill + 3 refills per 10 min
+                        continue                            # its tranche is being sold back: re-arms when that fills (L0: 3 refills / 10 min); C88c: never into a core sub (the 50k cap)
                 if sliding and sub in rest_px and px < rest_px[sub] - 1e-9:
                     px = rest_px[sub]                       # a slide in progress: never lower a resting level
                     q = int(cost * DUMP_V3_WEIGHTS[i] / px)
@@ -5687,7 +5687,7 @@ class Engine:
         side = rec["side"]
         key = (ex, side)
         self.fast_rearms[key] = [t for t in self.fast_rearms[key] if t >= now - 600]
-        if len(self.fast_rearms[key]) >= FAST_REARMS_PER_10M or self.l0_cap_used() >= DUMP_L0_BUDGET or self.l0_refills(rec.get("sub"), now) >= DUMP_L0_REFILLS + 1:
+        if len(self.fast_rearms[key]) >= FAST_REARMS_PER_10M or self.l0_cap_used() >= DUMP_L0_BUDGET or (str(ex), rec.get("sub")) in self.core_set or self.l0_refills(rec.get("sub"), now) >= DUMP_L0_REFILLS + 1:
             self.fast_stats["l0_capped"] += 1
             return 0
         fs = self.side_fair(ex, side)
