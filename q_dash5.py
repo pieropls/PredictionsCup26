@@ -1090,6 +1090,41 @@ def strategy_days(eng):
 CONTROL_KINDS = {"CONTROL", "PAUSE", "STOP", "BREAKER", "KILL", "CASHSHORT", "BLIND", "ALERT", "RATCHET", "TM", "SWING"}
 
 
+ALERTS = "dash5_alerts.jsonl"
+_alerts = dict(rows=None)
+
+
+def alerts_merge(fresh):
+    """The newest alerts and control changes, kept across restarts (the engine's event list starts empty after one): new ones are
+    appended to data/dash5_alerts.jsonl (deduplicated by day, time and text; the file keeps the last 300)."""
+    path = os.path.join(DATA, ALERTS)
+    if _alerts["rows"] is None:
+        rows = []
+        try:
+            with open(path) as fh:
+                for l in fh:
+                    try:
+                        rows.append(json.loads(l))
+                    except ValueError:
+                        pass
+        except OSError:
+            pass
+        _alerts["rows"] = rows[-300:]
+    rows = _alerts["rows"]
+    seen = {(r.get("d"), r.get("t"), r.get("text")) for r in rows[-400:]}
+    new = [r for r in fresh if (r.get("d"), r.get("t"), r.get("text")) not in seen]
+    if new:
+        rows.extend(new)
+        _alerts["rows"] = rows = rows[-300:]
+        try:
+            with open(path, "w") as fh:
+                for r in rows:
+                    fh.write(json.dumps(r) + "\n")
+        except OSError:
+            pass
+    return list(rows)
+
+
 def admin(eng, checks):
     c = eng.controls
     ctl = []
@@ -1108,12 +1143,12 @@ def admin(eng, checks):
                 else:
                     ent += 1
         ctl.append(dict(key=b["key"], name=b["name"], layers=layers, state=s0, entries=ent, exits=ext))
-    alerts = []
+    fresh = []
     for e in list(eng.events)[-600:]:
         k = str(e.get("kind") or "")
         if k in ("CONTROL", "PAUSE", "STOP", "BREAKER", "KILL", "CASHSHORT", "BLIND", "ERR") or "AUTO-OFF" in str(e.get("text", "")) or "->" in str(e.get("text", ""))[:60] and k in ("TM", "SWING", "CASH"):
-            alerts.append(dict(t=e.get("t"), kind=k, text=str(e.get("text", ""))[:260]))
-    alerts = alerts[-30:][::-1]
+            fresh.append(dict(t=e.get("t"), d=time.strftime("%m-%d"), kind=k, text=str(e.get("text", ""))[:260]))
+    alerts = alerts_merge(fresh)[-30:][::-1]
     cfg = {}
     try:
         import a_config as A

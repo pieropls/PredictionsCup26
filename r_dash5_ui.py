@@ -312,7 +312,8 @@ function mk_table() {
   for (const g of ["Senate", "Governor", "House", "National"]) {
     const list = groups[g]; if (!list) continue;
     list.sort((a, b) => { const x = keyv(a), y = keyv(b); return (x > y ? 1 : x < y ? -1 : 0) * srt.dir; });
-    const shut = ui.v5.mkcol[g];
+    const phoneShut = typeof window !== "undefined" && window.innerWidth < 640 && !(ui.v5.mkq || "").trim() && !ui.v5.mkf && !ui.v5.mkg && ui.v5.mkcol[g] === undefined;   // phone: groups start collapsed (tap to open; a search or filter opens them)
+    const shut = ui.v5.mkcol[g] || phoneShut;
     s += `<tr class="grp" data-mkcol="${g}"><td colspan="${MKC.length}">${shut ? "▸" : "▾"} ${g} (${list.length} races)</td></tr>`;
     if (shut) continue;
     for (const rs of list) {
@@ -443,7 +444,7 @@ function v5click(e) {
   if ((el = q("[data-mkf]"))) { e.preventDefault(); ui.v5.mkf = el.dataset.mkf; draw(); return true; }
   if ((el = q("[data-mkview]"))) { ui.v5.mkview = el.dataset.mkview; draw(); return true; }
   if ((el = q("[data-mksort]"))) { const k = el.dataset.mksort; ui.v5.mksort = {k, dir: ui.v5.mksort.k === k ? -ui.v5.mksort.dir : -1}; draw(); return true; }
-  if ((el = q("[data-mkcol]"))) { const g = el.dataset.mkcol; ui.v5.mkcol[g] = !ui.v5.mkcol[g]; draw(); return true; }
+  if ((el = q("[data-mkcol]"))) { const g = el.dataset.mkcol; ui.v5.mkcol[g] = !el.textContent.trim().startsWith("▸"); draw(); return true; }   // toggles what is shown (phone groups start shut)
   if ((el = q("[data-closemk]"))) { ui.v5.mk = null; draw(); return true; }
   if ((el = q("[data-mk]"))) { openMk(el.dataset.mk); return true; }
   if ((el = q("[data-hchk]"))) { ui.v5.hchk = ui.v5.hchk === el.dataset.hchk ? null : el.dataset.hchk; draw(); return true; }
