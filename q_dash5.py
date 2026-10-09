@@ -892,10 +892,11 @@ def markets(eng, pos_rows=None):
     orders = collections.Counter(o["ex"] for o in list(eng.open))
     vol = {ex: sum(v for _, v in d) for ex, d in list(getattr(eng, "vol24", {}).items())}
     feed = getattr(eng, "mkt_feed", None)
-    rows = []
-    for b in eng.bots:
-        if b.kind != "market":
+    rows, seen = [], set()
+    for b in eng.bots:                                      # every contract once: market bots and the position bots (Piero's manual holdings)
+        if b.ex in seen or b.kind not in ("market", "position"):
             continue
+        seen.add(b.ex)
         ex = b.ex
         m = eng.meta.get(ex) or {}
         bid, ask, last = eng.px.get(ex, (None, None, None))
@@ -963,25 +964,31 @@ def activity(eng, n=40):
         if f.get("before_engine") or f.get("action") not in ("buy", "sell"):
             continue
         b = bucket_of_layer(f.get("layer"), "", f.get("ex"))
-        fs = eng.side_fair(f["ex"], f["side"]) if hasattr(eng, "side_fair") else None
-        rows.append(dict(t=local_ts(f["t"]), ex=f["ex"], side=f["side"], qty=f["qty"], px=f["price"], layer=f.get("layer"), strat=b, fair=f.get("fair") or fs))
+        fs = f.get("fair")
+        if fs is None and hasattr(eng, "side_fair"):
+            fs = eng.side_fair(f["ex"], f["side"])
+        red = f.get("action") == "sell" or f.get("layer") in getattr(eng, "REDUCING", ())
+        side, px = f["side"], f["price"]
+        if red and f.get("action") == "buy":                # an exit placed as a buy of the other side: we sold the held side at 1 - p
+            side, px, fs = ("no" if side == "yes" else "yes"), round(1 - px, 4), (None if fs is None else 1 - fs)
+        rows.append(dict(t=local_ts(f["t"]), ex=f["ex"], side=side, qty=f["qty"], px=px, layer=f.get("layer"), strat=b, fair=fs, sold=red))
     i = 0
     while i < len(rows) and len(out) < n:
         r = rows[i]
         j = i
         if r["qty"] <= 5:
-            while j + 1 < len(rows) and rows[j + 1]["qty"] <= 5 and rows[j + 1]["ex"] == r["ex"] and rows[j + 1]["side"] == r["side"] and abs(rows[j + 1]["t"] - r["t"]) <= 600:
+            while j + 1 < len(rows) and rows[j + 1]["qty"] <= 5 and rows[j + 1]["ex"] == r["ex"] and rows[j + 1]["side"] == r["side"] and rows[j + 1]["sold"] == r["sold"] and abs(rows[j + 1]["t"] - r["t"]) <= 600:
                 j += 1
         if j > i:
             g = rows[i:j + 1]
             out.append(dict(id=f"g{r['t']}{r['ex']}", t=r["t"], kind="trade", strat=r["strat"],
-                            text=f"{len(g)} fills of {', '.join(sorted({str(int(x['qty'])) for x in g}))} share{'s' if any(x['qty'] > 1 for x in g) else ''}, "
+                            text=f"{name_of(r['strat'])} {'sold' if r['sold'] else 'bought'} {len(g)} fills of {', '.join(sorted({str(int(x['qty'])) for x in g}))} share{'s' if any(x['qty'] > 1 for x in g) else ''}, "
                                  f"{eng.name(r['ex'])} {r['side'].upper()} at {r['px']:.3f}, {time.strftime('%H:%M', time.localtime(g[-1]['t']))}–{time.strftime('%H:%M', time.localtime(g[0]['t']))}"))
         else:
             fs = r["fair"]
             under = "" if fs is None else f", {abs(fs - r['px']) * 100:.1f}¢ {'under' if fs >= r['px'] else 'over'} fair"
             out.append(dict(id=f"f{r['t']}{r['ex']}{r['qty']}", t=r["t"], kind="trade", strat=r["strat"],
-                            text=f"{name_of(r['strat'])} bought {int(r['qty']):,} {r['side'].upper()} {eng.name(r['ex'])} at {r['px']:.3f}{under}"))
+                            text=f"{name_of(r['strat'])} {'sold' if r['sold'] else 'bought'} {int(r['qty']):,} {r['side'].upper()} {eng.name(r['ex'])} at {r['px']:.3f}{under}"))
         i = j + 1
     for e in list(eng.events)[-300:]:
         k = str(e.get("kind") or "")
@@ -1017,7 +1024,7 @@ def strategy_cards(eng, totals, snap, pos_rows):
     def caps(key):
         try:
             if key == "catcher":
-                return round(float((getattr(eng, "dump_cov", None) or {}).get("budget") or 0))
+                return None                                 # its entry budget moves every loop; the bar would compare holdings with it
             if key == "tm":
                 return round(eng.tm_cap(now, log=False))
             if key == "sm":

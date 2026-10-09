@@ -4693,7 +4693,7 @@ class Dash5Tests(EngineCase):
         self.assertEqual({c["key"] for c in lv["cards"] if c["group"] == "strategy"}, {b["key"] for b in q_dash5.REGISTRY}, "every strategy has a card")
         self.assertAlmostEqual(ov["port"]["invested"] + ov["port"]["available"], ov["port"]["account"], delta=1.0, msg="donut + cash = account")
         rows = st["v5mk_rows"]
-        self.assertEqual(len(rows), sum(1 for b in eng.bots if b.kind == "market"), "every contract listed")
+        self.assertEqual(len(rows), len({b.ex for b in eng.bots if b.kind in ("market", "position")}), "every contract listed (market and position bots)")
         for r in rows:
             p = (eng.book.get(r["ex"]) or {}).get("pos", 0)
             self.assertEqual(bool(r["hold"]), abs(p) >= 1, r["ex"])
