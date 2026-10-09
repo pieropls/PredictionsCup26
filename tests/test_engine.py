@@ -951,6 +951,8 @@ class ReleaseTests(EngineCase):
         fake.avg_cost[ex] = 0.40                          # day 4 §3: released because the SIG bid is above its entry cost
         base = fake.pnl()
         fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 1000)
+        self.addCleanup(setattr, f_engine, "RELEASE_QUIET_HOURS", f_engine.RELEASE_QUIET_HOURS)
+        f_engine.RELEASE_QUIET_HOURS = (25, 25)            # the rig runs on the real clock: no 07:00-08:00 quiet hour here (the rotation's touch ask would show instead)
         eng = engine(fake)
         eng.ft.half_life = 1e-9
         loop(eng, fake)
