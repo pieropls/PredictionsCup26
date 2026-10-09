@@ -194,12 +194,18 @@ def archive_append(fills, orders=None):
 
 
 def load_archive():
-    rows = []
+    """Every archived fill once (the engine's appends and a backfill run can both write a fill: deduplicated by id:orderId; a
+    torn line is skipped)."""
+    rows, seen = [], set()
     if os.path.exists(archive_path()):
         with open(archive_path()) as fh:
             for l in fh:
                 try:
                     f = json.loads(l)
+                    k = f.get("key") or f"{f['id']}:{f.get('orderId')}"
+                    if k in seen:
+                        continue
+                    seen.add(k)
                     f["_ts"] = iso_ts(f["filledAt"])
                     rows.append(f)
                 except Exception:
@@ -214,12 +220,15 @@ TX_ARCHIVE = "tx_archive.jsonl"
 def load_tx():
     """data/tx_archive.jsonl (GET /portfolio/transactions): one row per trade event of ours, at its average price, with BUY / SELL,
     plus the non-trade cash events. The fills feed has no direction; the transactions do, and they reproduce SIG's cash exactly."""
-    rows, path = [], os.path.join(DATA, TX_ARCHIVE)
+    rows, path, seen = [], os.path.join(DATA, TX_ARCHIVE), set()
     if os.path.exists(path):
         with open(path) as fh:
             for l in fh:
                 try:
                     t = json.loads(l)
+                    if t.get("event_id") in seen:
+                        continue
+                    seen.add(t.get("event_id"))
                     t["_ts"] = iso_ts(t["createdAt"])
                     rows.append(t)
                 except Exception:
@@ -1039,8 +1048,13 @@ def strategy_cards(eng, totals, snap, pos_rows):
             sb = ((snap or {}).get("buckets") or {}).get(k, {})
             fills = [dict(t=f["t"], ex=f["ex"], name=eng.name(f["ex"]), side=f["side"], qty=f["qty"], px=f["price"], layer=f.get("layer"), realized=f.get("realized"))
                      for f in reversed(eng.ledger.fills[-3000:]) if bucket_of_layer(f.get("layer"), "", f.get("ex")) == k][:20]
-            if b.get("gated") and st == "Live":
-                st, reason = "Gated", (reason + "; " if reason else "") + "new quotes only in BOUNCE markets"
+            if b.get("gated") and st in ("Live", "Pilot"):
+                g = (getattr(eng, "sm_cov", None) or {}).get("gate") or {}
+                n_all = sum(g.values()) if g else 0
+                st, reason = "Gated", (reason + "; " if reason else "") + (f"new quotes only in BOUNCE markets: {g.get('entries', 0)} of {n_all} now"
+                                                                           if n_all else "new quotes only in BOUNCE markets")
+                if (getattr(eng, "sm_cov", None) or {}).get("exits_only"):
+                    reason += "; exits only (rolling 24 h loss stop)"
             cards.append(dict(key=k, name=b["name"], group=group, sub=b.get("group5"), status=st, reason=reason, rules=b.get("rules", ""), layers=b.get("layers"),
                               control=b.get("control") or [], cap=caps(k), in_use=round(cost.get(k, 0.0), 2),
                               pnl=tot.get("board"), pnl_fair=tot.get("fair"),
