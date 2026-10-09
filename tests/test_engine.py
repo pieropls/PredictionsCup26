@@ -4252,7 +4252,8 @@ class ReservoirTests(EngineCase):
         fake.pos[ex] = -46_931
         eng.meta[ex]["race"] = a_config.RI_SENATE_RACE; eng.ri_held_cap = 43_539.0
         r = json.loads(json.dumps(a_config.RESERVOIRS["1077"]))
-        r.update(ex=ex, offers=[[subs[0], 0.850], ["inventory", 0.850], [subs[2], 0.855], [subs[3], 0.855]], max_out=None, rest_qty=None, join_touch=False, hold_subs=[], core_qty=10_000,
+        r.update(ex=ex, offers=[[subs[0], 0.850], ["inventory", 0.850], [subs[2], 0.855], [subs[3], 0.855]], max_out=None, rest_qty=None, join_touch=False, hold_subs=[], core_qty=10_000, sell_caps={}, avg_floor=False, no_rebuild=False, catcher_cycle_c=None,
+                 rebuy=[[0.820, 0.40], [0.815, 0.30], [0.810, 0.30]], rebuy_under_sell=0.03, full_qty=46_949, rebuild_px=0.85,
                  mode="trade", fair0=0.0065, since=stamp_(),
                  stats=dict(sold_sh=0.0, bought_sh=0.0, realized=0.0, cycles=0, sold_val=0.0, bought_val=0.0, legs=[]))
         eng.controls.d["reservoirs"] = {ex: r}
@@ -4344,6 +4345,39 @@ class ReservoirTests(EngineCase):
         buys = sorted(self.legs(eng, fake, ex, "swing"), key=lambda o: -o["price"])
         self.assertEqual([round(o["price"], 3) for o in buys], [0.82, 0.815, 0.81], "rebuys unchanged (last sell 0.840 - 2c = 0.820)")
 
+    def test_1740_hold_11900_rest_at_the_average_floor_no_rebuys(self):
+        """Piero 17:40: hold 11,900 (one wall + 3,000 of the other); everything else rests at 0.840 (the position-average floor replaces the
+        per-lot rule 0 on his order), clips <= 5k; no rebuys; no rebuild; the TM never buys the market; catcher lots cycle at entry + 2c."""
+        fake, eng, ex, subs = self.rig()
+        r = eng.controls.d["reservoirs"][ex]
+        r.update(offers=[[subs[0], 0.840], ["inventory", 0.840], [subs[3], 0.840]], sell_caps={subs[3]: 100}, hold_subs=[subs[2]], avg_floor=True,
+                 join_touch=False, no_rebuild=True, catcher_cycle_c=0.02, rebuy=[], max_out=None, rest_qty=None, core_qty=0)
+        r["stats"]["sold_sh"] = 7_644.0; r["last_sell_px"] = 0.84
+        fake.px[ex] = eng.px[ex] = (0.16, 0.165, 0.1625)        # NO bid 0.835 / ask 0.840
+        eng.book[ex]["row"] = dict(eng.book[ex].get("row") or {}, avgCost=0.8397)
+        plan = eng.reservoir_plan(time.time(), r)
+        by = collections.defaultdict(int)
+        for x in plan["sells"]:
+            by[x["sub"]] += x["qty"]
+            self.assertAlmostEqual(x["px"], 0.840, places=3); self.assertLessEqual(x["qty"], 5_000); self.assertEqual(x["rule0_margin"], -1.0)
+        self.assertEqual((by[subs[0]], by["inventory"], by[subs[3]]), (14_787, 20_144, 100), "swing + inventory + 100 of the second wall")
+        self.assertNotIn(subs[2], by, "the 8,900 wall is held")
+        self.assertEqual(plan["buys"], [], "no rebuy ladder")
+        FAIR[ex] = 0.05
+        eng.reservoir_check_triggers(time.time(), r, 0.05)
+        self.assertEqual(r["mode"], "trade", "no rebuild on RI any more")
+        FAIR[ex] = 0.0065
+        self.assertNotIn(ex, {c_[1] for c_ in eng.tm_candidates()}, "the TM never buys a reservoir market")
+        # a catcher tranche on the market: offered back at >= entry + 2c and never held while cash is idle
+        sub = f"dump:{ex}:no:1"
+        eng.ledger.subbooks[ex][sub] = -2_000.0
+        eng.ledger.tranches[sub] = dict(ex=ex, side="no", kind="dump", state="open", ts=time.time() - 60, t="x", avg=0.80)
+        eng.controls.d["buffer"] = dict(value=1_000, day=time.strftime("%Y-%m-%d"))
+        eng.track_dumps(time.time())
+        v = [x for x in eng.dump_view.get(ex, []) if x["sub"] == sub]
+        self.assertTrue(v, "not held")
+        self.assertGreaterEqual(1 - v[0]["rebound"] if v[0]["rebound"] < 0.5 else v[0]["rebound"], 0.82 - 1e-9)
+
     def test_an_ask_never_crosses_the_bid(self):
         fake, eng, ex, subs = self.rig()
         fake.px[ex] = eng.px[ex] = (0.10, 0.105, 0.1025)       # NO bid 0.895 / ask 0.90: the 0.850 / 0.855 levels would cross
@@ -4407,7 +4441,7 @@ class ReservoirTests(EngineCase):
         self.assertEqual(rs["1077"]["stats"]["sold_sh"], 6000.0, "the live RI state carries over (shares out)")
         self.assertAlmostEqual(rs["1077"]["last_sell_px"], 0.86, places=3)
         self.assertNotIn("reservoir", eng.controls.d)
-        self.assertEqual((rs["1077"]["rest_qty"], rs["1077"]["ver"]), (15_000, "17:15"), "Piero 17:15: at most 15,000 resting")
+        self.assertEqual((rs["1077"]["ver"], rs["1077"]["offers"][0][1], rs["1077"]["rebuy"]), ("17:40", 0.84, []), "Piero 17:40: 0.840, no rebuys")
 
     def test_fair_reference_pinned_on_the_first_priced_loop(self):
         fake, eng, ex, subs = self.rig()

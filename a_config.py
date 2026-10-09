@@ -291,13 +291,15 @@ RESERVOIR_TRIG_DATE = "2026-10-30 00:00:00"
 # 24-h p10 of NO prints >= trig_p10, PM fair moved >= 2c from the deploy, or Oct 30 00:00 PT.
 RESERVOIRS = {
     # RI Senate R (resized): core = the 10,000 highest-cost inventory lots; ~37k tradable — swing + the other inventory lots at 0.850, walls at 0.855
-    "1077": dict(ex="1077", side="no", core_sub="inventory", core_qty=0, ver="17:15",
-                 # Piero 17:15 Oct 8: after the immediate 20,000 sale at 0.840 (the 'sell_now' control), 15,000 NO rest at 0.845 joining the touch
-                 # (queue kept, clips <= 5k); the rest (~12,093 incl. both walls) held, not offered; rebuys 0.820 / 0.815 / 0.810 only up to what was sold
-                 offers=[["swing:1077:no", 0.845], ["inventory", 0.845]], hold_subs=["wall:1077:no:w1791342782", "wall:1077:no:w1791342929"],
-                 rest_qty=15_000, join_touch=True,
-                 clip=5_000, rebuy=[[0.820, 0.40], [0.815, 0.30], [0.810, 0.30]], rebuy_under_sell=0.02,
-                 full_qty=46_949, rebuild_px=0.85, trig_p10=0.85, trig_fair_move=0.02, trig_date=RESERVOIR_TRIG_DATE, gate_h=48),
+    "1077": dict(ex="1077", side="no", core_sub="inventory", core_qty=0, ver="17:40",
+                 # Piero 17:40 Oct 8: hold 11,900 NO (~10k SIG at 0.84: wall w1791342782 8,900 + 3,000 of w1791342929); unwind the other 27,567 at the
+                 # position average — passive NO asks at 0.840 (floor, never below; the per-lot rule 0 is replaced by the position-average floor on his
+                 # order), clips <= 5k, queue kept, unfilled parts stay resting; the TM's own 162 exit at 0.845. No rebuy ladder: RI is bought only by
+                 # the catcher on pumps, and catcher lots are offered back at >= entry + 2c (a cycle, not a hold). No rebuild triggers.
+                 offers=[["swing:1077:no", 0.840], ["inventory", 0.840], ["wall:1077:no:w1791342929", 0.840]], sell_caps={"wall:1077:no:w1791342929": 100},
+                 hold_subs=["wall:1077:no:w1791342782"], avg_floor=True, join_touch=False, no_rebuild=True, catcher_cycle_c=0.02,
+                 clip=5_000, rebuy=[], rebuy_under_sell=0.02,
+                 full_qty=11_900, rebuild_px=0.84, trig_p10=0.85, trig_fair_move=0.02, trig_date=RESERVOIR_TRIG_DATE, gate_h=48),
     # Delaware Senate R and RI Governor R (the 10:17 study): levels from the last 72 h of tape — sell at p80 0.880 (>= entry 0.870 + 1c), rebuy 3c under it (p20 0.85-0.86)
     "1075": dict(ex="1075", side="no", core_sub="inventory", core_qty=0, offers=[["swing:1075:no", 0.880], ["inventory", 0.880]],
                  clip=5_000, rebuy=[[0.850, 0.40], [0.845, 0.30], [0.840, 0.30]], rebuy_under_sell=0.03,

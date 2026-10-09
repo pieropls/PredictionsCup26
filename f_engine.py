@@ -3094,6 +3094,9 @@ class Engine:
             # day 9 §9.1 (Piero, C73): first ask at fill + 1c, one tick lower every 10 min, floor at entry + 0.5c (rule 0);
             # the same ladder for every dump tranche (L0 included); never above fair_side - 0.5c (the A2 exception), never under the floor
             floor_ = avg + RULE0_MARGIN
+            cyc = (self.reservoirs().get(ex) or {}).get("catcher_cycle_c")
+            if cyc:
+                floor_ = avg + float(cyc)                   # Piero 17:40: catcher lots on RI are offered back at >= entry + 2c (a cycle, not a hold)
             target = max(floor_, avg + DUMP_LADDER_FIRST - DUMP_LADDER_TICK * int(age // DUMP_LADDER_STEP_S))
             if fs is not None:
                 target = min(target, fs - DUMP_SELL_FAIR_GAP)
@@ -3112,6 +3115,8 @@ class Engine:
                 continue
             if (self.meta.get(ex) or {}).get("race") in RI_RACES and (self.ri_held_cap is None or self.ri_held_cost() > self.ri_held_cap + 1):
                 continue                                    # §1.4: RI above its cap is never held
+            if (self.reservoirs().get(ex) or {}).get("catcher_cycle_c"):
+                continue                                    # Piero 17:40: a cycling reservoir market's catcher lots are never held
             cands.append((fs - avg, abs(q) * avg, sub))
         held = {}
         if cands:
@@ -4828,7 +4833,7 @@ class Engine:
 
     def reservoir_check_triggers(self, now, r, f):
         """Rebuild triggers: 24-h p10 of NO prints >= trig_p10, PM fair moved >= 2c from the deploy, or Oct 30 00:00 PT."""
-        if r.get("mode") == "rebuild":
+        if r.get("mode") == "rebuild" or r.get("no_rebuild"):
             return
         if r.get("fair0") is None and f is not None:        # the deploy ran before the first fair was in — pin the reference now
             r["fair0"] = f
@@ -4965,14 +4970,18 @@ class Engine:
                 rec = self.ledger.orders.get(o["id"]) or {}
                 if o["ex"] == ex and rec.get("layer") == "swingsell" and o["id"] not in self.ex.cancelling:
                     resting[rec.get("sub")].append(round(1 - o["price"], 3) if o["side"] != side else o["price"])
+            pos_avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0.0)
             for sub, sp in r["offers"]:
-                q = int(min(avail.get(sub, 0.0), max(0.0, out_room)))
+                q = int(min(avail.get(sub, 0.0), max(0.0, out_room), float((r.get("sell_caps") or {}).get(sub, float("inf")))))
                 if q < MIN_QTY:
                     continue
                 t_avg = (self.ledger.tranches.get(sub) or {}).get("avg")
-                if sub.startswith(("wall:", "swing:")) and t_avg and float(t_avg) + RULE0_MARGIN > float(sp) + 1e-9:
+                if r.get("avg_floor"):
+                    if pos_avg and float(sp) < round(pos_avg, 3) - 1e-9:
+                        continue                            # Piero 17:40: the floor is the position average (never below it)
+                elif sub.startswith(("wall:", "swing:")) and t_avg and float(t_avg) + RULE0_MARGIN > float(sp) + 1e-9:
                     continue                                # rule 0 per lot: this lot waits for a higher price
-                if sub == "inventory" or not t_avg:
+                elif sub == "inventory" or not t_avg:
                     q = min(q, self.rule0_allowed(ex, side, sub, float(sp), q))
                 ask_px = float(sp)
                 if r.get("join_touch") and no_ask is not None and no_ask > ask_px + 1e-9:
@@ -4987,7 +4996,10 @@ class Engine:
                 out_room -= q
                 while q >= MIN_QTY:
                     take = int(min(q, r["clip"]))
-                    plan["sells"].append(dict(side=side, px=ask_px, qty=take, sub=sub, ttl=SWING_TTL_S))
+                    x_ = dict(side=side, px=ask_px, qty=take, sub=sub, ttl=SWING_TTL_S)
+                    if r.get("avg_floor"):
+                        x_["rule0_margin"] = -1.0           # the engine's rule-0 filter lets these lots go at the position-average floor (Piero's order)
+                    plan["sells"].append(x_)
                     q -= take
             out_sh = self.reservoir_out(r)
             cap_px = (float(r["last_sell_px"]) - r["rebuy_under_sell"]) if r.get("last_sell_px") else 1.0
@@ -5214,7 +5226,10 @@ class Engine:
                     sale_px = round(1 - f["price"], 3) if f["side"] != r["side"] else f["price"]
                     st_r["sold_sh"] += f["qty"]; st_r["sold_val"] += f["qty"] * sale_px; st_r["realized"] += f.get("realized") or 0.0
                     r["last_sell_px"] = sale_px
-                    line = f"RESERVOIR {self.name(f['ex'])} sold {f['qty']:,.0f} {r['side'].upper()} at {sale_px:.3f} from {sub_f} (out {st_r['sold_sh'] - st_r['bought_sh']:,.0f}), realized {(f.get('realized') or 0):+,.0f}"
+                    bk_ = self.book.get(f["ex"]) or {}
+                    held_ = abs(bk_.get("pos") or 0)
+                    line = (f"RESERVOIR {self.name(f['ex'])} sold {f['qty']:,.0f} {r['side'].upper()} at {sale_px:.3f} from {sub_f} (out {st_r['sold_sh'] - st_r['bought_sh']:,.0f}), realized {(f.get('realized') or 0):+,.0f}; "
+                            f"position {held_:,.0f} at SIG average {((bk_.get('row') or {}).get('avgCost'))}, exposure {held_ * sale_px:,.0f} SIG at {sale_px:.3f}; free cash {self.free_cash():,.0f}")
                 else:
                     st_r["bought_sh"] += f["qty"]; st_r["bought_val"] += f["qty"] * f["price"]
                     line = f"RESERVOIR {self.name(f['ex'])} rebought {f['qty']:,.0f} {r['side'].upper()} at {f['price']:.3f} (out {st_r['sold_sh'] - st_r['bought_sh']:,.0f})"
@@ -5706,8 +5721,8 @@ class Engine:
         e_min = self.tm_e_min()
         out = []
         for b in self.bots:
-            if b.kind != "market" or b.ex in self.manual_ex or b.ex in fm_ex or b.ex in sm_ex or self.ex.is_frozen(b.ex):
-                continue
+            if b.kind != "market" or b.ex in self.manual_ex or b.ex in fm_ex or b.ex in sm_ex or b.ex in self.reservoirs() or self.ex.is_frozen(b.ex):
+                continue                                    # (Piero 17:40) a reservoir market is bought only by the catcher
             ex, f, px = b.ex, self.fair.get(b.ex), self.px.get(b.ex)
             if f is None or px is None or px[0] is None or px[1] is None or px[1] <= px[0]:
                 continue

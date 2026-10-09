@@ -431,7 +431,10 @@ class MarketBot:
                 out.append(want(x["side"], "buy", x["px"], int(x["qty"]), x["px"], x["px"], QTY_TOL, "fm", sub=x["sub"], ttl=x["ttl"]))
         sw = s.get("swing") or {}                            # day 10 §3: the RI swing legs (sell leg = reduce from the wall / swing subs, buy leg = entry)
         for x in sw.get("sells") or []:
+            n_ = len(out)
             reduce_buy(x["side"], x["px"], int(x["qty"]), "swingsell", x["sub"], x["ttl"], band=0.0, a2=False)
+            if x.get("rule0_margin") is not None and len(out) > n_:
+                out[-1]["rule0_margin"] = x["rule0_margin"]   # Piero 17:40: RI lots go at the position-average floor
         for x in ([sw["buy"]] if sw.get("buy") else []) + list(sw.get("buys") or []):   # C84c: the reservoir rests several rebuy levels
             out.append(want(x["side"], "buy", x["px"], int(x["qty"]), x["px"], x["px"], 2 * QTY_TOL, "swing", sub=x["sub"], ttl=x["ttl"]))
         for x in s.get("wall_exits") or []:
