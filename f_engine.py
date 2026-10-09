@@ -68,6 +68,8 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      FAST_PATH_ON, FAST_REARMS_PER_10M, FAST_WRITES_RESERVE, FAST_SLOW_S, FAST_PM_MOVE_C,
                      TM_BUFFER_RESUME, TM_PAUSE_FREE, D5_EXCLUDE_LAYERS, TM_ENTRY_STOPS, SM_REGIME_WIN_S, SM_REGIME_EVERY_S, SM_REGIME, SM_QUOTE_REGIMES, SM_LOSS_MARKET_DAY, SM_LOSS_24H,
                      SM_TUNE_AT, SM_TUNE_BOUNDS, SM_TUNE_MIN_GAIN, SM_TUNE_MIN_FILLS, RETIRED_LAYERS, DUMP_DEEP_OFF, DUMP_L0_CAP_RESTING, DUMP_THIN_SIDES,
+                     CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
+                     PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -407,6 +409,8 @@ class Engine:
         self.fm_now, self.fm_block, self.fm_fills, self.fm_note, self.fm_poll = {}, {}, collections.deque(maxlen=5000), {}, None   # mm_plan §1: the fair maker
         self.tm_now, self.tm_view, self.tm_block, self.tm_fills, self.tm_note, self.tm_depth, self.off24, self.tm_cov, self.tm_wpeak = {}, {}, {}, collections.deque(maxlen=5000), {}, {}, {}, {}, 0   # day 11 §2: the touch maker
         self.tm_buf_paused, self.tm_stop_logged = False, None   # C87: the BUFFER pause and the pre-ring entry stop
+        self.pnl_alert_t, self.trims_seen, self.trim_t, self.book_scan_t, self.book_scan_rows, self.reads_before, self.reads_after_t = {}, 0, None, 0.0, [], None, None   # C88
+        self.core_t, self.core_set, self.scoreboard_t, self.scoreboard = 0.0, set(), 0.0, {}   # C88: the two books and the scoreboard
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
         self.prints, self.print_ids, self.sm_regime, self.sm_regime_t, self.sm_exits_only, self.sm_tune_mtime = {}, {}, {}, 0.0, None, None   # C87: print ring, live regimes, loss stop, re-tune
@@ -455,6 +459,11 @@ class Engine:
             self.c87_migrations()                           # C87 (Piero 19:56 Oct 8): TM full, SM gated, FM / scalper deleted
         except Exception as err:
             print(f"C87 migrations: {err!r}")
+        try:
+            self.core_set = {(str(m["ex"]), m["sub"]) for m in ((self.controls.d.get("core") or {}).get("lots") or {}).values()}   # C88: the books from the last run
+            self.c88_migration(time.time())
+        except Exception as err:
+            print(f"C88 migration: {err!r}")
         try:
             self.band_credit_migration()
         except Exception as err:
@@ -1237,6 +1246,11 @@ class Engine:
             self.book_sampler(now)                          # ideas_backlog: the freed reads go to the book sampler first
         except Exception as err:
             self.event("ERR", f"book sampler: {err!r}")
+        for fn in (self.book_scan, self.recycle_depth_snapshot, self.range_candidates_daily):   # C88: zero-read jobs from the feed and the tape
+            try:
+                fn(now)
+            except Exception as err:
+                self.event("ERR", f"{fn.__name__}: {err!r}")
         exs = [b.ex for b in self.bots if b.kind == "market"]
         last = lambda ex: (self.px.get(ex) or (None, None, None))[2]
         changed = sorted((ex for ex in exs if last(ex) is not None and last(ex) != self.intel_px.get(ex)), key=lambda ex: self.intel_t.get(ex, 0))
@@ -1673,9 +1687,15 @@ class Engine:
             if not c.on(l):
                 continue
             hit = [k for k in self.kill_status(l, stats.get(l, {})) if k["hit"]]
-            if hit:
-                c.kill(l, f"{hit[0]['rule']}: {hit[0]['value']}")
-                self.alerts.append(f"{time.strftime('%H:%M')} layer {l} killed: {hit[0]['rule']} ({hit[0]['value']})")
+            if hit:                                         # C88 (Piero 01:55): P&L / mark-out rules are ALERTS; only the reject rate (an API signal) still kills
+                rej = [k for k in hit if k["rule"].startswith("rejects")]
+                if rej:
+                    c.kill(l, f"{rej[0]['rule']}: {rej[0]['value']}")
+                    self.alerts.append(f"{time.strftime('%H:%M')} layer {l} killed: {rej[0]['rule']} ({rej[0]['value']})")
+                elif now - self.pnl_alert_t.get(l, 0) >= 3600:
+                    self.pnl_alert_t[l] = now
+                    msg = f"ALERT {l}: {hit[0]['rule']} ({hit[0]['value']}) — alert only, no stop (Piero 01:55)"
+                    self.alerts.append(f"{time.strftime('%H:%M')} {msg}"); self.event("ALERT", msg)
         # promotions (pilot -> full) and pilot extensions; evening §1.5: none while the hold flag is set or fills are blind
         healthy, why_bad = self.fills_health(now)
         hold = bool(c.d.get("hold_gates")) or not healthy
@@ -1794,20 +1814,21 @@ class Engine:
         # D5 loss stop and the SIG 5xx pause
         bot_24h = sum(self.fill_pnl_fair(f) for f in self.fills_since(now - 86400)
                       if self.strategy_of(f["bot"], f["layer"]) not in ("position", "old engine") and f["layer"] not in D5_EXCLUDE_LAYERS)   # C87: Piero's RI / wall orders are not bot P&L
-        if bot_24h < -LOSS_STOP and not c.paused:
-            c.set_paused(True, f"D5 loss stop: bot P&L at fair {bot_24h:+,.0f} over 24 h")
-            c.decide(f"loss stop tripped at {time.strftime('%H:%M')} ({bot_24h:+,.0f}): resume new risk?")
-        h = api.health(600)
-        bad = h["read"]["n"] >= 20 and h["read"]["bad_rate"] > 0.5
-        if bad and not c.paused:
-            self.bad_since = self.bad_since or now
-            if now - self.bad_since >= 600:
-                c.set_paused(True, "SIG 5xx/timeouts > 50% for 10 min")
-                night["paused_by_5xx"] = True
-        elif not bad:
-            self.bad_since = None
-            if c.paused and night.pop("paused_by_5xx", False) and h["read"]["bad_rate"] < 0.1:
-                c.set_paused(False, "SIG recovered (< 10% errors)")
+        if bot_24h < -LOSS_STOP and now - self.pnl_alert_t.get("D5", 0) >= 3600:   # C88: the D5 loss stop is an ALERT, never a pause
+            self.pnl_alert_t["D5"] = now
+            msg = f"ALERT D5: bot P&L at fair {bot_24h:+,.0f} over 24 h (< {-LOSS_STOP:+,}) — alert only, no pause (Piero 01:55)"
+            self.alerts.append(f"{time.strftime('%H:%M')} {msg}"); self.event("ALERT", msg)
+        self.hard_pauses(now)
+        for fn in (self.core_update, self.scoreboard_update):
+            try:
+                fn(now)
+            except Exception as err:
+                self.event("ERR", f"{fn.__name__}: {err!r}")
+        if self.reads_after_t and now >= self.reads_after_t:
+            self.reads_after_t = None
+            after = api.reads_by_purpose(600)
+            self.night.line("C88 reads/min by purpose AFTER the feed switch (last 10 min): " + ", ".join(f"{k} {v:.1f}" for k, v in sorted(after.items(), key=lambda kv: -kv[1])[:10])
+                            + f"; total {sum(after.values()):.0f}/min")
         # correlated-fill breaker: ladder + MM entry fills in >= 5 markets in 10 min, >= 80% one political direction
         recent = [f for f in self.fills_since(now - BREAKER_WINDOW_S) if f["layer"] in ("ladder", "mm") and f["action"] == "buy"]
         lean = {}                                           # each market counts once, by its notional-weighted direction:
@@ -1968,7 +1989,8 @@ class Engine:
             if not api.spare_reads() or now - getattr(self, "boot_t", 0) < STARTUP_HOLD_S:   # §6: fills and exits first; not in the first 2 min after a start (C86)
                 break
             try:
-                bids, asks = api.orderbook(ex, depth=50)
+                fb = self.feed_book(ex)                     # C88: the feed's book (59 levels) first; REST only without a fresh one
+                bids, asks = fb if fb is not None else api.orderbook(ex, depth=50)
                 mine = collections.Counter()                # I4: our own resting orders are not the queue
                 for o in self.open:
                     if o["ex"] == ex:
@@ -3138,43 +3160,350 @@ class Engine:
             cyc = (self.reservoirs().get(ex) or {}).get("catcher_cycle_c")
             if cyc:
                 floor_ = avg + float(cyc)                   # Piero 17:40: catcher lots on RI are offered back at >= entry + 2c (a cycle, not a hold)
-            target = max(floor_, avg + DUMP_LADDER_FIRST - DUMP_LADDER_TICK * int(age // DUMP_LADDER_STEP_S))
-            if fs is not None:
-                target = min(target, fs - DUMP_SELL_FAIR_GAP)
+            pxs = self.px.get(ex)
+            ask_s = bots.side_book(pxs[0], pxs[1], t["side"])[1] if pxs and pxs[0] is not None and pxs[1] is not None else None
+            if ask_s is not None:                           # C88 (Piero 01:55): a trading lot under 3c of edge exits at max(entry + 0.5c, the touch)
+                target = max(floor_, ask_s)
+            else:
+                target = max(floor_, avg + DUMP_LADDER_FIRST - DUMP_LADDER_TICK * int(age // DUMP_LADDER_STEP_S))
             rebound = bots.tick_up(round(max(target, floor_), 6))
             self.dump_view.setdefault(ex, []).append(dict(sub=sub, rebound=min(rebound, 0.99), avg=avg))
 
     def hold_when_idle(self, live, now, merge=False):
-        """Day 11 §1.2: the set of tranche subs held off the ladder. A lot >= 8c under fair is held while free cash >= BUFFER;
-        under BUFFER the ladder offers such lots lowest-edge first until their cost covers the shortfall; lots < 8c under
-        fair always keep the ladder. An RI lot is held only while RI held at cost is within its cap (else always recycled)."""
-        free = (min(self.cash_hist) if getattr(self, "cash_hist", None) else 0.0) - CASH_RESERVE
-        B = self.buffer()
-        cands = []
+        """C88 (Piero 01:55): the set of tranche subs held off the exits — CORE lots (held to settlement) and TRADING lots still
+        >= 3c under fair (no +0.5c exits on them). Under 3c a trading lot exits at max(entry + 0.5c, the touch). An RI lot above
+        RI's cap is never held; a cycling reservoir market's catcher lots cycle."""
+        held = {}
         for sub, t, ex, q, avg, fs in live:
-            if fs is None or fs - avg < HOLD_IDLE_GAP - 1e-9:
-                continue
             if (self.meta.get(ex) or {}).get("race") in RI_RACES and (self.ri_held_cap is None or self.ri_held_cost() > self.ri_held_cap + 1):
                 continue                                    # §1.4: RI above its cap is never held
-            if (self.reservoirs().get(ex) or {}).get("catcher_cycle_c"):
-                continue                                    # Piero 17:40: a cycling reservoir market's catcher lots are never held
-            cands.append((fs - avg, abs(q) * avg, sub))
-        held = {}
-        if cands:
-            if free >= B:
-                held = {sub: edge for edge, _, sub in cands}
-            else:
-                short, offered = B - free, 0.0
-                for edge, cost, sub in sorted(cands):       # lowest edge first until the shortfall is covered
-                    if offered >= short:
-                        held[sub] = edge
-                    else:
-                        offered += cost
+            side = t.get("side") if isinstance(t, dict) and t.get("side") else ("yes" if q > 0 else "no")
+            if self.lot_policy(ex, side, sub, avg, fs) in ("core", "hold"):
+                held[sub] = (fs - avg) if (fs is not None and avg is not None) else 0.0
         if merge:
             self.held_idle.update(held)
         else:
             self.held_idle = held
         return set(held)
+
+    # ------------------------------------------------------------------------------------------------ C88: the two books (Piero 01:55 Oct 9)
+    def lot_policy(self, ex, side, sub, avg, fs):
+        """'core' (held to settlement), 'hold' (a trading lot >= 3c under fair: no +0.5c exit) or 'exit' (max(entry + 0.5c, touch))."""
+        ex = str(ex)
+        if (ex, sub) in self.core_set:
+            return "core"
+        if f"{ex}|{sub}" in ((self.controls.d.get("core") or {}).get("swap_out") or {}):
+            return "exit"                                   # a core lot swapped out or within 1c of fair: sold at the touch, never below entry + 0.5c
+        if (self.reservoirs().get(ex) or {}).get("catcher_cycle_c"):
+            return "exit"                                   # Piero 17:40: RI catcher lots cycle at entry + 2c
+        if fs is not None and avg is not None and fs - float(avg) >= TRADING_HOLD_C - 1e-9:
+            return "hold"
+        return "exit"
+
+    def poll_close_early(self):
+        """{ex} whose first poll close is by CORE_EARLY_CLOSE_PT (data/election/poll_close.json), cached."""
+        if getattr(self, "_early_close", None) is None:
+            out = set()
+            try:
+                with open(os.path.join(DATA, "election", "poll_close.json")) as fh:
+                    for m in json.load(fh).get("markets") or []:
+                        if str(m.get("first_close_pt") or "99:99") <= CORE_EARLY_CLOSE_PT:
+                            out.add(str(m.get("ex")))
+            except Exception:
+                pass
+            self._early_close = out
+        return self._early_close
+
+    def engine_lots(self):
+        """Every engine-owned lot: [(ex, side, sub, qty, avg, fs, cost)] — tranche subs and 'inventory' per market; never manual,
+        wall, swing, sleeve or pair-set lots, never the RI races, a reservoir market or a manual market."""
+        out = []
+        for ex, books in list(self.ledger.subbooks.items()):
+            ex = str(ex)
+            if ex not in self.owner or (self.meta.get(ex) or {}).get("race") in RI_RACES or ex in self.reservoirs() or ex in self.manual_ex:
+                continue
+            row = (self.book.get(ex) or {}).get("row") or {}
+            for sub, q in list(books.items()):
+                if abs(q) < MIN_QTY or sub.startswith(CORE_SKIP_SUBS):
+                    continue
+                side = "yes" if q > 0 else "no"
+                avg = (self.ledger.tranches.get(sub) or {}).get("avg")
+                if not avg:
+                    lots = [l for l in self.lots(ex, side, sub) if l[0] > 0]
+                    tot = sum(l[0] for l in lots)
+                    avg = (sum(l[0] * l[1] for l in lots) / tot) if tot else float(row.get("avgCost") or 0)
+                if not avg:
+                    continue
+                out.append((ex, side, sub, float(abs(q)), float(avg), self.side_fair(ex, side), float(abs(q)) * float(avg)))
+        return out
+
+    def core_update(self, now):
+        """Every minute: CORE = the highest edge-% lots vs fair (edge % = (fair - entry) / entry; +0.5 pp for races whose polls close by
+        17:00 PT), filled to 50k at cost from lots >= 3c under fair, sticky: a core lot leaves only when within 1c of fair or swapped
+        (one swap per minute) for a lot with >= 3c more edge; the lot that leaves is sold at the touch, never below entry + 0.5c."""
+        c = self.controls
+        if now - self.core_t < CORE_EVERY_S or not self.fair:
+            return
+        self.core_t = now
+        core = c.d.get("core") or {}
+        lots = {f"{ex}|{sub}": (ex, side, sub, q, avg, fs, cost) for ex, side, sub, q, avg, fs, cost in self.engine_lots()}
+        members = {k: dict(v) for k, v in (core.get("lots") or {}).items()}
+        swap_out = dict(core.get("swap_out") or {})
+        sold = list(core.get("sold") or [])[-200:]
+        changes = []
+        for k in list(members):
+            l = lots.get(k)
+            if l is None:
+                sold.append(dict(k=k, t=stamp(), **{x: members[k].get(x) for x in ("ex", "sub", "qty", "avg")}))
+                members.pop(k); swap_out.pop(k, None)
+                changes.append(f"{k} left core (sold or gone)")
+                continue
+            ex, side, sub, q, avg, fs, cost = l
+            members[k].update(qty=q, avg=avg, fs=fs, cost=cost, edge_c=None if fs is None else round(fs - avg, 4))
+            if fs is not None and fs - avg < CORE_NEAR_FAIR_C - 1e-9:
+                members.pop(k); swap_out[k] = dict(t=now, why="within 1c of fair")
+                changes.append(f"{self.name(ex)} {sub} leaves core: {(fs - avg) * 100:.1f}c from fair -> exit at max(entry + 0.5c, touch)")
+        for k in list(swap_out):
+            if k not in lots:
+                swap_out.pop(k)
+        used = sum(float(m.get("cost") or 0) for m in members.values())
+        early = self.poll_close_early()
+        score = lambda l: (l[5] - l[4]) / l[4] + (CORE_EARLY_BONUS if l[0] in early else 0.0)
+        cands = sorted((l for k, l in lots.items() if k not in members and k not in swap_out and l[5] is not None and l[5] - l[4] >= TRADING_HOLD_C - 1e-9),
+                       key=score, reverse=True)
+        swaps = 0
+        for l in cands:
+            ex, side, sub, q, avg, fs, cost = l
+            k = f"{ex}|{sub}"
+            m = dict(ex=ex, side=side, sub=sub, qty=q, avg=avg, fs=fs, cost=cost, edge_c=round(fs - avg, 4), edge_pct=round((fs - avg) / avg, 4), t=now, early=ex in early)
+            if used + cost <= CORE_CAP_COST + 1e-6:
+                members[k] = m; used += cost
+                changes.append(f"{self.name(ex)} {sub} {q:,.0f} {side.upper()} at {avg:.3f} joins core ({(fs - avg) * 100:.1f}c = {(fs - avg) / avg:.1%}{', early close' if ex in early else ''})")
+                continue
+            if swaps >= 1 or not members:
+                continue
+            wk = min(members, key=lambda kk: members[kk].get("edge_c") if members[kk].get("edge_c") is not None else 9.0)
+            w = members[wk]
+            if w.get("edge_c") is not None and fs - avg >= float(w["edge_c"]) + CORE_SWAP_C - 1e-9 and used - float(w["cost"]) + cost <= CORE_CAP_COST * 1.05:
+                members.pop(wk); swap_out[wk] = dict(t=now, why=f"swapped for {k}")
+                members[k] = m; used += cost - float(w["cost"]); swaps += 1
+                changes.append(f"SWAP: {self.name(w['ex'])} {w['sub']} ({float(w['edge_c']) * 100:.1f}c) out at the touch, never below entry + 0.5c, for {self.name(ex)} {sub} ({(fs - avg) * 100:.1f}c)")
+        self.core_set = {(str(m["ex"]), m["sub"]) for m in members.values()}
+        with c.lock:
+            c.d["core"] = dict(lots=members, swap_out=swap_out, sold=sold, cost=round(used, 2), cap=CORE_CAP_COST, t=stamp())
+            c.save()
+        if changes:
+            if len(changes) > 8:
+                msg = f"CORE: {len(changes)} changes — {len(members)} lots, {used:,.0f} of {CORE_CAP_COST:,} at cost; " + "; ".join(changes[:4]) + " …"
+                self.event("CORE", msg); self.night.line(msg)
+            else:
+                for ch in changes:
+                    self.event("CORE", ch); self.night.line("CORE " + ch)
+
+    def book_scan(self, now):
+        """C88 (reads 3a): every 2 min, every book from the feed (zero REST reads): gap of the SIG mid vs fair, depth at the touch
+        and within 3 ticks, ranked by |gap| -> data/intel/book_scan/latest.json and self.book_scan_rows."""
+        if now - self.book_scan_t < BOOK_SCAN_EVERY_S or self.mkt_feed is None or self.feed_mode() != "live":
+            return
+        self.book_scan_t = now
+        rows = []
+        for b in self.bots:
+            if b.kind != "market":
+                continue
+            ex, f = b.ex, self.fair.get(b.ex)
+            fb = self.mkt_feed.book(ex, 120.0)
+            if f is None or fb is None or not fb[0] or not fb[1]:
+                continue
+            bids, asks = fb
+            bid, ask = bids[0][0], asks[0][0]
+            mid = (bid + ask) / 2
+            d3 = lambda lv, p0, up: sum(q for p_, q in lv if abs(p_ - p0) <= 3 * TICK + 1e-9)
+            rows.append(dict(ex=ex, name=self.name(ex), fair=round(f, 4), bid=bid, ask=ask, gap_c=round((mid - f) * 100, 1),
+                             bid_q=bids[0][1], ask_q=asks[0][1], bid_q3=d3(bids, bid, False), ask_q3=d3(asks, ask, True),
+                             cheap=("yes" if bid <= f - 0.02 else "no" if ask >= f + 0.02 else None)))
+        rows.sort(key=lambda r: -abs(r["gap_c"]))
+        self.book_scan_rows = rows
+        try:
+            os.makedirs(os.path.join(DATA, "intel", "book_scan"), exist_ok=True)
+            tmp = os.path.join(DATA, "intel", "book_scan", "latest.json.tmp")
+            with open(tmp, "w") as fh:
+                json.dump(dict(t=stamp(), n=len(rows), rows=rows), fh)
+            os.replace(tmp, os.path.join(DATA, "intel", "book_scan", "latest.json"))
+        except OSError:
+            pass
+
+    def recycle_depth_snapshot(self, now):
+        """Election night 5a: once a day (first loop after 12:00 PT) the resting bid depth at >= 0.98 and >= 0.99 per contract and side,
+        from the feed's full books -> data/intel/recycle_depth/<day>.json (our capacity to recycle winners into those bids)."""
+        day = time.strftime("%Y-%m-%d", time.localtime(now))
+        if time.localtime(now).tm_hour < RECYCLE_DEPTH_HOUR or self.intel_s.get("recycle_depth") == day or self.mkt_feed is None:
+            return
+        path = os.path.join(DATA, "intel", "recycle_depth", day + ".json")
+        if os.path.exists(path):
+            self.intel_s["recycle_depth"] = day
+            return
+        out = {}
+        for b in self.bots:
+            if b.kind != "market":
+                continue
+            fb = self.mkt_feed.book(b.ex, 600.0)
+            if fb is None:
+                continue
+            bids, asks = fb
+            out[b.ex] = dict(name=self.name(b.ex), yes_98=sum(q for p_, q in bids if p_ >= 0.98 - 1e-9), yes_99=sum(q for p_, q in bids if p_ >= 0.99 - 1e-9),
+                             no_98=sum(q for p_, q in asks if p_ <= 0.02 + 1e-9), no_99=sum(q for p_, q in asks if p_ <= 0.01 + 1e-9))
+        if len(out) < 100:
+            return                                          # the feed has not filled in yet: try next loop
+        self.intel_s["recycle_depth"] = day
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                json.dump(dict(t=stamp(), markets=out), fh)
+            tot98 = sum(v["yes_98"] + v["no_98"] for v in out.values()); tot99 = sum(v["yes_99"] + v["no_99"] for v in out.values())
+            self.night.line(f"RECYCLE DEPTH snapshot {day}: {len(out)} contracts; bids >= 0.98: {tot98:,.0f} shares, >= 0.99: {tot99:,.0f} (data/intel/recycle_depth/{day}.json)")
+        except OSError:
+            pass
+
+    def range_candidates_daily(self, now):
+        """C88 (reads 3b): once a day, sell-high / buy-back-low candidates per market from our tape's last 24 h: the held or favourite
+        side's share-weighted p10 / p90 print prices, the number of visits to each, the range in cents -> data/intel/range_candidates.json."""
+        day = time.strftime("%Y-%m-%d", time.localtime(now))
+        if self.intel_s.get("ranges") == day:
+            return
+        path = os.path.join(DATA, "intel", "range_candidates.json")
+        try:
+            if os.path.exists(path) and json.load(open(path)).get("day") == day:
+                self.intel_s["ranges"] = day
+                return
+        except Exception:
+            pass
+        self.intel_s["ranges"] = day
+        cut = now - 86400
+        rows = collections.defaultdict(list)
+        for d in (cut, now):
+            fp = os.path.join(DATA, "intel", "trades", time.strftime("%Y-%m-%d", time.localtime(d)) + ".jsonl")
+            if not os.path.exists(fp):
+                continue
+            with open(fp) as fh:
+                for line in fh:
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (r.get("ts") or 0) >= cut and r.get("p") is not None:
+                        rows[str(r["ex"])].append((float(r["ts"]), round(float(r["p"]), 3), float(r.get("q") or 0)))
+        out = []
+        for ex, pr in rows.items():
+            f = self.fair.get(ex)
+            if f is None or len(pr) < 20:
+                continue
+            side = "yes" if f >= 0.5 else "no"             # the favourite side (what we would hold)
+            vals = sorted(((p if side == "yes" else round(1 - p, 3)), q) for _, p, q in pr)
+            tot = sum(q for _, q in vals)
+            if tot <= 0:
+                continue
+            acc, p10, p90 = 0.0, None, None
+            for p_, q in vals:
+                acc += q
+                if p10 is None and acc >= 0.10 * tot:
+                    p10 = p_
+                if p90 is None and acc >= 0.90 * tot:
+                    p90 = p_
+            seq = [(p if side == "yes" else round(1 - p, 3)) for _, p, _ in sorted(pr)]
+            hi_visits = sum(1 for a, b2 in zip(seq, seq[1:]) if a < p90 - 1e-9 <= b2)
+            lo_visits = sum(1 for a, b2 in zip(seq, seq[1:]) if a > p10 + 1e-9 >= b2)
+            out.append(dict(ex=ex, name=self.name(ex), side=side, fair_side=round(f if side == "yes" else 1 - f, 4), p10=p10, p90=p90, range_c=round((p90 - p10) * 100, 1),
+                            prints=len(pr), shares=round(tot), hi_visits=hi_visits, lo_visits=lo_visits, round_trips=min(hi_visits, lo_visits)))
+        out.sort(key=lambda r: -(r["range_c"] * r["round_trips"]))
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                json.dump(dict(day=day, t=stamp(), rows=out), fh)
+            top = out[:5]
+            self.night.line(f"RANGE candidates {day} (24-h tape, favourite side, sell at p90 / buy back at p10): " + "; ".join(f"{r['name']} {r['side'].upper()} {r['p10']:.3f}-{r['p90']:.3f} ({r['range_c']:.1f}c, {r['round_trips']} round trips)" for r in top))
+        except OSError:
+            pass
+
+    def scoreboard_update(self, now):
+        """C88 (Piero 01:55 item 4): per strategy and per book, today (SIG day) and since Oct 1: edge bought (entry fills, at the fill's
+        fair), edge given back (exit fills: fair - sale price), realized, fair drift (held lots: fair now - fair at entry). Every 5 min
+        -> self.scoreboard and data/intel/scoreboard.json. Target: bought - given back >= 2,500 a day."""
+        if now - self.scoreboard_t < SCOREBOARD_EVERY_S:
+            return
+        self.scoreboard_t = now
+        day0 = now - (now % 86400)                          # 00:00 UTC
+        core_subs = {(ex, sub) for ex, sub in self.core_set}
+        sold_core = {(str(x.get("ex")), x.get("sub")) for x in ((self.controls.d.get("core") or {}).get("sold") or [])}
+        blank = lambda: dict(bought=0.0, given=0.0, realized=0.0, drift=0.0, n_in=0, n_out=0)
+        out = {"today": dict(strategy=collections.defaultdict(blank), book=collections.defaultdict(blank)),
+               "since": dict(strategy=collections.defaultdict(blank), book=collections.defaultdict(blank))}
+        fair_at = collections.defaultdict(lambda: [0.0, 0.0])
+        for f in list(self.ledger.fills):
+            if f.get("before_engine") or f.get("action") not in ("buy", "sell") or f.get("edge") is None:
+                continue
+            try:
+                t = time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                continue
+            rec = self.ledger.orders.get(str(f.get("order") or "")) or {}
+            sub = rec.get("sub") or "inventory"
+            strat = dash5.bucket_of_layer(f.get("layer"), sub, f["ex"])
+            book = "core" if ((f["ex"], sub) in core_subs or (f["ex"], sub) in sold_core) else "trading"
+            exit_ = f.get("action") == "sell" or f.get("layer") in self.REDUCING
+            e = float(f["edge"]) * float(f["qty"])
+            for scope in (("since",) + (("today",) if t >= day0 else ())):
+                for key, grp in ((strat, "strategy"), (book, "book")):
+                    r = out[scope][grp][key]
+                    if exit_:
+                        r["given"] += -e; r["realized"] += float(f.get("realized") or 0.0); r["n_out"] += 1
+                    else:
+                        r["bought"] += e; r["n_in"] += 1
+            if not exit_ and f.get("fair") is not None:
+                fa = fair_at[(f["ex"], sub)]
+                fa[0] += float(f["fair"]) * float(f["qty"]); fa[1] += float(f["qty"])
+        for ex, side, sub, q, avg, fs, cost in self.engine_lots():
+            fa = fair_at.get((ex, sub))
+            if fs is None or not fa or fa[1] <= 0:
+                continue
+            drift = (fs - fa[0] / fa[1]) * q
+            strat = dash5.bucket_of_sub(sub, ex)
+            book = "core" if (ex, sub) in core_subs else "trading"
+            for scope in ("today", "since"):
+                out[scope]["strategy"][strat]["drift"] += drift
+                out[scope]["book"][book]["drift"] += drift
+        res = {}
+        for scope in ("today", "since"):
+            res[scope] = {}
+            for grp in ("strategy", "book"):
+                res[scope][grp] = {k: dict((x, round(y, 2)) for x, y in v.items()) | {"net": round(v["bought"] - v["given"], 2)} for k, v in out[scope][grp].items()}
+        today_net = sum(v["net"] for v in res["today"]["strategy"].values())
+        frac = max(0.05, (now - day0) / 86400)
+        res.update(t=stamp(), target_day=SCOREBOARD_TARGET_DAY, today_net=round(today_net, 2), pace_day=round(today_net / frac, 2), core_cost=(self.controls.d.get("core") or {}).get("cost"))
+        self.scoreboard = res
+        try:
+            os.makedirs(os.path.join(DATA, "intel"), exist_ok=True)
+            tmp = os.path.join(DATA, "intel", "scoreboard.json.tmp")
+            with open(tmp, "w") as fh:
+                json.dump(res, fh)
+            os.replace(tmp, os.path.join(DATA, "intel", "scoreboard.json"))
+        except OSError:
+            pass
+
+    def c88_migration(self, now):
+        """Once (C88): the markets feed goes live for books; the reads-by-purpose line before the switch (the 'after' line follows 30 min later)."""
+        c = self.controls
+        d = c.d.setdefault("c88", {})
+        if d.get("done") or os.environ.get("SIG_C88", "1") != "1":
+            return
+        before = api.reads_by_purpose(600)
+        with c.lock:
+            c.d["feed_mode"] = "live"
+            d.update(done=stamp(), reads_before=before)
+            c.save()
+        self.reads_after_t = now + 1800
+        msg = (f"C88 (Piero 01:55): books from the SIG realtime feed (mode live; REST books only on resync, gaps or asOf > 10 s); CORE / TRADING books on; P&L stops are alerts; "
+               f"reads/min by purpose BEFORE: " + ", ".join(f"{k} {v:.1f}" for k, v in sorted(before.items(), key=lambda kv: -kv[1])[:10]))
+        self.event("CONTROL", msg); self.night.line(msg)
 
     def dump_fill_events(self, fills):
         for f in fills:
@@ -3363,7 +3692,52 @@ class Engine:
         self.event("STOP", msg)
         self.night.line(msg)
 
-    AUTO_KINDS = ("cash_short", "stop_pull", "fills_blind", "travel")
+    AUTO_KINDS = PAUSE_KINDS
+
+    def errors_10m(self, now):
+        """ERR events in the last 10 min (the events carry a same-day HH:MM:SS stamp)."""
+        n, lt = 0, time.localtime(now)
+        for e in self.events[-400:]:
+            if e.get("kind") != "ERR":
+                continue
+            try:
+                hh, mm, ss = (int(x) for x in str(e.get("t", "")).split(":"))
+            except ValueError:
+                continue
+            t_ = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, ss, 0, 0, -1))
+            if 0 <= now - t_ <= 600:
+                n += 1
+        return n
+
+    def hard_pauses(self, now):
+        """C88 (Piero 01:55): the only automatic pauses — cash under the 5k floor, an I2 breach, SIG API errors / a 429 storm, the
+        Polymarket fair stale > 2 min, engine errors (>= 5 ERR in 10 min). Each lifts itself in auto_resume once its condition is gone."""
+        c = self.controls
+        if c.paused:
+            return
+        a = self.acct or {}
+        cash = (a.get("totalAccountValue") or 0) - (a.get("totalHoldingsValue") or 0)
+        h = api.health(600)
+        trims = sum(self.ex.trims.values())
+        if trims > self.trims_seen:
+            self.trims_seen, self.trim_t = trims, now
+        reasons = []
+        if a and cash < CASH_RESERVE:
+            reasons.append(("cash_floor", f"cash {cash:,.0f} under the {CASH_RESERVE:,} floor"))
+        if self.trim_t and now - self.trim_t < 60:
+            reasons.append(("i2_breach", f"I2 trim (orders cut to fit the position): {trims} in all"))
+        if (h["read"]["n"] >= 20 and h["read"]["bad_rate"] > 0.5) or (h.get("throttled") or 0) >= API_429_STORM_10M:
+            reasons.append(("api_errors", f"SIG API: {h['read']['bad_rate']:.0%} of {h['read']['n']} reads failed, {h.get('throttled') or 0} rate-limit answers in 10 min"))
+        if self.fair_t and now - self.fair_t > PM_STALE_S:
+            reasons.append(("pm_stale", f"Polymarket fair {now - self.fair_t:.0f} s old"))
+        n_err = self.errors_10m(now)
+        if n_err >= ENGINE_ERRORS_10M:
+            reasons.append(("engine_errors", f"{n_err} engine errors in 10 min"))
+        if reasons:
+            kind, why = reasons[0]
+            self.auto_pause(kind, f"{kind}: {why}", now)
+            msg = f"PAUSE ({kind}): {why} — new risk paused; exits keep running; resumes itself when clear"
+            self.alerts.append(f"{time.strftime('%H:%M')} {msg}"); self.event("PAUSE", msg); self.night.line(msg)
 
     def travel(self, on, now=None):
         """Day 6 §4.2 `./travel.sh`: on -> pull every engine order except position exits and longshot bids (exits and
@@ -3439,10 +3813,16 @@ class Engine:
         if ap.get("stuck") or now - (ap.get("t") or now) < 300:   # re-checked every loop (local data) from 5 min after the pause
             return
         kind = ap["kind"]
+        h = api.health(600)
         ok = {"cash_short": self.cash_ok_n >= 2,
+              "cash_floor": self.cash_ok_n >= 2,
               "stop_pull": api.recent_writes_ok(20) >= 0.8,
               "fills_blind": not self.fills_blind and self.fills_health(now)[0],
-              "travel": self.travel_ok(now)}.get(kind, False)
+              "travel": self.travel_ok(now),
+              "i2_breach": not self.trim_t or now - self.trim_t >= I2_RESUME_S,
+              "api_errors": (h["read"]["bad_rate"] < 0.1) and (h.get("throttled") or 0) < 3,
+              "pm_stale": bool(self.fair_t) and now - self.fair_t < 60,
+              "engine_errors": self.errors_10m(now) == 0}.get(kind, False)
         if not ok:
             return
         with c.lock:
@@ -4248,7 +4628,10 @@ class Engine:
     def bid_depth(self, ex, side, now):
         """Shares at the best SIG bid of `side` (order book read, cached 60 s)."""
         c = self.depth_cache.get(ex)
-        if not c or now - c[0] > 60:
+        fb = self.feed_book(ex)                             # C88: the feed's book first
+        if fb is not None:
+            c = self.depth_cache[ex] = (now, fb[0][:1], fb[1][:1])
+        elif not c or now - c[0] > 60:
             if not api.spare_reads():                       # Oct 3 (b): no spare read -> size from the prices read: <= 500
                 return float(RELEASE_FALLBACK_QTY)          # shares, still a limit at the bid
             bids, asks = api.orderbook(ex, depth=1)
@@ -4344,7 +4727,7 @@ class Engine:
             subs = self.ledger.subbooks.get(ex, {})
             avail = 0
             for k, v in subs.items():                       # never touch-owned, manual, tranches or pair sets; rule 0 per lot
-                if k in self.RELEASE_SUBS and v * q > 0:
+                if k in self.RELEASE_SUBS and v * q > 0 and (str(ex), k) not in self.core_set:   # C88: never a core lot
                     avail += self.rule0_allowed(ex, side, k, bid, int(abs(v)))
             if avail >= MIN_QTY:
                 cands.append((tier, self.return_per_day(max(ctf, 0.0)), ctf, ex, side, avail, bid))
@@ -5458,8 +5841,8 @@ class Engine:
             sub = f"fm:{ex}"
             held = "yes" if inv > 0 else "no"
             avg = (self.ledger.tranches.get(sub) or {}).get("avg")
-            if not avg:
-                continue
+            if not avg or self.lot_policy(ex, held, sub, avg, self.side_fair(ex, held)) != "exit":
+                continue                                    # C88: a core lot or a lot >= 3c under fair is held
             floor_ = max(float(avg), max((l[1] for l in self.lots(ex, held, sub) if l[2] == "engine" and l[0] > 0), default=0.0)) + RULE0_MARGIN
             pxs = self.px.get(ex)
             ask_s = bots.side_book(pxs[0], pxs[1], held)[1] if pxs and pxs[0] is not None and pxs[1] is not None else None
@@ -6003,8 +6386,8 @@ class Engine:
                 continue                                    # still >= 8% return left to settlement: kept (C84b: by return, not by cents)
             split = {}
             for sub, v in self.ledger.subbooks.get(ex, {}).items():
-                if v * q <= 0 or sub.startswith(self.ROTATION_SKIP):
-                    continue
+                if v * q <= 0 or sub.startswith(self.ROTATION_SKIP) or (str(ex), sub) in self.core_set:
+                    continue                                # C88: never a core lot
                 avg = (self.ledger.tranches.get(sub) or {}).get("avg")
                 if avg and fs - float(avg) >= HOLD_IDLE_GAP - 1e-9:
                     continue                                # a lot >= 8c under fair is never rotated (the ladder's business)
@@ -6497,7 +6880,7 @@ class Engine:
             sub = f"sm:{ex}"
             ring = self.ring_window(now)                     # (1c) in a ring window only the reducing sides quote
             # the bid (buy YES): an exit while short (sells the NO at 1 - bid >= entry + 0.5c), else an entry
-            if short_ and avg:
+            if short_ and avg and self.lot_policy(ex, "no", sub, avg, self.side_fair(ex, "no")) == "exit":
                 hi = max(float(avg), max((l[1] for l in self.lots(ex, "no", sub) if l[2] == "engine" and l[0] > 0), default=0.0))
                 p = min(bid_px, round(1 - (hi + RULE0_MARGIN), 3))   # rule 0 on every NO lot
                 if MB_MIN_PX <= p < ask_px:
@@ -6508,7 +6891,7 @@ class Engine:
                 if allowed and q_bid >= SM_MIN_QTY and MB_MIN_PX <= bid_px < ask_px:
                     quotes.append(dict(side="yes", px=bid_px, qty=int(min(q_bid, room_sh)), sub=sub, ttl=SM_TTL_S))
             # the ask (sell YES = buy NO at 1 - ask): an exit while long (>= entry + 0.5c), else an entry
-            if long_ and avg:
+            if long_ and avg and self.lot_policy(ex, "yes", sub, avg, self.side_fair(ex, "yes")) == "exit":
                 hi = max(float(avg), max((l[1] for l in self.lots(ex, "yes", sub) if l[2] == "engine" and l[0] > 0), default=0.0))
                 p = max(ask_px, round(hi + RULE0_MARGIN, 3))   # never below any held lot's entry + 0.5c
                 if p <= MB_MAX_PX and p > bid_px:

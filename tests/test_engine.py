@@ -212,7 +212,8 @@ class EngineCase(unittest.TestCase):
         f_engine.RING_WINDOWS = []                          # the rigs run on the real clock: no ring window unless a test sets one (RingWindowTests)
         self.addCleanup(setattr, f_engine, "STARTUP_HOLD_S", f_engine.STARTUP_HOLD_S)
         f_engine.STARTUP_HOLD_S = 0                         # the rigs read from their first loop (the 2-min start-up hold is a live-only guard)
-        for k, v in (("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False)):
+        for k, v in (("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
+                     ("CORE_CAP_COST", 0.0), ("TRADING_HOLD_C", 99.0)):   # C88: the books and the 3c hold are off in the legacy rigs (C88Tests turn them on)
             self.addCleanup(setattr, f_engine, k, getattr(f_engine, k, None))
             setattr(f_engine, k, v)                         # C87 gates (real clock, no tape in the rigs, rig cash under BUFFER): off unless C87Tests set them
         for k in ("PNL_READ_S", "ORDERS_READ_S", "FILLS_READ_S", "POSITIONS_READ_S"):   # day 4 §4 / Oct 8 read caching have their own tests; the rigs (no realtime feed) read fresh each loop
@@ -716,26 +717,27 @@ class ControllerTests(EngineCase):
             for o in mm[:12]:
                 FAIR.pop(o["ex"], None)
             FAIR.update({AK: 0.785, RI: 0.965, "1059": 0.93, "1060": 0.07})
-        self.assertEqual(eng.controls.state("mm"), "off")
-        self.assertIn("P&L at fair", eng.controls.layer("mm")["killed"]["reason"])
-        loop(eng, fake)
-        left = [o for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "mm"
-                and not jx.reduces(o["side"], "buy", fake.pos.get(o["ex"], 0))]
-        self.assertEqual(left, [], "a killed layer's entry quotes are pulled")
+        self.assertEqual(eng.controls.state("mm"), "full", "C88 (Piero 01:55): a P&L rule is an alert, not a stop")
+        self.assertTrue(any(e["kind"] == "ALERT" and "P&L at fair" in e["text"] for e in eng.events), "the P&L breach raised an alert")
         bot_loss = sum(eng.fill_pnl_fair(f) for f in eng.fills_since(time.time() - 86400))
+        self.assertFalse(eng.controls.paused, "the D5 loss stop never pauses")
         if bot_loss < -a_config.LOSS_STOP:
-            self.assertTrue(eng.controls.paused, "D5 loss stop")
-        eng.controls.set_paused(False, "test")
+            self.assertTrue(any(e["kind"] == "ALERT" and "D5" in e["text"] for e in eng.events), "D5 is an alert")
         from unittest import mock
-        bad = dict(read=dict(n=50, bad_rate=0.9), write=dict(n=0, bad_rate=0.0))
+        bad = dict(read=dict(n=50, bad_rate=0.9), write=dict(n=0, bad_rate=0.0), throttled=0)
         with mock.patch.object(fake, "health", return_value=bad, create=True):
-            eng.bad_since = time.time() - 601
             loop(eng, fake)
-        self.assertTrue(eng.controls.paused, "SIG 5xx > 50% for 10 min pauses new risk")
+        self.assertTrue(eng.controls.paused, "SIG API errors pause new risk (a hard pause)")
+        self.assertEqual(eng.controls.d["auto_pause"]["kind"], "api_errors")
+        good = dict(read=dict(n=50, bad_rate=0.0), write=dict(n=0, bad_rate=0.0), throttled=0)
+        eng.controls.d["auto_pause"]["t"] = time.time() - 301
+        with mock.patch.object(fake, "health", return_value=good, create=True):
+            loop(eng, fake)
+        self.assertFalse(eng.controls.paused, "and lifts itself once the API is clean")
         with open(a_config.NIGHT_LOG_FILE) as fh:
             log = fh.read()
-        self.assertIn("KILL layer mm", log)
-        self.assertIn("SIG 5xx/timeouts > 50% for 10 min", log)
+        self.assertIn("PAUSE (api_errors)", log)
+        self.assertIn("AUTO-RESUME after api_errors", log)
 
 
 def classic_capital(case, tmm=True):
@@ -1451,7 +1453,7 @@ class FatFingerTests(EngineCase):
         loop(eng, fake)
         loop(eng, fake)
         self.assertTrue(eng.controls.paused)
-        self.assertEqual(eng.controls.d["auto_pause"]["kind"], "cash_short")
+        self.assertIn(eng.controls.d["auto_pause"]["kind"], ("cash_short", "cash_floor"), "C88: cash under the floor is a hard pause too")
         self.assertEqual(eng.controls.d.get("decisions"), [], "safety stops don't queue decisions")
         fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 6_000)
         eng.controls.d["auto_pause"]["t"] -= 400         # 5 min after the pause
@@ -1611,17 +1613,17 @@ class DumpV3Tests(EngineCase):
         rb = [o for o in self.dump_orders(eng, fake, ex, "dumpexit")]
         self.assertEqual(len(rb), 1)
         sell = round(1 - rb[0]["price"], 3)
-        want = min(top["price"] + 0.01, eng.fair[ex] - 0.005)   # day 9 §9.1 (C73): first ask fill + 1c (<= fair - 0.5c), floor fill + 0.5c
-        self.assertAlmostEqual(sell, bots.tick_up(round(max(want, top["price"] + 0.005), 6)), places=3)
-        self.assertLessEqual(sell, eng.fair[ex] - 0.005 + 1e-9)
-        t["ts"] -= 1300                                   # 21 min unfilled: two 10-min steps down -> the floor (fill + 0.5c)
+        ask_s = bots.side_book(eng.px[ex][0], eng.px[ex][1], "yes")[1]
+        want = bots.tick_up(round(max(top["price"] + 0.005, ask_s), 6))   # C88 (Piero 01:55): the exit rests at max(entry + 0.5c, the touch)
+        self.assertAlmostEqual(sell, want, places=3)
+        t["ts"] -= 1300                                   # time does not step it down any more: still max(entry + 0.5c, touch)
         self.settle(eng, fake, favs, 2)
         rb2 = self.dump_orders(eng, fake, ex, "dumpexit")
-        self.assertAlmostEqual(round(1 - rb2[0]["price"], 3), bots.tick_up(round(top["price"] + 0.005, 6)), places=3)
-        t["ts"] -= 2500                                   # 60 min more: still the floor, never under entry + 0.5c (rule 0)
+        self.assertAlmostEqual(round(1 - rb2[0]["price"], 3), want, places=3)
+        t["ts"] -= 2500                                   # never under entry + 0.5c (rule 0)
         self.settle(eng, fake, favs, 2)
         rb2 = self.dump_orders(eng, fake, ex, "dumpexit")
-        self.assertAlmostEqual(round(1 - rb2[0]["price"], 3), bots.tick_up(round(top["price"] + 0.005, 6)), places=3)
+        self.assertGreaterEqual(round(1 - rb2[0]["price"], 3), bots.tick_up(round(top["price"] + 0.005, 6)) - 1e-9)
         fake.fill(rb2[0]["id"], rb2[0]["qty"])            # the sell-back fills: round trip, hold recorded, level re-armed
         self.settle(eng, fake, favs, 3)
         self.assertEqual(t["state"], "closed")
@@ -1762,7 +1764,8 @@ class DumpV3Tests(EngineCase):
         self.assertAlmostEqual(t["avg"], bid, places=4)
         xs = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "dumpexit"]
         self.assertEqual(len(xs), 1, xs)
-        self.assertAlmostEqual(1 - xs[0]["price"], bots.tick_up(round(min(bid + a_config.DUMP_LADDER_FIRST, eng.fair[ex] - 0.005), 6)), places=3, msg="entry + 1c (C73 ladder)")
+        ask_s = bots.side_book(eng.px[ex][0], eng.px[ex][1], "yes")[1]
+        self.assertAlmostEqual(1 - xs[0]["price"], bots.tick_up(round(max(bid + 0.005, ask_s), 6)), places=3, msg="C88: the exit at max(entry + 0.5c, the touch)")
         refills = [o for o in self.dump_orders(eng, fake, ex) if abs(o["price"] - bid) < 1e-9]
         self.assertEqual(len(refills), 1, "sweep follow: the level is back at the best bid while the tranche is open")
         t["ts"] -= a_config.DUMP_STEP2_S + 60
@@ -3332,49 +3335,36 @@ class RulesV2Tests(EngineCase):
         self.assertFalse(any("REBUILD sale" in e["text"] for e in eng.events), "nothing is ever sold to raise cash")
 
     def test_hold_when_idle_and_the_ladder_under_buffer(self):
+        """C88 (Piero 01:55): a trading lot >= 3c under fair is held whatever the cash (no +0.5c exit); under 3c it exits at
+        max(entry + 0.5c, the touch); a CORE lot is held even under 3c; the held time still does not count towards the 6-h ageing."""
+        f_engine.TRADING_HOLD_C = 0.03
         fake, eng, favs = self.rig(cash_above_floor=60_000)
         ex = favs[0]
         fs = eng.fair[ex]
         a, b, c = f"dump:{ex}:yes:1", f"dump:{ex}:yes:2", f"dump:{ex}:yes:3"
-        self.tranche(eng, ex, a, 2000, round(fs - 0.10, 3))       # 10c under fair: holdable
-        self.tranche(eng, ex, b, 2000, round(fs - 0.03, 3))       # 3c under fair: always on the ladder
-        eng.controls.d["buffer"] = dict(value=20_000, day=time.strftime("%Y-%m-%d"))
+        self.tranche(eng, ex, a, 2000, round(fs - 0.10, 3))       # 10c under fair: held
+        self.tranche(eng, ex, b, 2000, round(fs - 0.02, 3))       # 2c under fair: exits
+        self.tranche(eng, ex, c, 2000, round(fs - 0.015, 3))      # 1.5c under fair but CORE: held
+        eng.core_set = {(ex, c)}
         now = time.time()
-        eng.cash_hist = [a_config.CASH_RESERVE + 60_000]           # free 60k >= BUFFER: idle cash
-        eng.track_dumps(now)
-        view = {x["sub"] for x in eng.dump_view.get(ex, [])}
-        self.assertNotIn(a, view, "a lot >= 8c under fair is held while cash is idle")
-        self.assertIn(b, view, "a lot < 8c under fair keeps the ladder")
-        self.assertTrue(eng.ledger.tranches[a].get("held"))
-        self.assertIn(a, eng.held_idle)
-        eng.cash_hist = [a_config.CASH_RESERVE + 10_000]           # free 10k < BUFFER 20k: the ladder runs
-        eng.track_dumps(now + 600)
-        view = {x["sub"] for x in eng.dump_view.get(ex, [])}
-        self.assertIn(a, view)
-        self.assertFalse(eng.ledger.tranches[a].get("held"))
-        self.assertGreaterEqual(eng.ledger.tranches[a].get("held_s", 0), 599, "the held time does not count towards the ladder steps or the 6-h ageing")
-        # lowest-edge lots first: a 1k shortfall is covered by the 10c lot alone; the 20c lot stays held
-        self.tranche(eng, ex, c, 2000, round(fs - 0.20, 3))
-        eng.cash_hist = [a_config.CASH_RESERVE + 19_000]
-        eng.track_dumps(now + 600)
-        view = {x["sub"] for x in eng.dump_view.get(ex, [])}
-        self.assertIn(a, view)
-        self.assertNotIn(c, view, "the shortfall (1k) is covered by the lowest-edge lot; the 20c lot is still held")
-        # a held lot never ages to inventory while held
-        eng.ledger.tranches[c]["ts"] = now - 7 * 3600
         eng.cash_hist = [a_config.CASH_RESERVE + 60_000]
+        eng.track_dumps(now)
+        view = {x["sub"]: x for x in eng.dump_view.get(ex, [])}
+        self.assertNotIn(a, view, "a lot >= 3c under fair is held (no +0.5c exit)")
+        self.assertIn(b, view, "a lot < 3c under fair exits")
+        self.assertNotIn(c, view, "a core lot is held")
+        ask_s = bots.side_book(eng.px[ex][0], eng.px[ex][1], "yes")[1]
+        self.assertAlmostEqual(view[b]["rebound"], bots.tick_up(round(max(round(fs - 0.02, 3) + 0.005, ask_s), 6)), places=3, msg="at max(entry + 0.5c, the touch)")
+        self.assertTrue(eng.ledger.tranches[a].get("held"))
+        eng.cash_hist = [a_config.CASH_RESERVE + 1_000]            # cash short: the hold does not depend on cash (the rotation is the cash mechanism)
         eng.track_dumps(now + 600)
-        self.assertEqual(eng.ledger.tranches[c]["state"], "open")
-        self.assertIn(c, eng.ledger.subbooks[ex])
-        # integration: no exit rests for a held lot, the ladder lot's exit does
-        fake.pos[ex] = 6000
-        fake.avg_cost[ex] = round(fs - 0.10, 3)
-        for _ in range(3):
-            loop(eng, fake)
-        exits = {eng.ledger.orders[o["id"]]["sub"] for o in fake.open_orders() if o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "dumpexit"}
-        self.assertNotIn(a, exits)
-        self.assertNotIn(c, exits)
-        self.assertIn(b, exits)
+        view = {x["sub"] for x in eng.dump_view.get(ex, [])}
+        self.assertNotIn(a, view)
+        self.assertEqual(eng.lot_policy(ex, "yes", a, round(fs - 0.10, 3), fs), "hold")
+        self.assertEqual(eng.lot_policy(ex, "yes", b, round(fs - 0.02, 3), fs), "exit")
+        self.assertEqual(eng.lot_policy(ex, "yes", c, round(fs - 0.015, 3), fs), "core")
+        eng.controls.d["core"] = dict(swap_out={f"{ex}|{a}": dict(t=now, why="test")})
+        self.assertEqual(eng.lot_policy(ex, "yes", a, round(fs - 0.10, 3), fs), "exit", "a swapped-out core lot exits at the touch")
 
     def test_buffer_is_the_catchers_p95_hourly_cost_plus_5k_and_sets_the_k_table(self):
         fake, eng, favs = self.rig()
@@ -3482,9 +3472,11 @@ class RulesV2Tests(EngineCase):
         t = dict(ex=ex, side="yes", kind="dump", state="open", ts=time.time(), t="x", avg=round(fs - 0.16, 3))
         eng.cash_hist = [a_config.CASH_RESERVE + 60_000]
         eng.controls.d["buffer"] = dict(value=20_000, day=time.strftime("%Y-%m-%d"))
+        f_engine.TRADING_HOLD_C = 0.03                             # C88: the 3c hold on
         self.assertEqual(eng.hold_when_idle([(sub, t, ex, 1000, fs - 0.16, fs)], time.time()), set())
         eng.ledger.subbooks[ex]["inventory"] = 1_000.0           # back under the cap: holdable
         self.assertEqual(eng.hold_when_idle([(sub, t, ex, 1000, fs - 0.16, fs)], time.time()), {sub})
+        f_engine.TRADING_HOLD_C = 99.0
         # the 15c rule on the levels
         for _ in range(3):
             seed_ref(eng, ex, mid=fs - 0.06)
@@ -3596,17 +3588,22 @@ class TMTests(EngineCase):
         xs = self.tm_orders(eng, fake, ex, "tmexit")
         # rule 0: never below entry + 0.5c
         self.assertGreaterEqual(1 - xs[0]["price"], t["avg"] + a_config.RULE0_MARGIN - 1e-9)
-        # hold-when-idle: a lot >= 8c under fair with idle cash is held (no exit); under BUFFER it is offered again
+        # C88: a TM lot >= 3c under fair is held (no +0.5c exit), whatever the cash; under 3c it is offered again
+        f_engine.TRADING_HOLD_C = 0.03
         FAIR[ex] = 0.60
         eng.controls.d["buffer"] = dict(value=20_000, day=time.strftime("%Y-%m-%d"))
         loop(eng, fake); loop(eng, fake)
-        self.assertEqual(self.tm_orders(eng, fake, ex, "tmexit"), [], "13.5c under fair and free 60k >= BUFFER: held")
+        self.assertEqual(self.tm_orders(eng, fake, ex, "tmexit"), [], "13.5c under fair: held")
         self.assertTrue(t.get("held"))
         eng.cash_hist = [a_config.CASH_RESERVE + 10_000]
         eng.track_tm(time.time())
+        self.assertTrue(t.get("held"), "cash does not change the hold (the rotation is the cash mechanism)")
+        FAIR[ex] = 0.49                                        # 2.5c under fair: under the 3c hold -> offered again
+        loop(eng, fake); loop(eng, fake)
         self.assertFalse(t.get("held"))
         self.assertTrue(eng.tm_view.get(ex))
         FAIR[ex] = 0.50
+        f_engine.TRADING_HOLD_C = 99.0
         loop(eng, fake); loop(eng, fake)
         # the round trip
         xs = self.tm_orders(eng, fake, ex, "tmexit")
@@ -4641,6 +4638,141 @@ class CatcherFix1Tests(EngineCase):
         w_deep = dict(edge=0.05, lname="L1", weight=0.5, touch=False, l0=False, px=0.88, qty=1000, side="yes")
         out, cut, spent = eng.allocate_levels([(0, False, "a", w_deep), (0, False, "b", w_touch)], 0.9 * 1000 * 0.5 + 1, 15_000)
         self.assertEqual([x[2] for x in out], ["b"], "with room for one, the touch L1 wins")
+
+
+class C88Tests(EngineCase):
+    """C88 (Piero 01:55 Oct 9): the two books (CORE <= 50k at cost by edge-%, sticky, swaps at +3c, leaves within 1c of fair; TRADING
+    lots >= 3c held, under 3c exit at max(entry + 0.5c, touch)); the hard pauses (pm_stale, engine_errors, i2_breach, cash_floor,
+    api_errors) that lift themselves; the feed book scan; the recycle-depth snapshot; the scoreboard."""
+
+    def rig(self):
+        f_engine.CORE_CAP_COST, f_engine.TRADING_HOLD_C = 50_000.0, 0.03
+        return DumpV3Tests.rig(self)
+
+    def lot(self, eng, ex, sub, qty, avg, side="yes"):
+        eng.ledger.subbooks.setdefault(ex, {})[sub] = float(qty if side == "yes" else -qty)
+        eng.ledger.tranches[sub] = dict(ex=ex, side=side, kind="dump", state="open", ts=time.time() - 60, t="x", avg=avg)
+
+    def test_core_picks_the_highest_edge_pct_within_50k_and_swaps_at_3c_more(self):
+        fake, eng, favs = self.rig()
+        exs = [e for e in favs[:4]]
+        fs = {e: eng.fair[e] for e in exs}
+        self.lot(eng, exs[0], f"dump:{exs[0]}:yes:1", 20_000, round(fs[exs[0]] - 0.10, 3))   # 20k x ~0.85 = 17k, ~12% edge
+        self.lot(eng, exs[1], f"dump:{exs[1]}:yes:1", 30_000, round(fs[exs[1]] - 0.06, 3))   # ~27k, ~7%
+        self.lot(eng, exs[2], f"dump:{exs[2]}:yes:1", 30_000, round(fs[exs[2]] - 0.04, 3))   # ~27k, ~4%: does not fit the cap
+        self.lot(eng, exs[3], f"dump:{exs[3]}:yes:1", 1_000, round(fs[exs[3]] - 0.02, 3))    # 2c: not a candidate
+        eng.core_t = 0
+        eng.core_update(time.time())
+        core = eng.controls.d["core"]
+        keys = set(core["lots"])
+        self.assertIn(f"{exs[0]}|dump:{exs[0]}:yes:1", keys); self.assertIn(f"{exs[1]}|dump:{exs[1]}:yes:1", keys)
+        self.assertNotIn(f"{exs[2]}|dump:{exs[2]}:yes:1", keys, "over the 50k cap"); self.assertNotIn(f"{exs[3]}|dump:{exs[3]}:yes:1", keys, "< 3c edge")
+        self.assertLessEqual(core["cost"], 50_000 + 1)
+        self.assertEqual(eng.lot_policy(exs[0], "yes", f"dump:{exs[0]}:yes:1", 0.8, fs[exs[0]]), "core")
+        self.assertEqual(eng.lot_policy(exs[2], "yes", f"dump:{exs[2]}:yes:1", round(fs[exs[2]] - 0.04, 3), fs[exs[2]]), "hold", "a trading lot >= 3c under fair is held")
+        # a new lot with >= 3c more edge than the weakest core lot swaps it out (one swap per minute); the weakest exits at the touch
+        self.lot(eng, exs[2], f"dump:{exs[2]}:yes:2", 10_000, round(fs[exs[2]] - 0.12, 3))
+        eng.core_t = 0
+        eng.core_update(time.time())
+        core = eng.controls.d["core"]
+        self.assertIn(f"{exs[2]}|dump:{exs[2]}:yes:2", core["lots"])
+        self.assertNotIn(f"{exs[1]}|dump:{exs[1]}:yes:1", core["lots"], "the weakest (6c) swapped out for a 12c lot")
+        self.assertIn(f"{exs[1]}|dump:{exs[1]}:yes:1", core["swap_out"])
+        self.assertEqual(eng.lot_policy(exs[1], "yes", f"dump:{exs[1]}:yes:1", 0.8, fs[exs[1]]), "exit")
+        self.assertTrue(any("SWAP" in e["text"] for e in eng.events))
+        # within 1c of fair: leaves core
+        FAIR[exs[0]] = round(eng.ledger.tranches[f"dump:{exs[0]}:yes:1"]["avg"] + 0.005, 3)
+        self.addCleanup(FAIR.pop, exs[0], None)
+        loop(eng, fake)
+        eng.core_t = 0
+        eng.core_update(time.time())
+        self.assertNotIn(f"{exs[0]}|dump:{exs[0]}:yes:1", eng.controls.d["core"]["lots"], "within 1c of fair: out of core")
+        # the rotation and the release never touch a core lot
+        self.assertTrue(eng.core_set)
+        for ex_, sub_ in eng.core_set:
+            self.assertEqual(eng.lot_policy(ex_, "yes", sub_, 0.5, 0.9), "core")
+
+    def test_hard_pauses_lift_themselves_and_pnl_stops_only_alert(self):
+        fake, eng, favs = self.rig()
+        loop(eng, fake)
+        self.assertFalse(eng.controls.paused)
+        eng.fair_t = time.time() - 200                       # Polymarket fair 200 s old
+        eng.hard_pauses(time.time())
+        self.assertTrue(eng.controls.paused); self.assertEqual(eng.controls.d["auto_pause"]["kind"], "pm_stale")
+        eng.controls.d["auto_pause"]["t"] = time.time() - 301
+        eng.fair_t = time.time()
+        eng.auto_resume(time.time())
+        self.assertFalse(eng.controls.paused, "lifts itself once the fair is fresh")
+        for _ in range(ENGINE_ERRORS := a_config.ENGINE_ERRORS_10M):
+            eng.event("ERR", "test error")
+        eng.hard_pauses(time.time())
+        self.assertEqual(eng.controls.d["auto_pause"]["kind"], "engine_errors")
+        eng.controls.d["auto_pause"]["t"] = time.time() - 301
+        eng.events = [e for e in eng.events if e["kind"] != "ERR"]
+        eng.auto_resume(time.time())
+        self.assertFalse(eng.controls.paused)
+        eng.ex.trims["tm"] = eng.ex.trims.get("tm", 0) + 1   # an I2 trim
+        eng.hard_pauses(time.time())
+        self.assertEqual(eng.controls.d["auto_pause"]["kind"], "i2_breach")
+        eng.controls.d["auto_pause"]["t"] = time.time() - 301
+        eng.auto_resume(time.time())
+        self.assertTrue(eng.controls.paused, "30 min without another trim first")
+        eng.trim_t = time.time() - a_config.I2_RESUME_S - 1
+        eng.auto_resume(time.time())
+        self.assertFalse(eng.controls.paused)
+        self.assertFalse(any(e["kind"] == "PAUSE" and "D5" in e["text"] for e in eng.events))
+
+    def test_book_scan_and_recycle_depth_from_the_feed(self):
+        fake, eng, favs = self.rig()
+        class F:
+            def __init__(self, b): self.b = b
+            def book(self, ex, max_age_s=10.0): return self.b.get(str(ex))
+        books = {}
+        for b in eng.bots:
+            if b.kind == "market" and eng.fair.get(b.ex) is not None:
+                f = eng.fair[b.ex]
+                books[b.ex] = ([(round(f - 0.03, 3), 1500.0), (round(f - 0.035, 3), 500.0), (0.985, 9000.0)], [(round(f - 0.02, 3), 800.0), (0.015, 3000.0)])
+        eng.mkt_feed = F(books)
+        eng.controls.d["feed_mode"] = "live"
+        eng.book_scan_t = 0
+        eng.book_scan(time.time())
+        rows = eng.book_scan_rows
+        self.assertGreaterEqual(len(rows), 100)
+        self.assertTrue(all(abs(rows[i]["gap_c"]) >= abs(rows[i + 1]["gap_c"]) for i in range(len(rows) - 1)), "ranked by |gap|")
+        self.assertEqual(rows[0]["bid_q3"], 2000.0)
+        self.assertTrue(os.path.exists(os.path.join(TMP, "intel", "book_scan", "latest.json")))
+        self.assertEqual(sum(1 for r in rows if r["cheap"] == "yes"), len(rows), "every bid sits 3c under fair: the YES side is cheap")
+        now = time.time()
+        with_hour = time.mktime(time.localtime(now)[:3] + (13, 0, 0, 0, 0, -1))
+        eng.recycle_depth_snapshot(with_hour)
+        day = time.strftime("%Y-%m-%d", time.localtime(with_hour))
+        snap = json.load(open(os.path.join(TMP, "intel", "recycle_depth", day + ".json")))
+        m = next(iter(snap["markets"].values()))
+        self.assertEqual((m["yes_98"], m["yes_99"], m["no_98"], m["no_99"]), (9000.0, 0.0, 3000.0, 0.0))
+
+    def test_scoreboard_edge_bought_given_back_and_books(self):
+        fake, eng, favs = self.rig()
+        loop(eng, fake)
+        ex = favs[0]
+        t = time.strftime("%Y-%m-%d %H:%M:%S")
+        eng.ledger.orders["o1"] = dict(id="o1", ex=ex, side="yes", action="buy", layer="dump", sub=f"dump:{ex}:yes:1", bot="MKT x", price=0.8, qty=1000, status="done", placed=t, closed=t, ts=time.time(), filled=1000.0, left=0, cost=800.0, note="")
+        eng.ledger.orders["o2"] = dict(id="o2", ex=ex, side="no", action="buy", layer="dumpexit", sub=f"dump:{ex}:yes:1", bot="MKT x", price=0.18, qty=400, status="done", placed=t, closed=t, ts=time.time(), filled=400.0, left=0, cost=72.0, note="")
+        eng.ledger.fills.extend([dict(key="s1", order="o1", ex=ex, side="yes", qty=1000.0, price=0.80, action="buy", realized=0.0, t=t, layer="dump", before_engine=False, fair=0.90, edge=0.10, bot="MKT x", sig_mid=None, sig_edge=None, mo5=None, mo30=None),
+                                 dict(key="s2", order="o2", ex=ex, side="no", qty=400.0, price=0.18, action="buy", realized=8.0, t=t, layer="dumpexit", before_engine=False, fair=0.10, edge=-0.08, bot="MKT x", sig_mid=None, sig_edge=None, mo5=None, mo30=None)])
+        self.lot(eng, ex, f"dump:{ex}:yes:1", 600, 0.80)
+        FAIR[ex] = 0.92; self.addCleanup(FAIR.pop, ex, None)
+        loop(eng, fake)
+        eng.scoreboard_t = 0
+        eng.scoreboard_update(time.time())
+        sb = eng.scoreboard
+        c = sb["today"]["strategy"]["catcher"]
+        self.assertAlmostEqual(c["bought"], 100.0, places=2, msg="edge bought = 0.10 x 1,000")
+        self.assertAlmostEqual(c["given"], 32.0, places=2, msg="given back = (fair 0.90 - sale 0.82) x 400")
+        self.assertAlmostEqual(c["realized"], 8.0, places=2)
+        self.assertAlmostEqual(c["drift"], (0.92 - 0.90) * 600, places=1, msg="fair drift on the 600 still held")
+        self.assertAlmostEqual(c["net"], 68.0, places=2)
+        self.assertIn("trading", sb["today"]["book"])
+        self.assertEqual(sb["target_day"], a_config.SCOREBOARD_TARGET_DAY)
 
 
 class Dash5Tests(EngineCase):

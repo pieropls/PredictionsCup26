@@ -184,8 +184,9 @@ function ov_rankchart() {
 const RAMP = ["#0862A6", "#1A6CA8", "#2C77AB", "#3E81AD", "#4F8BAF", "#5F95B1", "#6A8FA3", "#7A9DAE", "#8AABB9", "#9AB8C4", "#A9C3CC"];
 function ov_port() {
   const p = obj(V("v5ov").port); if (p.account == null) return na5();
-  const byS = ui.v5.pv === "strategy";
-  let sl = byS ? arr(p.by_strategy).map((r, i) => ({key: r.key, name: r.name, value: r.value})) : arr(p.slices).map(r => Object.assign({key: r.ex}, r));
+  const byB = ui.v5.pv === "book", byS = ui.v5.pv !== "market", B = obj(V("v5ov").books);
+  let sl = byB ? [["core", `CORE (held to settlement, ${num(obj(B.core).lots)} lots)`, obj(B.core).value], ["trading", "TRADING", obj(B.trading).value], ["apart", "Piero's positions (RI, walls, manual)", obj(B.apart).value]].map(([key, name, value]) => ({key, name, value}))
+         : byS ? arr(p.by_strategy).map((r, i) => ({key: r.key, name: r.name, value: r.value})) : arr(p.slices).map(r => Object.assign({key: r.ex}, r));
   if (!byS && (arr(p.other).length || Math.abs(val(p.val_gap) || 0) > 1)) sl.push({key: "other", name: `Other (${arr(p.other).length} markets)`, value: p.other_value});
   sl.push({key: "cash", name: "Cash available", value: p.available, cash: true});
   const tot = sl.reduce((a, r) => a + Math.max(0, r.value || 0), 0) || 1;
@@ -204,7 +205,7 @@ function ov_port() {
   svg += `<text x="${C}" y="${C - 4}" text-anchor="middle" class="lbl" style="font-size:12px">account</text><text x="${C}" y="${C + 16}" text-anchor="middle" class="vl" style="font-size:17px">${num(p.account)}</text></svg>`;
   let rows = byS ? sl : sl.filter(r => r.key !== "other" || !ui.v5.oexp);
   if (!byS && ui.v5.oexp) rows = rows.slice(0, -1).concat(arr(p.other).map(r => Object.assign({key: r.ex, sub: true}, r)), [sl[sl.length - 1]]);
-  let t = `<div class="wrap5"><table class="t5"><thead><tr><th>${byS ? "Strategy" : "Market"}</th>${byS ? "" : "<th>Side</th><th class='n'>Shares</th>"}<th class="n">Value</th><th class="n">% of account</th>${byS ? "" : "<th class='n'>Avg</th><th class='n'>Mark</th><th class='n'>Fair</th><th class='n'>P&L marks</th><th class='n'>P&L fair</th>"}</tr></thead><tbody>`;
+  let t = `<div class="wrap5"><table class="t5"><thead><tr><th>${byB ? "Book" : byS ? "Strategy" : "Market"}</th>${byS ? "" : "<th>Side</th><th class='n'>Shares</th>"}<th class="n">Value</th><th class="n">% of account</th>${byS ? "" : "<th class='n'>Avg</th><th class='n'>Mark</th><th class='n'>Fair</th><th class='n'>P&L marks</th><th class='n'>P&L fair</th>"}</tr></thead><tbody>`;
   for (const r of rows) {
     const cl = r.key === "other" ? "cl" : "";
     t += `<tr class="${cl} ${ui.v5.hlx === r.key ? "hl" : ""}" data-slicerow="${esc(r.key)}"${r.key === "other" ? ' data-oexp="1"' : ""}><td>${r.sub ? "&nbsp;&nbsp;" : ""}${esc(r.name)}${r.key === "other" ? (ui.v5.oexp ? " ▾" : " ▸") : ""}</td>`
@@ -213,8 +214,10 @@ function ov_port() {
       + (byS ? "" : `<td class="n">${r.avg == null ? "" : px(r.avg)}</td><td class="n">${r.mark == null ? "" : px(r.mark)}</td><td class="n">${r.fair == null ? "" : px(r.fair)}</td><td class="n ${cls(r.pnl_marks)}">${r.pnl_marks == null ? "" : sgn(r.pnl_marks)}</td><td class="n ${cls(r.pnl_fair)}">${r.pnl_fair == null ? "" : sgn(r.pnl_fair)}</td>`) + `</tr>`;
   }
   t += `</tbody></table></div>`;
-  return `<div class="h5"><h3>Portfolio: where the money is</h3><div class="seg5"><button data-pv="market" class="${!byS ? "on" : ""}">by market</button><button data-pv="strategy" class="${byS ? "on" : ""}">by strategy</button></div></div>
-    <div class="g2 port5"><div><div style="display:flex;gap:24px;margin-bottom:10px"><div><div class="lab5">Invested</div><div class="big5" style="font-size:30px">${k1(p.invested)}</div><div class="sub5">${pct(p.invested / (p.account || 1), 0)} of the account</div></div>
+  return `<div class="h5"><h3>Portfolio: where the money is</h3><div class="seg5"><button data-pv="market" class="${!byS ? "on" : ""}">by market</button><button data-pv="strategy" class="${ui.v5.pv === "strategy" ? "on" : ""}">by strategy</button><button data-pv="book" class="${byB ? "on" : ""}">by book</button></div></div>
+    <div class="g2 port5"><div><div style="display:flex;flex-wrap:wrap;gap:16px 24px;margin-bottom:10px"><div><div class="lab5">Invested</div><div class="big5" style="font-size:30px">${k1(p.invested)}</div><div class="sub5">${pct(p.invested / (p.account || 1), 0)} of the account</div></div>
+    <div><div class="lab5">Core</div><div class="big5" style="font-size:30px">${k1(obj(B.core).cost)}</div><div class="sub5">of ${k1(obj(B.core).cap)} at cost · ${k1(obj(B.core).fair)} at fair</div></div>
+    <div><div class="lab5">Trading</div><div class="big5" style="font-size:30px">${k1(obj(B.trading).cost)}</div><div class="sub5">at cost · ${k1(obj(B.trading).value)} at marks</div></div>
     <div><div class="lab5">Available</div><div class="big5" style="font-size:30px">${k1(p.available)}</div><div class="sub5">${k1(p.above_floor)} above the 5k floor</div></div></div>${svg}</div><div>${t}</div></div>`;
 }
 
@@ -237,7 +240,7 @@ function card5(c) {
   return `<div class="sc5${glow}" data-card="${esc(c.key)}"${tipAttr(tip)}><i class="flow" style="border-top-width:${f1(thick)}px;width:14px"></i>
     <div><span class="nm">${esc(c.name)}</span><span class="chip5 ${esc(c.status)}" title="${esc(c.reason || "")}">${esc(c.status)}</span></div>
     <div class="pl ${cls(c.pnl)}">${sgn(c.pnl)}</div><div class="sub5">today <b class="${cls(c.today)}">${sgn(c.today)}</b> · since Oct 1 on the board</div>
-    <div class="bar5"><i style="width:${f1(w)}%"></i></div><div class="meta">${capS} · ${num(c.entries)} entries, ${num(c.exits)} exits resting · last fill ${c.last_fill_t ? tsAgo(c.last_fill_t) + " ago" : "–"}</div></div>`;
+    <div class="bar5"><i style="width:${f1(w)}%"></i></div><div class="meta">${capS}${c.core_cost ? ` · core <b>${k1(c.core_cost)}</b> / trading ${k1(c.trading_cost)}` : ""} · ${num(c.entries)} entries, ${num(c.exits)} exits resting · last fill ${c.last_fill_t ? tsAgo(c.last_fill_t) + " ago" : "–"}</div></div>`;
 }
 function lv_pipe() {
   const L = V("v5lv"), cards = arr(L.cards); if (!cards.length) return na5();
@@ -249,8 +252,22 @@ function lv_pipe() {
     <div>${[...new Set(strat.map(c => c.sub || ""))].map(g => `<div class="cg5">${g ? `<div class="cgl5">${esc(g)}</div>` : ""}<div class="cards5">${strat.filter(c => (c.sub || "") === g).map(card5).join("")}</div></div>`).join("")}</div>
     <div style="display:grid;gap:8px"><div class="pos5"><b>Positions</b><div class="big5" style="font-size:24px">${k1(cash.positions)}</div><div class="sub5">at SIG marks</div></div><div class="pos5"><b>Exits</b><div class="sub5">sell-backs turn positions back into cash</div></div></div></div>
     <div class="strip5" style="margin-top:12px">Cash pool <b>${num(cash.pool)}</b> (floor ${k1(cash.floor)} · buffer ${k1(cash.buffer)}) ◄ exits · <span class="${Math.abs(val(chk.gap) || 0) > 25 ? "bad" : ""}">all strategies + holdings = <b>${sgn(chk.sum)}</b> vs leaderboard P&L ${sgn(chk.board)} (gap ${sgn(chk.gap)})</span></div>
+    ${lv_score(L)}
     <h3 style="margin:16px 0 8px;font-size:15px">Not strategies, shown apart</h3><div class="cards5">${apart.map(card5).join("")}</div>
     <details style="margin-top:12px"><summary>Retired (${ret.length})</summary><div class="cards5" style="margin-top:8px">${ret.map(card5).join("")}</div></details>`;
+}
+function lv_score(L) {
+  const sb = obj(L.scoreboard); if (!sb.t) return "";
+  const td = obj(obj(sb.today).strategy), ts = obj(obj(sb.since).strategy), bd = obj(obj(sb.today).book), bs = obj(obj(sb.since).book);
+  const row = (name, a, b) => `<tr><td>${esc(name)}</td><td class="n">${sgn(a.bought)}</td><td class="n">${sgn(-(a.given || 0))}</td><td class="n ${cls(a.net)}"><b>${sgn(a.net)}</b></td><td class="n ${cls(a.realized)}">${sgn(a.realized)}</td><td class="n ${cls(a.drift)}">${sgn(a.drift)}</td><td class="n ${cls(b.net)}">${sgn(b.net)}</td><td class="n ${cls(b.realized)}">${sgn(b.realized)}</td></tr>`;
+  const names = {tm: "Touch maker", sm: "Spread maker", catcher: "Catcher", sniper: "Sniper, fat-finger", rotation: "Rotation", pairs: "Pairs", held: "Held", ri: "RI Senate R", walls: "Walls", fm: "Fair maker", scalp: "Scalper v1"};
+  const keys = Object.keys(Object.assign({}, ts, td)).sort((x, y) => (val(obj(ts[y]).net) || 0) - (val(obj(ts[x]).net) || 0));
+  let t = `<div class="p5" style="margin-top:12px"><div class="h5"><h3>Scoreboard</h3><span class="sub5">today <b class="${cls(sb.today_net)}">${sgn(sb.today_net)}</b> net edge · pace <b class="${(val(sb.pace_day) || 0) >= sb.target_day ? "good" : "bad"}">${sgn(sb.pace_day)}/day</b> vs the ${num(sb.target_day)}/day target · as of ${esc(String(sb.t || "").slice(11, 16))}</span></div>
+    <div class="wrap5"><table class="t5"><thead><tr><th></th><th class="n">Edge bought (today)</th><th class="n">Given back</th><th class="n">Net</th><th class="n">Realized</th><th class="n">Fair drift</th><th class="n">Net since Oct 1</th><th class="n">Realized since Oct 1</th></tr></thead><tbody>`;
+  for (const k of ["core", "trading"]) t += row(k === "core" ? "CORE book" : "TRADING book", obj(bd[k]), obj(bs[k]));
+  t += `<tr><td colspan="8" class="sub5">by strategy</td></tr>`;
+  for (const k of keys) t += row(names[k] || k, obj(td[k]), obj(ts[k]));
+  return t + `</tbody></table></div><div class="sub5">edge bought = (fair − price) × shares on entry fills at the fill's Polymarket fair; given back = (fair − sale price) × shares on exits; fair drift = (fair now − fair at entry) × shares held</div></div>`;
 }
 function lv_side() {
   const k = ui.v5.card; if (!k) return "";

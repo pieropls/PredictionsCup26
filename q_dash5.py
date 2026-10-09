@@ -635,6 +635,9 @@ def bucket_totals(eng, pos_rows):
             o["value"] += sh * p["vps"]
             o["value_fair"] += sh * (p["fair_side"] if p["fair_side"] is not None else p["vps"])
         p["subs"] = split                                   # the portfolio's split = the strategies' lots (one source for both pages)
+        core_set = getattr(eng, "core_set", set()) or set()
+        core_sh = sum(abs(v) for sub, v in (eng.ledger.subbooks.get(ex) or {}).items() if (str(ex), sub) in core_set and abs(v) >= 1)
+        p["core_sh"] = round(min(core_sh, p["shares"]), 2)   # C88: the CORE book's share of the position
     for k, o in out.items():
         o["board"] = round(o["cash"] + o["value"], 2)
         o["fair"] = round(o["cash"] + o["value_fair"], 2)
@@ -975,17 +978,23 @@ def activity(eng, n=40):
             side, px, fs = ("no" if side == "yes" else "yes"), round(1 - px, 4), (None if fs is None else 1 - fs)
         vs_entry = (f.get("realized") or 0.0) / f["qty"] if red and f.get("qty") else None
         rows.append(dict(t=local_ts(f["t"]), ex=f["ex"], side=side, qty=f["qty"], px=px, layer=f.get("layer"), strat=b, fair=fs, sold=red, vs_entry=vs_entry))
-    small = collections.defaultdict(list)
-    for r in rows:
+    small = collections.defaultdict(list)                   # tiny fills (<= 5 shares) of one strategy / market / side, clustered within an hour of each other
+    for r in rows:                                          # rows are newest first
         if r["qty"] <= 5:
-            small[(r["strat"], r["ex"], r["side"], r["sold"], int(r["t"] // 3600))].append(r)
+            k = (r["strat"], r["ex"], r["side"], r["sold"])
+            cl = small[k]
+            if cl and cl[-1] and cl[-1][-1]["t"] - r["t"] <= 3600:
+                cl[-1].append(r)
+            else:
+                cl.append([r])
+    grp = {id(r): g for cls_ in small.values() for g in cls_ for r in g}
     done = set()
     for r in rows:
         if len(out) >= n:
             break
         if id(r) in done:
             continue
-        g = small.get((r["strat"], r["ex"], r["side"], r["sold"], int(r["t"] // 3600))) if r["qty"] <= 5 else None
+        g = grp.get(id(r))
         if g and len(g) >= 2:
             for x in g:
                 done.add(id(x))
@@ -1017,6 +1026,30 @@ def activity(eng, n=40):
 
 
 # ------------------------------------------------------------------------------------------------ strategies (Live §3.2)
+def books_split(eng, pos_rows, account):
+    """C88: CORE vs TRADING — cost, value at marks, value at fair, lots, cap (CORE = the controller's core set; TRADING = every other engine lot;
+    Piero's position orders (RI, walls, manual) are apart)."""
+    core = dict(cost=0.0, value=0.0, fair=0.0, shares=0.0, n=0)
+    trad = dict(cost=0.0, value=0.0, fair=0.0, shares=0.0, n=0)
+    apart = dict(cost=0.0, value=0.0, fair=0.0, shares=0.0, n=0)
+    core_set = getattr(eng, "core_set", set()) or set()
+    skip = ("manual", "wall:", "swing:", "sleeve:", "pairset:")
+    for p in pos_rows:
+        ex = p["ex"]
+        books = eng.ledger.subbooks.get(ex) or {}
+        fs = p["fair_side"] if p["fair_side"] is not None else p["vps"]
+        for sub, v in books.items():
+            if abs(v) < 1 or (v > 0) != (p["side"] == "yes"):
+                continue
+            tgt = core if (str(ex), sub) in core_set else apart if (sub.startswith(skip) or ex in RI_EX) else trad
+            sh = abs(v)
+            tgt["shares"] += sh; tgt["cost"] += sh * (p["avg"] or p["vps"]); tgt["value"] += sh * p["vps"]; tgt["fair"] += sh * fs; tgt["n"] += 1
+    c = (eng.controls.d.get("core") or {}) if getattr(eng, "controls", None) else {}
+    return dict(core=dict({k: round(v, 2) for k, v in core.items()}, cap=c.get("cap") or 50_000, lots=len(c.get("lots") or {}), t=c.get("t")),
+                trading={k: round(v, 2) for k, v in trad.items()}, apart={k: round(v, 2) for k, v in apart.items()},
+                scoreboard=getattr(eng, "scoreboard", None) or {})
+
+
 def strategy_cards(eng, totals, snap, pos_rows, rep=None):
     now = time.time()
     resting = collections.defaultdict(lambda: [0, 0])                # [entries, exits] by bucket
@@ -1081,6 +1114,14 @@ def strategy_cards(eng, totals, snap, pos_rows, rep=None):
                               today_fair=None if tot.get("fair") is None or sb.get("fair") is None else round(tot["fair"] - sb["fair"], 2),
                               entries=resting[k][0], exits=resting[k][1], last_fill_t=last_fill.get(k), fills=fills))
             c_ = cards[-1]
+            core_set = getattr(eng, "core_set", set()) or set()
+            cc = 0.0
+            for p in pos_rows:
+                for sub, v in (eng.ledger.subbooks.get(p["ex"]) or {}).items():
+                    if abs(v) >= 1 and (str(p["ex"]), sub) in core_set and bucket_of_sub(sub, p["ex"]) == k:
+                        cc += abs(v) * (p["avg"] or p["vps"])
+            c_["core_cost"] = round(cc, 2)
+            c_["trading_cost"] = round(max(0.0, cost.get(k, 0.0) - cc), 2)
             if k == "catcher":                              # Piero 21:20: two lines, held lots and the budget for new bids
                 c_["held_lots"] = round(cost.get(k, 0.0), 2)
                 c_["budget_new"] = round(float((getattr(eng, "dump_cov", None) or {}).get("budget") or 0), 2)
@@ -1259,6 +1300,7 @@ def build(eng, api, v4=None):
                       slices=[row(p) for p in top], other=[row(p) for p in rest], other_value=round(sum(p["value"] for p in rest) + (val_gap if abs(val_gap) > 1 else 0), 2),
                       val_gap=val_gap,
                       by_strategy=[dict(key=k, name=name_of(k), value=round(v, 2)) for k, v in sorted(by_strat.items(), key=lambda kv: -kv[1]) if v >= 1]),
+            books=books_split(eng, pos_rows, account),
             archive=dict(fills=rep.get("fills"), first=rep.get("first"), last=rep.get("last"), cash_replayed=rep.get("cash_replayed"), cash_sig=round(cash, 2),
                          transactions=rep.get("n_tx"), info=rep.get("info"),
                          pos_mismatch=sum(1 for p in pos_rows if abs((rep.get("pos") or {}).get(p["ex"], 0.0) - (p["shares"] if p["side"] == "yes" else -p["shares"])) > 1)
@@ -1266,7 +1308,7 @@ def build(eng, api, v4=None):
         # Live
         cards = strategy_cards(eng, totals, snap, pos_rows, rep)
         sdays, shist = cached("sdays", 120, lambda: strategy_days(eng)) if True else ({}, [])
-        out["v5lv"] = dict(
+        out["v5lv"] = dict(scoreboard=getattr(eng, "scoreboard", None) or {}, 
             server=dict(state=st, reason=why, **server, loop_age=loop_age, sig_ms=round(1000 * (h.get("read") or {}).get("p50"), 0) if (h.get("read") or {}).get("p50") else None,
                         pm_age=round(now - eng.fair_t) if getattr(eng, "fair_t", None) else None,
                         feed=dict(connected=bool(feed and feed.connected()), mode=eng.feed_mode() if hasattr(eng, "feed_mode") else None,

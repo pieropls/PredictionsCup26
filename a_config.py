@@ -269,7 +269,7 @@ D5_EXCLUDE_LAYERS = ("swing", "swingsell", "wall", "wallexit")   # Piero's posit
 TM_ENTRY_STOPS = [("19:00", "21:00"), ("03:00", "06:00"), ("12:00", "14:00")]   # no TM entries from 60 min before each ring (20:00, 04:00, 13:00 PT) to the window's end: cash back for the catcher
 SM_REGIME_WIN_S, SM_REGIME_EVERY_S = 1800, 60   # live regime per SM market: the trailing 30 min of prints, recomputed every minute (mm_playbook v0 rules)
 SM_REGIME = dict(sweep_ticks=10, news_c=0.02, quiet_prints=5, trend_ticks=3, trend_bounce_max=0.40, bounce_prints=20, bounce_share=0.50)   # = research/params.py REGIME
-SM_QUOTE_REGIMES = ("BOUNCE",)  # new SM quotes only in these regimes; elsewhere exits only (>= entry + 0.5c)
+SM_QUOTE_REGIMES = ("BOUNCE", "MIXED")   # Piero 01:55 Oct 9: new SM quotes in BOUNCE and MIXED markets; elsewhere exits only (>= entry + 0.5c); loss stops unchanged
 SM_LOSS_MARKET_DAY, SM_LOSS_24H = -50.0, -150.0   # a market under -50 on the SIG day is excluded for the day; SM rolling 24 h under -150 -> exits only
 SM_TUNE_AT = "03:00"            # nightly re-tune (clip / skew / re-peg per market), applied only if the replay beats the current settings
 SM_TUNE_BOUNDS = dict(clip=(100, 1000), repeg=(1, 4), skew=(0, 2))   # = research/params.py BOUNDS
@@ -280,7 +280,26 @@ DUMP_L0_CAP_RESTING = True      # the L0 cap (DUMP_L0_BUDGET) counts only restin
 DUMP_THIN_SIDES = [             # top 20 sides by touch-level value a day, Oct 6-8, RI excluded (docs/catcher_diagnosis.md §6): their L1 joins the touch
     ("1075", "no"), ("840", "yes"), ("1028", "no"), ("995", "no"), ("987", "yes"), ("1061", "no"), ("1044", "yes"), ("1043", "no"), ("963", "no"), ("899", "no"),
     ("1072", "no"), ("1071", "no"), ("1042", "yes"), ("986", "yes"), ("951", "no"), ("1027", "yes"), ("981", "yes"), ("865", "yes"), ("1065", "no"), ("985", "no")]
-RETIRED_LAYERS = ("fm", "scalp")   # deleted (code in releases/archive/); their leftover lots: FM's offered at max(entry + 0.5c, touch), the scalper's moved to 'held'
+RETIRED_LAYERS = ("fm", "scalp")
+
+# Piero 01:55 Oct 9 (C88): two books, flags, reads, scoreboard, election-night snapshot
+CORE_CAP_COST = 50_000          # CORE: the highest edge-% lots vs Polymarket fair, held to settlement, <= 50k at cost
+CORE_SWAP_C = 0.03              # a core lot is sold (at the touch, never below entry) only for a new lot with >= 3c more edge ...
+CORE_NEAR_FAIR_C = 0.01         # ... or once it is within 1c of fair
+TRADING_HOLD_C = 0.03           # a trading lot >= 3c from fair is held (no +0.5c exit); under 3c it exits at max(entry + 0.5c, the touch)
+CORE_EARLY_CLOSE_PT = "17:00"   # prefer races whose polls close by 17:00 PT (data/election/poll_close.json first_close_pt) ...
+CORE_EARLY_BONUS = 0.005        # ... +0.5 pp of edge-% in the core ranking
+CORE_EVERY_S = 60
+CORE_SKIP_SUBS = ("manual", "wall:", "swing:", "sleeve:", "pairset:", "recycle:")   # Piero's position orders and pair sets are neither book
+PAUSE_KINDS = ("cash_floor", "i2_breach", "api_errors", "pm_stale", "engine_errors", "fills_blind", "travel", "cash_short", "stop_pull")   # the only automatic pauses; every P&L stop is an alert
+PM_STALE_S = 120                # Polymarket fair older than 2 min -> pause (resume when fresh)
+ENGINE_ERRORS_10M = 5           # >= 5 ERR events in 10 min -> pause (resume after 10 clean minutes)
+API_429_STORM_10M = 10          # >= 10 rate-limit answers in 10 min -> pause (resume under 3 in 10 min)
+I2_RESUME_S = 1800              # an I2 trim pauses; resume after 30 min without another
+BOOK_SCAN_EVERY_S = 120         # the full scan of every book from the feed (gaps vs fair, with depth), zero REST reads
+RECYCLE_DEPTH_HOUR = 12         # daily snapshot (first loop after 12:00 PT) of resting bid depth >= 0.98 / 0.99 per contract (election night 5a)
+SCOREBOARD_EVERY_S = 300
+SCOREBOARD_TARGET_DAY = 2_500   # edge bought - edge given back per day   # deleted (code in releases/archive/); their leftover lots: FM's offered at max(entry + 0.5c, touch), the scalper's moved to 'held'
 
 # turnover_plan §1 (C84): the spread maker (SM) — two-sided quoting at the touch on the bounciest markets, queue kept, refilled on fill
 SM_CLIP, SM_CLIP_PILOT = 1_000, 500            # clip = min(this, 30% of the touch level's size)
@@ -332,7 +351,7 @@ WORKING_TARGET, WORKING_TARGET_DATE = 40_000, "2026-10-10"   # Piero 16:10 §2: 
 # C86 (Piero 15:35 Oct 8): SIG's realtime markets feed for books and sweeps (fills stay on the user channel + the fills page).
 # mode 'log' = connected, compared with REST, nothing uses it; 'live' = the SM / TM depth, the queue-ahead, the book sampler and the fast
 # path's L0 re-bid read the feed's book (fresh <= 10 s, current connection), REST as the fallback; 'off' = not connected. Control 'feed_mode'.
-FEED_MODE_DEFAULT, FEED_BOOK_MAX_AGE_S, FEED_REPORT_S = "log", 10.0, 1800
+FEED_MODE_DEFAULT, FEED_BOOK_MAX_AGE_S, FEED_REPORT_S = "live", 10.0, 1800   # Piero 01:55 Oct 9 (C88): books from the feed; REST only on resync / gaps / asOf > 10 s
 FEED_SWEEP_TICKS, FEED_SWEEP_SHARES, FEED_SWEEP_WINDOW_S = 3, 5_000, 2.0
 FEED_SPOT_EVERY = 10            # live mode: one REST spot check per 10 sampler samples (agreement keeps being measured)
 ENTRY_RESUME_FREE = 3_000       # C84c: once entries stopped under the 2k guard they resume only at 3k free (no flapping: 92 SM placements + 88 cancels in one hour on Oct 8 08:00)
