@@ -4480,6 +4480,21 @@ class C87Tests(EngineCase):
         texts = [e["text"] for e in eng.events]
         self.assertTrue(any("TM entries PAUSED" in t for t in texts) and any("TM entries resume" in t for t in texts))
 
+    def test_tm_resting_bids_stay_inside_the_cap_and_the_catchers_last_10k(self):
+        """C87b: resting TM bids count: held + resting <= the cap and <= free - 10k (SIG locks no cash for a resting bid)."""
+        for above, expect in ((12_000, 2_000.0), (60_000, None)):
+            fake, eng, ex = self.tm_rig(cash_above_floor=above)
+            eng.controls.set_layer("tm", "full", "test")
+            for e_ in [b.ex for b in eng.bots if b.kind == "market"][:40]:
+                if eng.fair.get(e_) is not None:
+                    eng.tm_depth[e_] = (time.time() + 1e9, [(0.1, 50_000.0)], [(0.9, 50_000.0)])
+            for _ in range(4):
+                loop(eng, fake)
+            rest = sum(o["qty"] * o["price"] for o in fake.open_orders() if (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "tm")
+            allow = min(eng.tm_cap(time.time(), log=False) - eng.tm_cost(), eng.free_cash() - a_config.TM_PAUSE_FREE)
+            self.assertLessEqual(rest, max(0.0, allow) + 1.0, f"free {eng.free_cash():,.0f}: resting TM {rest:,.0f} vs allowance {allow:,.0f}")
+            self.assertEqual(eng.tm_cov.get("allowance"), round(max(0.0, allow)))
+
     def test_migration_tm_full_sm_on_fm_and_scalper_deleted(self):
         fresh_data(layers=dict(position=dict(state="full"), tm=dict(state="pilot"), sm=dict(state="off"), fm=dict(state="pilot"), scalp=dict(state="full")))
         fake = new_fake(writes_per_min=10_000)

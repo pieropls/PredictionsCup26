@@ -5762,7 +5762,8 @@ class Engine:
             if rec and rec.get("layer") == "tm" and o["id"] not in self.ex.cancelling:
                 existing[(o["ex"], o["side"])] = o
         cost_all = self.tm_cost()
-        tm_new = 0.0
+        allow = max(0.0, min(cap_cost - cost_all, self.free_cash() - TM_PAUSE_FREE))   # C87b: held + resting <= the cap, and never the catcher's last 10k
+        rest_used = 0.0                                     # resting TM bids kept or placed this loop, in rank order (notional)
         party = dash4.party_exposure(self)
         cands = self.tm_candidates()
         top = cands[: sz["sides"]] if sz["sides"] else cands
@@ -5802,12 +5803,17 @@ class Engine:
                 continue                                    # no edge at the touch (a resting bid whose edge is gone is pulled)
             sub = f"tm:{ex}:{side}"
             clip, inv_cap = (profile.get(ex) or (sz["clip"], sz["inv"], None))[:2]
+            if cur is not None and rest_used + cur["qty"] * cur["price"] > allow + 1e-6:
+                writes -= 1                                 # C87b: over the allowance: this resting bid is dropped (a cancel write)
+                continue
             if cur is not None:
                 at_touch = cur["price"] >= best - (TM_REPEG_TICKS - 1) * TICK - 1e-9 and cur["price"] <= p + 1e-9
                 if (at_touch and fs - cur["price"] >= e_min - 1e-9) or writes < 2:   # queue priority kept; or no write budget for a re-peg
                     plan.setdefault(ex, []).append(dict(side=side, px=cur["price"], qty=int(cur["qty"]), sub=sub, ttl=TM_TTL_S))
+                    rest_used += cur["qty"] * cur["price"]
                 else:
                     plan.setdefault(ex, []).append(dict(side=side, px=p, qty=int(cur["qty"]), sub=sub, ttl=TM_TTL_S))
+                    rest_used += cur["qty"] * p
                     writes -= 2
                 quoted += 1
                 continue
@@ -5821,7 +5827,7 @@ class Engine:
             room = self.race_room(ex, side, fs)
             q = min(q, int(room / p)) if room > 0 else 0
             q = min(q, int((cap_cost - cost_all) / p))
-            q = min(q, int(max(0.0, self.free_cash() - TM_PAUSE_FREE - tm_new) / p))   # Piero 21:37: the catcher keeps first claim on the last 10k
+            q = min(q, int(max(0.0, allow - rest_used) / p))   # C87b: resting + held within the cap and free - 10k (Piero 21:37: the catcher's last 10k)
             depth = self.tm_touch_depth(ex, side, now)
             if depth is not None:
                 q = min(q, int(TM_DEPTH_SHARE * depth))
@@ -5834,9 +5840,9 @@ class Engine:
                 batched = True                              # placements of one loop batch into one write
             plan.setdefault(ex, []).append(dict(side=side, px=p, qty=q, sub=sub, ttl=TM_TTL_S))
             cost_all += q * p
-            tm_new += q * p
+            rest_used += q * p
             quoted += 1
-        self.tm_cov = dict(quoted=quoted, available=len(cands), top=len(top), writes_left=writes, writes_used=w_used)
+        self.tm_cov = dict(quoted=quoted, available=len(cands), top=len(top), writes_left=writes, writes_used=w_used, resting=round(rest_used), allowance=round(allow))
         return plan
 
     def track_tm(self, now):
