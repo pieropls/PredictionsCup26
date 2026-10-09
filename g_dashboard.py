@@ -22,6 +22,7 @@
 import asyncio
 import json
 import math
+import os
 import secrets
 import threading
 import time
@@ -30,8 +31,8 @@ from urllib.parse import urlsplit
 LOCALHOST = {"127.0.0.1", "localhost", "::1"}
 SSE_PERIOD_S = 0.5              # at most 2 updates a second
 SSE_KEEPALIVE_S = 15
-ACTIONS = {"pause", "resume", "pull_quotes", "layer_state", "layer_caps", "market", "kappa", "read_only", "hold_gates", "backfill", "truth_mode", "subbook_fix", "clear_decisions", "gate_free", "travel", "wall", "wall_cancel"}
-DESTRUCTIVE = {"pull_quotes", "layer_state", "layer_caps", "market", "kappa", "hold_gates", "backfill", "truth_mode", "subbook_fix", "clear_decisions", "gate_free", "travel", "wall", "wall_cancel"}
+ACTIONS = {"pause", "resume", "pull_quotes", "layer_state", "layer_caps", "market", "kappa", "read_only", "hold_gates", "backfill", "truth_mode", "subbook_fix", "clear_decisions", "gate_free", "travel", "wall", "wall_cancel", "rollback_request"}
+DESTRUCTIVE = {"rollback_request", "pull_quotes", "layer_state", "layer_caps", "market", "kappa", "hold_gates", "backfill", "truth_mode", "subbook_fix", "clear_decisions", "gate_free", "travel", "wall", "wall_cancel"}
 
 
 def _finite(x):
@@ -48,7 +49,7 @@ def dumps(obj):
     return json.dumps(_finite(obj), separators=(",", ":"), default=str)
 
 
-ROWS = {"markets": "ex", "holdings": "ex", "holdings4": "ex"}       # sections diffed row by row (changed rows + removed keys)
+ROWS = {"markets": "ex", "holdings": "ex", "holdings4": "ex", "v5mk_rows": "ex"}       # sections diffed row by row (changed rows + removed keys)
 APPEND = {"events", "activity", "feed"}                   # newest-first lists: only entries with a new id are sent
 
 
@@ -83,9 +84,33 @@ def diff(old, new):
     return d
 
 
+def _asset(name):
+    """assets/<name> (WebP despite the .png name) as a data URI, so file:// and the tunnel both show it (dashboard_v5 §2.1)."""
+    import base64
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", name), "rb") as fh:
+            return "data:image/webp;base64," + base64.b64encode(fh.read()).decode()
+    except OSError:
+        return ""
+
+
+PAGE5 = None
+
+
+def page5():
+    """The page with the v5 CSS / code and the two images in place (built once)."""
+    global PAGE5
+    if PAGE5 is None:
+        import r_dash5_ui as ui5
+        PAGE5 = (PAGE.replace("/*__CSS5__*/", ui5.CSS5).replace("//__JS5__", ui5.JS5)
+                 .replace("__CUP__", _asset("cup.png")).replace("__SIGLOGO__", _asset("sig.png")))
+    return PAGE5
+
+
 def render(payload):
-    """Static fallback page: the payload embedded, no stream, no controls."""
-    return PAGE.replace("__LIVE__", "false").replace("__TOKEN__", "").replace("__DATA__", dumps(payload).replace("</", "<\\/"))
+    """Static fallback page: the payload embedded, no stream, no controls; it reloads itself every 60 s (v5 §2.6)."""
+    return (page5().replace("__REFRESH__", '<meta http-equiv="refresh" content="60">').replace("__LIVE__", "false").replace("__TOKEN__", "")
+            .replace("__DATA__", dumps(payload).replace("</", "<\\/")))
 
 
 def _same_origin(headers):
@@ -129,7 +154,7 @@ def create_app(get_state, controls, market_detail=None, token=None):
         if not ok(request):
             return HTMLResponse("forbidden: open the URL in data/dashboard_url.txt", status_code=403)
         _, text = snapshot()
-        page = PAGE.replace("__LIVE__", "true").replace("__TOKEN__", token).replace("__DATA__", text.replace("</", "<\\/"))
+        page = page5().replace("__REFRESH__", "").replace("__LIVE__", "true").replace("__TOKEN__", token).replace("__DATA__", text.replace("</", "<\\/"))
         return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 
     @app.get("/events")
@@ -255,7 +280,7 @@ def serve_in_thread(app, host="127.0.0.1", port=8765, wait_s=5.0):
 
 PAGE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><link rel="icon" href="data:,"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SIG engine</title>
+<title>Piero's Intel</title>__REFRESH__<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{color-scheme:light;--bg:#f4f4f1;--card:#fff;--ink:#0b0b0b;--ink2:#52514e;--mute:#6b6a65;--line:#e4e3dc;--axis:#c3c2b7;--acc:#2a78d6;
 --good:#006300;--bad:#b42323;--warn:#8a5300;--chip:#efeee9;--neutral:#aaa8a0;--warnbg:#fff5dd;--badbg:#fdeceb;--shadow:rgba(0,0,0,.14);
@@ -339,18 +364,20 @@ box-shadow:0 6px 18px var(--shadow);display:none;max-width:300px;line-height:1.5
 .zoom-btn{padding:1px 7px;font-size:13px;line-height:1.4}.chead .zoom-btn{margin-left:auto}
 @media (max-width:760px){.tiles.t8,.tiles.t4{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:640px){main{padding:10px}.hero .v{font-size:38px}.v2{font-size:25px}header{padding:8px 10px}h2 .q{display:block;margin:2px 0 0}.card{padding:12px}}
+/*__CSS5__*/
 </style></head><body>
-<header><h1>SIG engine</h1><nav id="tabs"></nav><span class="spacer"></span><span id="live"><span class="dot"></span>…</span>
+<header><span class="logo"><img alt="Susquehanna" src="__SIGLOGO__"></span><h1>Piero's Intel</h1><nav id="tabs"></nav><span class="spacer"></span><span id="live"><span class="dot"></span>…</span>
 <button class="btn" id="themeBtn" title="Light / dark theme">Theme</button></header>
-<main id="main"></main><div id="overlay" style="display:none"></div><div class="msg" id="msg"></div><div id="tip"></div>
+<main id="main"></main><div id="side5"></div><div id="modal5"></div><div id="overlay" style="display:none"></div><div class="msg" id="msg"></div><div id="tip"></div>
 <script id="data" type="application/json">__DATA__</script>
 <script>
 const LIVE = __LIVE__, TOKEN = "__TOKEN__";
 let S = {};
 try { S = JSON.parse(document.getElementById("data").textContent || "{}") || {}; } catch (e) { S = {error: "could not read the page data: " + e}; }
-const ui = {tab: "live", shown: null, cache: {}, basis: "sig", hsort: {k: "value_sig", dir: -1}, hq: "", hl: "", hr: false, hall: false, al: "", aq: "", aall: false, feed: "", hf: "", sopen: null, zoomId: null, zoomWin: null, range: 0, dropped: 0,
+const ui = {tab: "overview", shown: null, cache: {}, basis: "sig", hsort: {k: "value_sig", dir: -1}, hq: "", hl: "", hr: false, hall: false, al: "", aq: "", aall: false, feed: "", hf: "", sopen: null, zoomId: null, zoomWin: null, range: 0, dropped: 0,
   page: 0, q: "", layer: "", haspos: false, mis: "", ev: "", evq: "", open: null, detail: null, updated: Date.now(), connected: false, errors: [], theme: "auto"};
-const TABS = {live: "Live", strategies: "Strategies", capital: "Capital", holdings: "Holdings", leaders: "Leaders", admin: "Admin"};   // dashboard_v4.md
+const TABS = {overview: "Overview", live: "Live", markets: "Markets", leaders: "Leaders", admin: "Admin"};   // dashboard_v5 (Capital / Holdings folded into Overview, Live, Markets)
+const CUP_SRC = "__CUP__", SIG_SRC = "__SIGLOGO__";   // dashboard_v4.md
 const LAYERS = ["recycler", "release", "mm", "scalp", "tm", "sm", "touch", "wall", "sleeve", "swing", "fm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "position", "leaders"];   // controls
 const ORDER = ["position", "mm", "scalp", "tm", "sm", "touch", "wall", "sleeve", "swing", "fm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "recycler", "release"];  // colour slots, fixed per layer
 const SLOT = {position: 1, manual: 1, mm: 2, scalp: 2, tm: 2, sm: 2, touch: 9, wall: 8, sleeve: 5, swing: 4, fm: 2, ladder: 3, pairs: 4, sniper: 5, fatfinger: 6, recycler: 7, inventory: 7, release: 8, dump: 9, longshot: 6};
@@ -1031,33 +1058,28 @@ function admin4() {
     <div class="card"><h3>Release and intel</h3><div>running <b>${esc(a.release || ST().release || "–")}</b></div><div class="mute" style="font-size:12px">deploy log: docs/RUN_LOG.md · intel: data/intel/report.md · impact: docs/impact_P1_P2.md</div></div></div>`;
 }
 
+//__JS5__
 const zb = id => `<span class="spacer"></span><button class="btn zoom-btn" data-zoom="${id}" title="Expand">⤢</button>`;
 const SKEL = {
-  live: () => `<section><div id="b-liveTiles"></div></section>
-    <section><div class="grid2"><div class="card chart"><div class="chead"><h3>Daily P&L by SIG day</h3>${zb("daily4")}</div><div id="b-daily4"></div></div>
-      <div class="card chart"><div class="chead"><h3>Account value over time</h3>${zb("account")}</div><div id="b-account"></div></div></div></section>
-    <section><div class="chead"><h3>Activity</h3><span class="spacer"></span><span id="b-feedopts"></span></div><div id="b-feed"></div></section>`,
-  strategies: () => `<section><div id="b-strat4"></div><div class="card chart" style="margin-top:12px"><div class="chead"><h3>P&L by strategy per SIG day</h3>${zb("daily4b")}</div><div id="b-daily4b"></div></div>
-    <details class="card more"><summary>Pair sets</summary><div id="b-pairs"></div></details><details class="card more"><summary>AK / RI exit ladders</summary><div id="b-ladders"></div></details></section>`,
-  capital: () => `<section><div id="b-cap4"></div></section>`,
-  holdings: () => `<section><div id="b-hold4"></div></section>`,
+  overview: () => `<section class="sec5"><div id="b-ovHero"></div><div id="b-ovBand"></div></section>
+    <section class="sec5 g2"><div class="p5"><div class="h5"><h3>Daily P&L, SIG days</h3><div class="seg5" id="b-ovBasis"></div></div><div id="b-ovDays"></div></div>
+      <div class="p5"><div class="h5"><h3>Account value, SIG and fair</h3></div><div id="b-ovAcct"></div></div></section>
+    <section class="sec5 g2"><div class="p5"><div class="h5"><h3>Ranking</h3></div><div id="b-ovRank"></div></div><div class="p5"><div class="h5"><h3>Our rank over time</h3></div><div id="b-ovRankC"></div></div></section>
+    <section class="sec5 p5"><div id="b-ovPort"></div></section>`,
+  live: () => `<section class="sec5"><div id="b-lvStrip"></div></section><section class="sec5"><div id="b-lvPipe"></div></section>
+    <section class="sec5 p5"><div class="h5"><h3>Live activity</h3></div><div id="b-lvAct"></div></section>`,
+  markets: () => `<section class="sec5 p5"><div id="b-mkHead"></div><div id="b-mkTable"></div></section>`,
   leaders: () => `<section><div id="b-lead4"></div></section>`,
-  admin: () => `<section><div id="b-admin4"></div></section>
-    <section><h2>Controls</h2><div id="b-ctlbar"></div></section>
-    <section><h2>Strategy flags and caps <span class="q">off / pilot / full, and the caps of each layer</span></h2><div id="b-ctllayers"></div></section>
-    <section><h2>Markets <span class="q">pause a market or exclude strategies from it</span></h2>
-      <div class="row"><input id="q" placeholder="search market" value="${esc(ui.q)}"> <select id="lf"><option value="">any layer</option>${LAYERS.map(l => `<option ${l === ui.layer ? "selected" : ""}>${l}</option>`).join("")}</select>
-        <label><input type="checkbox" id="hp" ${ui.haspos ? "checked" : ""}> has position</label> mispriced &gt; <input type="number" id="mis" value="${esc(ui.mis)}" step="0.5">¢</div>
-      <div id="b-ctlmarkets"></div></section>
-    <section><h2>Engine log</h2><div class="row"><select id="b-evkinds" aria-label="kind"></select> <input id="evq" placeholder="filter" value="${esc(ui.evq)}"></div><div id="b-events"></div></section>`,
+  admin: () => `<section class="sec5 p5"><div id="b-adCtl"></div></section><section class="sec5 p5"><div id="b-adHealth"></div></section>
+    <section class="sec5 p5"><div id="b-adAlerts"></div></section><section class="sec5 p5"><div id="b-adAdv"></div></section>`,
 };
 const BLOCKS = {
-  live: {liveTiles, daily4: () => daily4("daily4"), account: accountChart, feedopts, feed},
-  strategies: {strat4, daily4b: () => daily4("daily4b"), pairs: pairsView, ladders: laddersView},
-  capital: {cap4},
-  holdings: {hold4},
+  overview: {ovHero: ov_hero, ovBand: ov_band, ovBasis: () => `<button data-basis5="board" class="${ui.v5.basis === "board" ? "on" : ""}">board</button><button data-basis5="fair" class="${ui.v5.basis === "fair" ? "on" : ""}">at fair</button>`,
+             ovDays: ov_days, ovAcct: ov_acct, ovRank: ov_rank, ovRankC: ov_rankchart, ovPort: ov_port},
+  live: {lvStrip: lv_strip, lvPipe: lv_pipe, lvAct: lv_act},
+  markets: {mkHead: mk_head, mkTable: mk_table},
   leaders: {lead4},
-  admin: {admin4, ctlbar, ctllayers, ctlmarkets, evkinds, events},
+  admin: {adCtl: ad_controls, adHealth: ad_health, adAlerts: ad_alerts, adAdv: ad_adv},
 };
 const OPTIONAL = new Set([]);
 
@@ -1086,10 +1108,12 @@ function draw() {
   const o = obj(S.overview);
   document.body.classList.toggle("ro", !LIVE || !!o.read_only);
   setHTML("tabs", Object.entries(TABS).map(([k, v]) => `<button data-tab="${k}" class="${k === ui.tab ? "on" : ""}">${v}</button>`).join(""));
-  setHTML("live", statusbar());
+  setHTML("live", S.v5hdr ? hdr5() : statusbar());
   setHTML("themeBtn", {auto: "Theme: auto", light: "Theme: light", dark: "Theme: dark"}[ui.theme] || "Theme");
   if (ui.shown !== ui.tab) { document.getElementById("main").innerHTML = SKEL[ui.tab](); ui.shown = ui.tab; ui.cache = {}; }
   for (const [id, fn] of Object.entries(BLOCKS[ui.tab])) put(id, block(id, fn));
+  setHTML("side5", ui.tab === "live" ? block("side", lv_side) : ui.tab === "markets" ? block("mkp", mk_panel) : "");
+  setHTML("modal5", confirm5());
   drawOverlay();
 }
 const ZOOM = {daily4: ["Daily P&L by SIG day", () => daily4("ovl"), false], daily4b: ["P&L by strategy per SIG day", () => daily4("ovl"), false],
@@ -1110,7 +1134,7 @@ function drawOverlay() {
 function apply(msg, kind) {
   if (kind === "snapshot") S = obj(msg);
   else for (const [k, v] of Object.entries(obj(msg))) {
-    if ((k === "markets" || k === "holdings" || k === "holdings4") && v && !Array.isArray(v) && Array.isArray(v.rows)) {
+    if ((k === "markets" || k === "holdings" || k === "holdings4" || k === "v5mk_rows") && v && !Array.isArray(v) && Array.isArray(v.rows)) {
       const by = new Map(arr(S[k]).map(r => [r && r.ex, r]));
       for (const r of v.rows) by.set(r && r.ex, r);
       for (const ex of arr(v.gone)) by.delete(ex);
@@ -1189,9 +1213,11 @@ function setTheme(t) {
   try { localStorage.setItem("sig-dash-theme", t); } catch (e) { }
 }
 try { const t = localStorage.getItem("sig-dash-theme"); if (t === "light" || t === "dark") setTheme(t); } catch (e) { }
+try { const h = new URLSearchParams(String(location.hash || "").replace(/^#/, "")); if (h.get("tab") && TABS[h.get("tab")]) ui.tab = h.get("tab"); if (h.get("theme")) setTheme(h.get("theme")); } catch (e) { }
 
 document.addEventListener("click", e => {
   const t = e.target; if (!t || !t.closest) return;
+  if (typeof v5click === "function" && v5click(e)) return;
   const th = t.closest("th[data-sort]");
   if (th) { const k = th.dataset.sort, c = (ui.tab === "holdings" ? H4 : HCOLS).find(c => c.k === k) || {}; ui.hsort = {k, dir: ui.hsort.k === k ? -ui.hsort.dir : c.n ? -1 : 1}; draw(); return; }
   const zm = t.closest("[data-zoom]"); if (zm) { ui.zoomId = zm.dataset.zoom; ui.zoomWin = null; draw(); return; }

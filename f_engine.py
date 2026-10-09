@@ -33,6 +33,7 @@ import c_polymarket as pm
 import e_bots as bots
 import g_dashboard as dashboard
 import i_realtime as rt
+import q_dash5 as dash5
 import j_executor as jx
 import l_intel as intel
 import m_dash4 as dash4
@@ -672,6 +673,8 @@ class Engine:
         prev = {ex: (b["pos"], b["row"]) for ex, b in self.book.items()}
         catch_open = {oid for oid, o in self.ledger.orders.items() if o["status"] == "open" and o.get("layer") in self.CATCHERS}
         fill_exs, new_orders, proj = set(), set(), collections.Counter()
+        if got.get("fills"):
+            dash5.archive_append(got["fills"], self.ledger.orders)   # dashboard v5 §0: the append-only fills archive (complete since Oct 1)
         for f in self.ledger.sync(self.open, got.get("fills", []), self.bot_of, self.side_fair, self.side_mid, as_of=now,
                                   held=lambda ex: prev.get(ex)):
             fill_exs.add(f["ex"])
@@ -8023,7 +8026,12 @@ class Engine:
         except Exception as err:
             self.event("ERR", f"dashboard v4 payload: {err!r}")
             v4 = {}
-        return dict(sigday=v4.get("sigday"), status=v4.get("status"), daily4=v4.get("daily"), feed=v4.get("feed"), strategies4=v4.get("strategies"),
+        try:
+            v5 = dash5.build(self, api, v4)
+        except Exception as err:
+            self.event("ERR", f"dashboard v5 payload: {err!r}")
+            v5 = {}
+        return dict(**v5, sigday=v4.get("sigday"), status=v4.get("status"), daily4=v4.get("daily"), feed=v4.get("feed"), strategies4=v4.get("strategies"),
                     capital4=v4.get("capital"), holdings4=v4.get("holdings"), leaders4=v4.get("leaders"), admin4=v4.get("admin"),
                     money=money, daily=daily, series=self.series_view(), capital=capital, strategies=strategies,
                     coverage=cov, dump_coverage=self.dump_cov,
@@ -8060,8 +8068,12 @@ class Engine:
     def market_detail(self, ex):
         orders = sorted((o for o in self.ledger.orders.values() if o["ex"] == ex), key=lambda o: o["placed"], reverse=True)[:100]
         fills = [f for f in reversed(self.ledger.fills) if f["ex"] == ex][:100]
+        try:
+            book = dash5.market_book(self, ex)
+        except Exception:
+            book = {}
         return dict(orders=[{k: o.get(k) for k in ("placed", "bot", "layer", "side", "action", "price", "qty", "filled", "status")} for o in orders],
-                    fills=[{k: f.get(k) for k in ("t", "bot", "layer", "side", "action", "price", "qty", "edge", "mo30")} for f in fills])
+                    fills=[{k: f.get(k) for k in ("t", "bot", "layer", "side", "action", "price", "qty", "edge", "mo30")} for f in fills], book=book)
 
     def pull_quotes(self):
         """Dashboard 'pull engine quotes': DELETE every engine-owned order that adds risk (not position exits, not
@@ -8211,6 +8223,15 @@ class EngineControls:
             self.eng.event("WALL", msg)
             self.eng.night.line(msg)
             return msg
+        if action == "rollback_request":                   # dashboard v5 Admin: queue a release rollback; the Mac's mirror pull runs push_release.sh for it
+            rel = str(args.get("release") or "")
+            if not re.match(r"^C[0-9A-Za-z]+-\d{4}$", rel):
+                raise ValueError("release must look like C86c-1741")
+            with c.lock:
+                c.d["rollback_request"] = dict(release=rel, state="pending", t=stamp(), id=str(int(time.time())))
+                c.save()
+            self.eng.event("CONTROL", f"ROLLBACK requested from the dashboard: {rel} (the Mac pushes it on its next mirror pull)")
+            return f"rollback to {rel} queued: the Mac pushes it on its next mirror pull"
         if action == "sell_now":                           # Piero 17:15 Oct 8: an immediate sale, fill-or-cancel: {ex, side, px (held-side), qty, clip=5000, ttl_s=10}
             ex, side = str(args.get("ex")), str(args.get("side", "no")).lower()
             px, qty = float(args["px"]), int(args["qty"])

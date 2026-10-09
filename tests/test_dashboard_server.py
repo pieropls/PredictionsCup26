@@ -166,7 +166,7 @@ class ThreadTests(unittest.TestCase):
             t = time.time()
             body = urllib.request.urlopen(f"http://127.0.0.1:{port}/?t={TOKEN}", timeout=5).read()
             self.assertLess(time.time() - t, 2.0, "page loads in under 2 s")
-            self.assertIn(b"SIG engine", body)
+            self.assertIn(b"Piero's Intel", body)
             self.assertEqual(h.url, f"http://127.0.0.1:{port}/?t={TOKEN}")
         finally:
             h.stop()
@@ -222,32 +222,28 @@ const check = what => { if (ui.errors.length) fail(what); };
 const drawAll = what => { for (const t of Object.keys(TABS)) { ui.tab = t; draw(); for (const id of Object.keys(BLOCKS[t]))
   if (!OPTIONAL.has(id) && !(els["b-" + id] && els["b-" + id].innerHTML.length)) fail(what + ": empty " + t + "/" + id); } check(what); };
 const out = id => (els["b-" + id] || {}).innerHTML || "";
+const side = () => (els["side5"] || {}).innerHTML || "";
 drawAll("every tab");
-ui.tab = "holdings";
-for (const c of H4) for (const dir of [1, -1]) { ui.hsort = {k: c.k, dir}; draw(); }
-ui.hsort = {k: "value_sig", dir: -1};
-for (const f of ["dump", "settle", "noexit", ""]) { ui.hf = f; draw(); }
-ui.hall = true; draw(); ui.hall = false; draw(); check("holdings filters");
-ui.tab = "live"; for (const f of ["trade", "alert", "market", ""]) { ui.feed = f; draw(); } check("feed filters");
-ui.tab = "strategies"; ui.sopen = "dump"; draw(); ui.sopen = null; draw(); check("strategy drawer");
-ui.tab = "admin"; ui.q = "a"; ui.layer = "mm"; ui.haspos = true; ui.mis = "1"; draw(); ui.q = ""; ui.layer = ""; ui.haspos = false; ui.mis = "";
-for (const t of ["admin", "holdings"]) {
-  ui.tab = t; const ex = ((t === "admin" ? S.markets : (S.holdings4 || S.holdings)) || [])[0]; if (!ex) continue;
-  ui.open = ex.ex; ui.detail = {ex: ex.ex, orders: [{placed: "x", bot: "b", price: 0.4, qty: 1}], fills: [{t: "x", price: 0.4, qty: 1}]}; draw(); ui.open = null; ui.detail = null; draw();
-}
-check("market detail");
-apply({loop: 999, markets: {rows: [], gone: []}, holdings: {rows: [], gone: []}, holdings4: {rows: [], gone: []}, events: [{id: 1e9, t: "x", kind: "K", text: "t"}],
-       feed: [{id: "f999999", t: "2026-10-02 23:59:59", kind: "trade", layer: "mm", text: "DELTA-FILL"}]}, "delta");
-ui.tab = "admin"; draw();
-if (!out("events").includes("K")) fail("event delta not applied");
-ui.tab = "live"; draw();
-if (Array.isArray(S.feed) && !out("feed").includes("DELTA-FILL")) fail("feed delta not applied");
+ui.tab = "overview"; for (const b of ["fair", "board"]) { ui.v5.basis = b; draw(); } for (const pv of ["strategy", "market"]) { ui.v5.pv = pv; draw(); }
+ui.v5.oexp = true; draw(); ui.v5.oexp = false; ui.v5.hlx = "cash"; draw(); ui.v5.hlx = null; draw(); check("overview toggles");
+ui.tab = "live"; for (const c of (S.v5lv && S.v5lv.cards) || []) { ui.v5.card = c.key; draw(); } ui.v5.card = null;
+for (const f of ["trades", "alerts", "market", "all"]) { ui.v5.actf = f; draw(); } check("live panel + filters");
+ui.tab = "markets"; for (const f of ["hold", "nohold", "g3", "g5", "orders", "g3empty", "all"]) { ui.v5.mkf = f; draw(); }
+for (const k of ["race", "gap", "vol24", "orders", "hold", "sig_yes"]) for (const dir of [1, -1]) { ui.v5.mksort = {k, dir}; draw(); }
+ui.v5.mkq = "nh-01"; draw(); ui.v5.mkq = ""; ui.v5.mkview = "map"; draw(); ui.v5.mkview = "table"; ui.v5.mkcol = {Senate: true}; draw(); ui.v5.mkcol = {};
+const r0 = (S.v5mk_rows || [])[0]; if (r0) { ui.v5.mk = r0.ex; ui.v5.mkd = {book: {src: "feed", bids: [[0.4, 100, 0]], asks: [[0.41, 50, 10]]}, orders: [{status: "open", layer: "tm", side: "yes", price: 0.4, qty: 10}], fills: [{t: "x", layer: "tm", side: "yes", price: 0.4, qty: 1}]}; draw(); ui.v5.mk = null; ui.v5.mkd = null; draw(); }
+check("markets filters, sort, map, panel");
+ui.tab = "admin"; for (const h of (S.v5ad && S.v5ad.health) || []) { ui.v5.hchk = h.key; draw(); } ui.v5.hchk = null;
+ui.v5.confirm = {text: "Touch maker goes Off: its 7 bids are cancelled, its exits keep resting", btn: null}; draw(); if (!(els["modal5"] || {}).innerHTML.includes("Confirm")) fail("confirm box"); ui.v5.confirm = null; draw();
+ui.v5.advOpen = true; draw(); ui.v5.advOpen = false; check("admin");
+apply({loop: 999, v5mk_rows: {rows: [], gone: []}, events: [{id: 1e9, t: "x", kind: "K", text: "t"}]}, "delta"); drawAll("delta");
 const saved = JSON.parse(JSON.stringify(S));
-for (const k of ["money", "daily", "series", "capital", "strategies", "holdings", "activity", "leaders", "overview", "health", "layers", "markets", "pairs", "positions", "events",
-                 "sigday", "status", "daily4", "feed", "strategies4", "capital4", "holdings4", "leaders4", "admin4"])
+for (const k of ["v5hdr", "v5ov", "v5lv", "v5mk", "v5mk_rows", "v5ad", "leaders4", "leaders", "status", "overview"])
   for (const v of [undefined, null, {}, [], "x", 0]) { if (v === undefined) delete S[k]; else S[k] = v; drawAll(k + " = " + JSON.stringify(v)); S = JSON.parse(JSON.stringify(saved)); }
-for (const k of ["money", "capital", "sigday", "status", "capital4", "leaders4", "admin4"]) for (const f of Object.keys(saved[k] || {})) { S[k][f] = null; drawAll(k + "." + f + " = null"); S = JSON.parse(JSON.stringify(saved)); }
-S = {}; drawAll("empty payload"); S = saved; drawAll("restored");
+for (const k of ["v5ov", "v5lv", "v5mk", "v5ad"]) for (const f of Object.keys(saved[k] || {})) { S[k][f] = null; drawAll(k + "." + f + " = null"); S = JSON.parse(JSON.stringify(saved)); }
+S = {}; drawAll("empty payload"); for (const t of ["overview", "live", "markets", "admin"]) { ui.tab = t; draw(); }
+if (!Object.values(els).some(e => String(e.innerHTML).includes("no sample yet"))) fail("empty payload: no 'no sample yet'");
+S = saved; drawAll("restored");
 """ + extra + "\nconsole.log('ok');"
     fd, p = tempfile.mkstemp(suffix=".js")
     with os.fdopen(fd, "w") as fh:
@@ -257,100 +253,103 @@ S = {}; drawAll("empty payload"); S = saved; drawAll("restored");
     test.assertEqual(r.stdout.strip().splitlines()[-1:] or [""], ["ok"], r.stderr[-2500:])
 
 
+def fixture5():
+    """A v5 payload (q_dash5.build's sections) with plausible numbers, merged into the v4 fixture (Leaders keeps its renderer)."""
+    p = fixture4()
+    now = time.time()
+    days = []
+    for k in range(8):
+        d = time.strftime("%Y-%m-%d", time.gmtime(now - (7 - k) * 86400))
+        board, real = [-7698.8, 360.2, 2105.0, -1212.5, 3444.0, 870.1, 1310.4, 120.0][k], [-558.7, -1755.2, 820.0, 430.0, 910.0, 40.0, 260.0, 40.0][k]
+        days.append(dict(day=d, board=board, realized=real, open=round(board - real, 2), fair=board + 500, fair_open=round(board + 500 - real, 2), partial=k == 7,
+                         start=100000 + k * 100, end=100000 + k * 100 + board, start_fair=100000, end_fair=101000))
+    rows = []
+    for i, (race, party) in enumerate([("NH-01 House race", "D"), ("NH-01 House race", "R"), ("Rhode Island Senate", "D"), ("Rhode Island Senate", "R"), ("Texas Governor", "D"), ("U.S. House", "R")]):
+        rows.append(dict(ex=str(900 + i), race=race, party=party, group=("House" if "House race" in race else "National" if race.startswith("U.S.") else "Senate" if "Senate" in race else "Governor"),
+                         state="New Hampshire" if race.startswith("NH") else "", title=f"Will the {'Democratic' if party == 'D' else 'Republican'} Party win the {race}?", contract=f"{party} wins",
+                         sig_bid=0.45, sig_ask=0.46, sig_yes=0.46, sig_no=0.55, pm_bid=0.49, pm_ask=0.50, pm_yes=0.50, pm_no=0.51, fair=0.495, gap_c=-4.0 + i,
+                         hold=dict(side="no", shares=39467, value=33200.5, avg=0.8397, pnl=150.2, subs={"RI Senate R": 7161, "Day-1 and manual holdings": 20144}) if i == 3 else None,
+                         orders=8 if i == 3 else 0, vol24=1_200_000 - i * 1000, depth=None, why="" if i == 3 else "no side ≥ 2¢ cheap vs fair"))
+    cards = [dict(key=k, name=n, group=g, status=st, reason="", rules="Two sentences.", layers=[k], control=[k] if g == "strategy" else [], cap=c, in_use=u, pnl=pl, pnl_fair=pl + 40,
+                  today=12.0, today_fair=20.0, entries=3, exits=2, last_fill_t=now - 120, fills=[dict(t="2026-10-08 17:21:08", name="RI Senate R", side="yes", qty=500, px=0.16, layer=k, realized=5.0)])
+             for k, n, g, st, c, u, pl in [("tm", "Touch maker", "strategy", "Pilot", 30000, 8509, 170.0), ("sm", "Spread maker", "strategy", "Gated", 10000, 3625, 42.0),
+                                            ("catcher", "Catcher", "strategy", "Live", 24700, 8350, 4660.0), ("sniper", "Sniper, fat-finger", "strategy", "Live", None, 400, -12.0),
+                                            ("rotation", "Rotation", "strategy", "Live", None, 0, 55.0), ("pairs", "Pairs", "strategy", "Live", None, 0, 3.0),
+                                            ("ri", "RI Senate R", "apart", "Unwinding", 9996, 33140, -900.0), ("walls", "Walls", "apart", "Held", None, 9400, 300.0),
+                                            ("held", "Day-1 and manual holdings", "apart", "Held", None, 30000, -2800.0), ("fm", "Fair maker", "retired", "Retired", None, 1600, 0.0),
+                                            ("scalp", "Scalper v1", "retired", "Retired", None, 0, 24.0)]]
+    for c in cards:
+        c["sub"] = {"tm": "Market making", "sm": "Market making", "catcher": "Sweep catching", "sniper": "Sweep catching", "rotation": "Cash management", "pairs": "Cash management"}.get(c["key"])
+    tot = round(sum(c["pnl"] for c in cards), 2)
+    p.update(
+        v5hdr=dict(t=now, status="trading", reason="", loop_age=2),
+        v5ov=dict(day_no=8, days_total=35, settle_s=26 * 86400 + 14 * 3600, board=dict(pnl=1375.0, account=101375.0, pct=0.01375), fair=dict(pnl=11157.0, account=111157.0, pct=0.11157),
+                  today=dict(board=120.0, realized=40.0, open=80.0, fair=210.0), days=days, account_series=[[now - 3600 * (40 - k), 100000 + 30 * k, 108000 + 70 * k] for k in range(41)],
+                  rank=dict(as_of="2026-10-08 19:23:00", total=1341, rank=277, pct=277 / 1341, day=dict(rank=74, total=429, pct=74 / 429),
+                            lines=[dict(n=100, pnl=9456.0, pct=100 / 1341, gap_marks=8081.0, gap_fair=-1701.0), dict(n=50, pnl=24992.0, pct=50 / 1341, gap_marks=23617.0, gap_fair=13835.0),
+                                   dict(n=25, pnl=53292.0, pct=25 / 1341, gap_marks=51917.0, gap_fair=42135.0)],
+                            series=[[now - 3600 * (60 - k), max(277, 1100 - 14 * k)] for k in range(61)]),
+                  port=dict(invested=80375.0, available=21000.0, above_floor=16000.0, account=101375.0,
+                            slices=[dict(ex=str(900 + i), name=f"Market {i}", side="no", shares=1000 * (10 - i), value=8000.0 - 600 * i, pct=0.07, avg=0.8, mark=0.82, fair=0.95,
+                                         pnl_marks=120.0, pnl_fair=900.0, subs={"Catcher": 500, "Day-1 and manual holdings": 500}) for i in range(10)],
+                            other=[dict(ex="990", name="Small market", side="yes", shares=100, value=6375.0, pct=0.06, avg=0.4, mark=0.41, fair=0.45, pnl_marks=1.0, pnl_fair=5.0, subs={})],
+                            other_value=6375.0, by_strategy=[dict(key="ri", name="RI Senate R", value=40000.0), dict(key="held", name="Day-1 and manual holdings", value=40375.0)]),
+                  archive=dict(fills=15000, first="2026-10-01T15:00:00Z", last="2026-10-09T03:00:00Z", cash_replayed=-80000.0, cash_sig=21000.0)),
+        v5lv=dict(server=dict(state="trading", reason="", host="engine-host", region="sfo2", provider="DigitalOcean", vcpu=2, mem_gb=3.8, cpu=15.0, mem=22.0, disk=31.0,
+                              release="C86c-1741", up_s=8040, mirror_age_s=40, loop_age=1, sig_ms=35.0, pm_age=2, feed=dict(connected=True, mode="log", bpm=34.0),
+                              reads=75, read_limit=95, writes=5, write_limit=30, rl_1h=0),
+                  cash=dict(pool=21000.0, floor=5000.0, buffer=18021.0, positions=80375.0), cards=cards, check=dict(sum=tot, board=tot, gap=0.0),
+                  days={"catcher": [["2026-10-07", 120.0], ["2026-10-08", -30.0]]}, snap_hist=[],
+                  activity=[dict(id=f"f{k}", t=now - 60 * k, kind=["trade", "alert", "market"][k % 3], strat="catcher" if k % 3 == 0 else None, text=f"event {k}") for k in range(40)]),
+        v5mk=dict(as_of=now, pm_as_of=now - 2, summary=dict(contracts=len(rows), held=1, gap3_empty=2)),
+        v5mk_rows=rows,
+        v5ad=dict(paused=False, controls=[dict(key="tm", name="Touch maker", layers=["tm"], state="pilot", entries=7, exits=19),
+                                          dict(key="sm", name="Spread maker", layers=["sm"], state="pilot", entries=12, exits=9),
+                                          dict(key="catcher", name="Catcher", layers=["dump"], state="full", entries=48, exits=21),
+                                          dict(key="sniper", name="Sniper, fat-finger", layers=["sniper", "fatfinger"], state="full", entries=3, exits=0),
+                                          dict(key="pairs", name="Pairs", layers=["pairs"], state="off", entries=0, exits=0)],
+                  health=[dict(key="loop", label="Loop age", value=2, unit="s", threshold="green <= 30 s", dot="green", hist=[[now, 2]]),
+                          dict(key="rl", label="Rate-limit errors (1 h)", value=0, unit="", threshold="0", dot="green", hist=[]),
+                          dict(key="tb", label="Tracebacks (1 h)", value=1, unit="", threshold="0 green, 1-3 amber", dot="amber", hist=[[now - 60, 0], [now, 1]]),
+                          dict(key="io", label="Reads / writes per min", text="75 / 95 · 5 / 30", threshold="under the limits", dot="green", hist=[]),
+                          dict(key="audit", label="Order audit (foreign, duplicate, I2)", text="0 · 0 · 0", threshold="all 0", dot="green", hist=[]),
+                          dict(key="mirror", label="Mac mirror age", value=40, unit="s", threshold="green <= 180 s", dot="green", hist=[])],
+                  alerts=[dict(t="2026-10-08 17:43:20", kind="CONTROL", text="layer swing: full -> off")],
+                  advanced=dict(config={"CASH_RESERVE": 5000}, overrides={"paused": False}, releases=["2026-10-08 17:43:20 C86c-1741"], logs=[], rollback=None)))
+    return p
+
+
 class PageTests(unittest.TestCase):
     def test_every_view_renders(self):
         render_views(self, dashboard.render(payload(n=60, loop=5)))
 
-    def test_v4_fixture_renders_every_tab_sorts_and_filters(self):
-        p = fixture4()
-        h = p["holdings4"]
-        self.assertGreaterEqual(len(h), 3)
-        by_unreal = [r["ex"] for r in sorted(h, key=lambda r: r["unreal_sig"])]
-        by_market = [r["ex"] for r in sorted(h, key=lambda r: r["market"].lower())]
-        n_dump = sum(r["layer"] == "dump" for r in h)
-        n_noexit = sum(not r["exit"] for r in h)
-        n_trade = sum(a["kind"] == "trade" for a in p["feed"][:30])
-        today = p["sigday"]["today"]
-        extra = f"""
-const rowsOf = html => [...html.matchAll(/<tr class="click" data-ex="([^"]+)"/g)].map(m => m[1]);
-ui.tab = "live"; draw();
-for (const id of ["liveTiles", "daily4", "feed"]) if (out(id).includes("not available")) fail("v4 fixture: " + id + " says not available");   // the account chart needs 2+ pnl samples
-if (!out("daily4").includes("<svg")) fail("daily4: no chart");
-if (!out("liveTiles").includes({json.dumps(f"{p['money']['account_sig']:,.0f}")})) fail("leaderboard value tile missing");
-if (!out("liveTiles").includes({json.dumps(("+" if today > 0 else "") + f"{today:,.0f}")})) fail("today tile missing: " + out("liveTiles"));
-if (!out("liveTiles").includes("SIG day")) fail("today tile not labelled as the SIG day");
-if (!out("feed").includes("k-trade")) fail("feed: no trade chip");
-ui.feed = "trade"; draw(); const tr = [...out("feed").matchAll(/<tr data-id=/g)].length, wantTr = S.feed.filter(a => a.kind === "trade").slice(0, 30).length;
-if (tr !== wantTr || wantTr < {n_trade}) fail("feed trade filter: " + tr + " rows, want " + wantTr);
-if (out("feed").includes("k-alert") || out("feed").includes("k-market")) fail("feed trade filter shows other kinds");
-ui.feed = ""; draw();
-ui.tab = "strategies"; draw();
-if (out("strat4").includes("not available")) fail("strategies say not available");
-if (!out("strat4").includes("Market drift")) fail("strategies: no market drift row");
-if (!out("strat4").includes("<tfoot")) fail("strategies: no total row");
-const foot = out("strat4").slice(out("strat4").indexOf("<tfoot"));
-if (!foot.includes({json.dumps(("+" if today > 0 else "") + f"{today:,.0f}")})) fail("strategies total is not today's P&L: " + foot.replace(/<[^>]+>/g, " "));
-ui.sopen = "mm"; draw(); if (!out("strat4").includes("Last 10 trades")) fail("strategy drawer"); ui.sopen = null;
-ui.tab = "capital"; draw();
-if (out("cap4").includes("not available yet")) fail("capital says not available");
-if (!out("cap4").includes("sbar")) fail("capital: no scale bar");
-if (!out("cap4").includes({json.dumps(f"{p['capital4']['holdings']:,.0f}")})) fail("capital: holdings total missing");
-ui.tab = "holdings"; ui.hall = true; draw();
-if (!out("hold4").includes({json.dumps(f"{p['capital4']['holdings']:,.0f}")})) fail("holdings total differs from the capital page");
-ui.hsort = {{k: "unreal_sig", dir: 1}}; draw();
-if (JSON.stringify(rowsOf(out("hold4"))) !== JSON.stringify({json.dumps(by_unreal)})) fail("sort by P&L at SIG ascending");
-ui.hsort = {{k: "market", dir: 1}}; draw();
-if (rowsOf(out("hold4"))[0] !== {json.dumps(by_market[0])}) fail("sort by market");
-ui.hsort = {{k: "value_sig", dir: -1}};
-ui.hf = "dump"; draw(); if (rowsOf(out("hold4")).length !== {n_dump}) fail("dump filter: " + rowsOf(out("hold4")).length);
-ui.hf = "noexit"; draw(); if (rowsOf(out("hold4")).length !== {n_noexit}) fail("no-exit filter: " + rowsOf(out("hold4")).length);
-ui.hf = ""; ui.hall = false; draw();
-if (rowsOf(out("hold4")).length !== Math.min(HOLD_FIRST, {len(h)})) fail("holdings: first rows");
-ui.tab = "leaders"; draw(); if (!out("lead4").includes("Overall") || !out("lead4").includes("SIG day")) fail("leaders: two halves");
-for (const z of Object.keys(ZOOM)) {{ ui.tab = z === "spark" ? "capital" : "live"; ui.zoomId = z; draw(); if (!out("ovl").length) fail("zoom overlay empty: " + z); for (const [k, sec] of RANGES) {{ ui.range = sec; draw(); }} ui.range = 0; ui.zoomWin = [0, 4e9]; draw(); ui.zoomWin = null; }}
-ui.zoomId = null; draw(); check("zoom overlay");
-ui.tab = "leaders"; S.leaders4.jumps = [{{t: "2026-10-05 09:12:00", name: "clever-otter", rank: 3, gain: 2400, trades: 2, likely: [{{market: "RI Senate D", who: "YES seller", px: "0.84-0.87", shares: 112000, value: 14000, caught: 956, why_not: "levels below the sweep"}}]}}]; draw();
-if (!out("lead4").includes("clever-otter") || !out("lead4").includes("levels below the sweep")) fail("leaders: jump table");
-ui.tab = "admin"; draw();
-if (!out("admin4").includes("✓")) fail("admin: reconciliation check not shown as ok");
-if (out("admin4").includes("nok")) fail("admin: red check although ok");
-if (!out("admin4").includes("Coverage")) fail("admin: coverage missing");
-if (!out("ctlbar").length) fail("admin: controls missing");
-S.sigday.ok = false; S.sigday.check = 312; S.admin4.recon = {{ok: false, check: 312, today: 500, sum: 100, drift: 88}}; draw();
-if (!out("admin4").includes("nok") || !out("admin4").includes("off by")) fail("admin: gap over 25 not red");
-if (document.body.innerHTML && document.body.innerHTML.includes("alert")) fail("warning banner");
-"""
-        render_views(self, dashboard.render(p), extra)
-
-    def test_v3_only_payload_renders_with_not_available_yet(self):
-        p = fixture()
-        extra = f"""
-ui.tab = "live"; draw();
-if (!out("daily4").includes("not available yet")) fail("daily4 should say not available yet");
-if (!out("liveTiles").includes({json.dumps(f"{p['money']['account_sig']:,.0f}")})) fail("account value falls back to money.account_sig");
-if (!out("liveTiles").includes("no sample at 17:00")) fail("today tile should say no sample yet");
-ui.tab = "strategies"; draw(); if (!out("strat4").includes("not available yet")) fail("strategies should say not available yet");
-ui.tab = "holdings"; draw(); if (!out("hold4").includes("<table")) fail("holdings fall back to the v3 rows");
-ui.tab = "leaders"; draw(); if (!out("lead4").length) fail("leaders fall back to the v3 view");
-"""
-        render_views(self, dashboard.render(p), extra)
-
-    def test_status_bar_paused_and_degraded(self):
-        p = fixture4()
+    def test_v5_fixture_renders_every_page_with_its_numbers(self):
+        p = fixture5()
         extra = """
-S.status = {kind: "PAUSED", text: "SIG writes failing · since 12:00 · resumes by itself when the condition clears"}; draw();
-const bar = () => (els["live"] || {}).innerHTML || "";
-if (!bar().includes("PAUSED") || !bar().includes("resumes by itself")) fail("paused status bar: " + bar());
-S.status = {kind: "DEGRADED", text: "SIG slow: 6 × 429 in 10 min"}; draw();
-if (!bar().includes("DEGRADED") || !bar().includes("429")) fail("degraded status bar: " + bar());
-S.status = {kind: "TRADING", text: "last loop 3 s ago · 412 orders resting · C53"}; draw();
-if (!bar().includes("TRADING") || !bar().includes("C53")) fail("trading status bar: " + bar());
+ui.tab = "overview"; draw();
+if (!out("ovBand").includes("+1,375") || !out("ovBand").includes("+11,157") || !out("ovBand").includes("realized")) fail("overview: the three P&L figures");
+if ((out("ovDays").match(/<rect class="b5/g) || []).length < 8) fail("overview: daily bars");
+if (!out("ovDays").includes("hatch5")) fail("overview: today hatched");
+if (!out("ovRank").includes("#277 of 1,341") || !out("ovRank").includes("Top 25 line") || !out("ovRank").includes("19:23")) fail("overview: ranking table");
+if (!out("ovRankC").includes("top 25")) fail("overview: rank chart lines");
+if (!out("ovPort").includes("101,375") || !out("ovPort").includes("Cash available") || !out("ovPort").includes("Other (1 markets)")) fail("overview: donut + table");
+ui.v5.oexp = true; draw(); if (!out("ovPort").includes("Small market")) fail("overview: Other expands"); ui.v5.oexp = false;
+ui.tab = "live"; draw();
+if (!out("lvStrip").includes("engine-host") || !out("lvStrip").includes("C86c-1741") || !out("lvStrip").includes("75 / 95")) fail("live: server strip");
+for (const c of S.v5lv.cards) if (!out("lvPipe").includes('data-card="' + c.key + '"')) fail("live: no card for " + c.key);
+if (!out("lvPipe").includes("all strategies + holdings")) fail("live: check line");
+S.v5lv.cards[0].last_fill_t += 30; draw(); if (!out("lvPipe").includes("glow5")) fail("live: a fill makes its card glow");
+ui.v5.card = "catcher"; draw(); if (!side().includes("Last 20 fills")) fail("live: side panel"); ui.v5.card = null;
+if ((out("lvAct").match(/class="r/g) || []).length !== 40) fail("live: 40 activity rows");
+ui.tab = "markets"; draw();
+if (!out("mkHead").includes("6 contracts") || !out("mkHead").includes("we hold 1")) fail("markets: summary");
+ui.v5.mkq = "NH-01"; draw(); if ((out("mkTable").match(/data-mk="9/g) || []).length !== 2) fail("markets: search NH-01 finds both contracts"); ui.v5.mkq = "";
+draw(); if (!out("mkTable").includes("NO 39,467")) fail("markets: we hold pill");
+ui.tab = "admin"; draw(); if (!out("adHealth").includes("Loop age") || !out("adCtl").includes("Touch maker")) fail("admin");
+S.v5hdr = {status: "degraded", reason: "1 rate-limit error in 10 min", loop_age: 3}; draw(); if (!(els["live"] || {}).innerHTML.includes("Degraded")) fail("header amber on rate-limit errors");
+ui.tab = "leaders"; draw(); if (!out("lead4").length) fail("leaders");
 """
         render_views(self, dashboard.render(p), extra)
-
-    def test_fixture_snapshot_is_small(self):
-        self.assertLessEqual(len(dashboard.dumps(fixture())), 300_000)
-        self.assertLessEqual(len(dashboard.dumps(fixture4())), 300_000)
 
 
 class V3DiffTests(unittest.TestCase):
@@ -422,8 +421,8 @@ class V3ServerTests(unittest.TestCase):
             t = time.time()
             body = urllib.request.urlopen(f"http://127.0.0.1:{port}/?t={TOKEN}", timeout=5).read()
             self.assertLess(time.time() - t, 1.0)
-            self.assertIn(b"Account value", body)
-            self.assertLess(len(body), 400_000)
+            self.assertIn(b"Piero's Intel", body)
+            self.assertLess(len(body), 600_000)
         finally:
             h.stop()
 

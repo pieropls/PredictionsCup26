@@ -207,6 +207,8 @@ class EngineCase(unittest.TestCase):
         fresh_data()
         self.addCleanup(setattr, f_engine, "LIQUIDATE", f_engine.LIQUIDATE)
         f_engine.LIQUIDATE = {}                           # the AK sale (day 4 §3) has its own test
+        self.addCleanup(setattr, f_engine, "RING_WINDOWS", f_engine.RING_WINDOWS)
+        f_engine.RING_WINDOWS = []                          # the rigs run on the real clock: no ring window unless a test sets one (RingWindowTests)
         self.addCleanup(setattr, f_engine, "STARTUP_HOLD_S", f_engine.STARTUP_HOLD_S)
         f_engine.STARTUP_HOLD_S = 0                         # the rigs read from their first loop (the 2-min start-up hold is a live-only guard)
         for k in ("PNL_READ_S", "ORDERS_READ_S", "FILLS_READ_S", "POSITIONS_READ_S"):   # day 4 §4 / Oct 8 read caching have their own tests; the rigs (no realtime feed) read fresh each loop
@@ -4660,6 +4662,135 @@ class FeedTests(EngineCase):
             eng.rt_pending = []
         eng.on_feed_sweep(dict(ex=ex, t=time.time(), recv=time.time(), shares=9000.0, lo=0.48, hi=0.50, direction="up", n=4))
         self.assertTrue(any(k == "sweep" and ex in exs for _, k, exs in eng.rt_pending), "live: a sweep wakes the loop for that market")
+
+
+class Dash5Tests(EngineCase):
+    """Dashboard v5 (docs/dashboard_v5.md): §0 P&L by SIG day (00:00 UTC; realized at SIG's average cost; realized + open = the day
+    exactly; past days fixed), the strategy registry and the cash-flow buckets that add up to account - 100,000, the status turning
+    amber on rate-limit errors, and the Markets rows (every contract, holdings = positions, a reason wherever we have no order)."""
+
+    def test_replay_realized_cash_and_netting_like_sig(self):
+        import q_dash5
+        def f(i, side, q, p, t):
+            return dict(id=str(i), orderId=f"o{i}", exchangeId="1", side=side, quantity=q if side == "yes" else -q, price=p, filledAt=t, _ts=q_dash5.iso_ts(t))
+        rows = [f(1, "yes", 1000, 0.40, "2026-10-02T10:00:00Z"), f(2, "no", 400, 0.55, "2026-10-02T11:00:00Z"), f(3, "no", 900, 0.50, "2026-10-03T01:00:00Z")]
+        evs, cash_ev, info = q_dash5.events(rows, [], {"o1": "catcher", "o2": "catcher", "o3": "tm"})
+        r = q_dash5.replay(evs, cash_ev)
+        self.assertAlmostEqual(r["realized_day"]["2026-10-02"], 400 * ((1 - 0.55) - 0.40), places=6, msg="a NO buy against YES sells YES at 1 - p vs the average")
+        self.assertAlmostEqual(r["realized_day"]["2026-10-03"], 600 * ((1 - 0.50) - 0.40), places=6)
+        self.assertAlmostEqual(r["pos"]["1"], -300.0, msg="flipped: 300 NO open")
+        self.assertAlmostEqual(r["avg"]["1"], 0.50)
+        cash = -400 + 0.45 * 400 + 0.50 * 600 - 0.50 * 300
+        self.assertAlmostEqual(r["cash"], cash, places=6)
+        self.assertAlmostEqual(sum(r["cash_b"].values()), r["cash"], places=6, msg="every fill's cash flow belongs to exactly one bucket")
+        # P&L at a NO mark of 0.52: cash + value = realized + open, by construction
+        value = 300 * 0.52
+        realized = sum(r["realized_day"].values())
+        self.assertAlmostEqual(r["cash"] + value, realized + 300 * (0.52 - 0.50), places=6)
+
+    def test_transactions_give_the_direction_and_the_fills_the_strategy(self):
+        """The fills feed has no BUY / SELL: the transactions (one per order event, at its average price) do. A SELL of YES at p is
+        booked like a NO buy at 1 - p; a transaction with no fills on file goes to 'held' at its price; fills after the last
+        transaction take SELL from the engine's own order records; the opening balance is not a cash event."""
+        import q_dash5
+        T = q_dash5.iso_ts
+        def f(i, oid, side, q, p, t):
+            return dict(id=str(i), orderId=oid, exchangeId="1", side=side, quantity=q if side == "yes" else -q, price=p, filledAt=t, _ts=T(t))
+        def tx(i, typ, q, p, t, ex="1"):
+            return dict(event_id=f"e{i}", event_type="trade", orderType=typ, exchangeId=ex, quantity=q, price=p, createdAt=t, _ts=T(t))
+        fills = [f(1, "a", "yes", 600, 0.40, "2026-10-02T10:00:00.100Z"), f(2, "a", "yes", 400, 0.45, "2026-10-02T10:00:00.100Z"),
+                 f(3, "b", "yes", 500, 0.60, "2026-10-02T12:00:00.000Z"),                       # a SELL of 500 YES at 0.60
+                 f(4, "c", "yes", 200, 0.62, "2026-10-03T12:00:00.000Z")]                       # after the last transaction: rotation sells 200
+        txs = [dict(event_id="e0", event_type="deposit", transactionType="OPENING_BALANCE", amount=100000, createdAt="2026-09-29T23:00:00Z", _ts=T("2026-09-29T23:00:00Z")),
+               tx(1, "BUY", 1000, 0.42, "2026-10-02T10:00:00.100Z"), tx(2, "SELL", 500, 0.60, "2026-10-02T12:00:00.000Z"),
+               tx(3, "BUY", -100, 0.30, "2026-10-02T13:00:00.000Z", ex="2")]                     # no fills on file
+        evs, cash_ev, info = q_dash5.events(fills, txs, {"a": "catcher", "b": "catcher", "c": "rotation"}, {"c"}, {"c": "catcher"}, {"4:c": 0.65})
+        self.assertEqual((info["matched"], info["unmatched"], info["after_tx"], info["sells"]), (2, 1, 1, 2))
+        self.assertEqual(cash_ev, [], "the opening balance is INITIAL, not a cash event")
+        r = q_dash5.replay(evs, cash_ev)
+        self.assertAlmostEqual(r["pos"]["1"], 300.0)
+        self.assertAlmostEqual(r["pos"]["2"], -100.0)
+        self.assertAlmostEqual(r["realized_day"]["2026-10-02"], 500 * (0.60 - 0.42), places=6)
+        self.assertAlmostEqual(r["realized_day"]["2026-10-03"], 200 * (0.62 - 0.42), places=6)
+        self.assertAlmostEqual(r["cash"], -420 + 300 - 30 + 124, places=6)
+        self.assertAlmostEqual(r["cash_b"]["catcher"], -420 + 300 + 0.65 * 200, places=6, msg="the owner gets its lot at fair")
+        self.assertAlmostEqual(r["cash_b"]["rotation"], (0.62 - 0.65) * 200, places=6, msg="rotation keeps what it gave up against fair")
+        self.assertAlmostEqual(r["cash_b"]["held"], -30, places=6)
+        self.assertEqual(r["lots"], {"1": {"catcher": 300.0}, "2": {"held": 100.0}})
+        self.assertAlmostEqual(sum(r["cash_b"].values()), r["cash"], places=6)
+
+    def test_daily_table_adds_up_past_days_fixed_and_the_nov_1_boundary(self):
+        import q_dash5
+        old = q_dash5.DATA; q_dash5.DATA = TMP; self.addCleanup(setattr, q_dash5, "DATA", old)
+        q_dash5._cache.clear()
+        b1, b2 = q_dash5.day_start("2026-10-02"), q_dash5.day_start("2026-10-03")
+        with open(os.path.join(TMP, "pnl.csv"), "w") as fh:
+            fh.write("time,account_value,account_book,account_pm,unrealized,roi_pct\n")
+            for t, a, f in ((b1 - 600, 99000.0, 101000.0), (b1 + 60, 99100.0, 101100.0), (b2 - 30, 100500.0, 102500.0), (b2 + 900, 100400.0, 102400.0)):
+                fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))},{a},,{f},0,0\n")
+        now = b2 + 3600
+        real = {"2026-10-01": -500.0, "2026-10-02": 300.0, "2026-10-03": 50.0}
+        days = q_dash5.daily_table(now, 100600.0, 102700.0, real)
+        by = {d["day"]: d for d in days}
+        self.assertEqual(by["2026-10-01"]["start"], 100_000.0, "Oct 1 starts at 100,000")
+        self.assertAlmostEqual(by["2026-10-02"]["board"], 100500.0 - 99100.0, msg="end - start at the samples nearest 00:00 UTC")
+        for d in days:
+            self.assertAlmostEqual(d["realized"] + d["open"], d["board"], places=6, msg=d["day"])
+            self.assertAlmostEqual(d["realized"] + d["fair_open"], d["fair"], places=6)
+        self.assertTrue(by["2026-10-03"]["partial"])
+        days2 = q_dash5.daily_table(now, 90000.0, 95000.0, real)        # today's prices move: past days do not
+        self.assertEqual([d["board"] for d in days2[:-1]], [d["board"] for d in days[:-1]])
+        self.assertNotEqual(days2[-1]["board"], days[-1]["board"])
+        self.assertEqual(time.localtime(q_dash5.day_start("2026-11-02")).tm_hour, 16, "after DST ends the boundary is 16:00 PT")
+        self.assertEqual(time.localtime(q_dash5.day_start("2026-10-09")).tm_hour, 17)
+
+    def test_registry_maps_layers_and_subs(self):
+        import q_dash5
+        b = q_dash5.bucket_of_layer
+        self.assertEqual((b("dump"), b("dumpexit"), b("tm"), b("tmexit"), b("sm"), b("smexit"), b("release"), b("recycle")),
+                         ("catcher", "catcher", "tm", "tm", "sm", "sm", "rotation", "rotation"))
+        self.assertEqual((b("pairs"), b("unwind"), b("sniper"), b("fatfinger")), ("pairs", "pairs", "sniper", "sniper"))
+        self.assertEqual((b("swing"), b("swingsell"), b("wall", "wall:1077:no:w1", "1077"), b("wall", "wall:974:no:w2", "974")), ("ri", "ri", "ri", "walls"))
+        self.assertEqual((b("fm"), b("fmexit"), b("scalp"), b("mm"), b("take"), b("touch"), b("set"), b("longshot")),
+                         ("fm", "fm", "scalp", "mm", "take", "touch", "set", "longshot"))
+        self.assertEqual([x["key"] for x in q_dash5.RETIRED], ["fm", "scalp", "mm", "take", "touch", "set", "longshot"])
+        self.assertEqual([x["key"] for x in q_dash5.REGISTRY], ["tm", "sm", "catcher", "sniper", "rotation", "pairs"])
+        self.assertEqual((q_dash5.bucket_of_sub("inventory"), q_dash5.bucket_of_sub("manual"), b("", "dump:1:yes:L0")), ("held", "held", "catcher"))
+
+    def test_payload_status_markets_and_the_check(self):
+        import q_dash5
+        q_dash5._cache.clear()
+        fresh_data(layers=dict(position=dict(state="full"), dump=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake); eng.ex.capacity = 6000.0
+        for _ in range(3):
+            loop(eng, fake)
+        st = eng.dash_state()
+        for k in ("v5hdr", "v5ov", "v5lv", "v5mk", "v5mk_rows", "v5ad"):
+            self.assertIn(k, st, st.get("v5err"))
+        ov, lv = st["v5ov"], st["v5lv"]
+        acct = float(eng.acct.get("totalAccountValue") or 0)
+        self.assertAlmostEqual(ov["board"]["pnl"], acct - 100_000.0, places=2)
+        self.assertTrue(ov["days"] and ov["days"][-1]["partial"])
+        self.assertAlmostEqual(lv["check"]["sum"], round(sum(c["pnl"] for c in lv["cards"] if c["pnl"] is not None), 2), places=1)
+        self.assertAlmostEqual(lv["check"]["gap"], round(lv["check"]["sum"] - lv["check"]["board"], 2), places=2)
+        self.assertEqual({c["key"] for c in lv["cards"] if c["group"] == "strategy"}, {b["key"] for b in q_dash5.REGISTRY}, "every strategy has a card")
+        self.assertAlmostEqual(ov["port"]["invested"] + ov["port"]["available"], ov["port"]["account"], delta=1.0, msg="donut + cash = account")
+        rows = st["v5mk_rows"]
+        self.assertEqual(len(rows), sum(1 for b in eng.bots if b.kind == "market"), "every contract listed")
+        for r in rows:
+            p = (eng.book.get(r["ex"]) or {}).get("pos", 0)
+            self.assertEqual(bool(r["hold"]), abs(p) >= 1, r["ex"])
+            if r["hold"]:
+                self.assertEqual(r["hold"]["shares"], round(abs(p)))
+            if not r["orders"]:
+                self.assertTrue(r["why"], f"{r['ex']} has no order and no reason")
+        api_ = types.SimpleNamespace(_throttled=[time.time() - 30])
+        self.assertEqual(q_dash5.status_of(eng, 1, 3)[0], "degraded", "a rate-limit error turns the status amber")
+        self.assertEqual(q_dash5.status_of(eng, 0, 3)[0], "trading")
+        eng.controls.d["paused"] = True
+        self.assertEqual(q_dash5.status_of(eng, 0, 3)[0], "paused")
+        eng.controls.d["paused"] = False
 
 
 class FastPathTests(EngineCase):
