@@ -312,7 +312,7 @@ function mk_table() {
   for (const g of ["Senate", "Governor", "House", "National"]) {
     const list = groups[g]; if (!list) continue;
     list.sort((a, b) => { const x = keyv(a), y = keyv(b); return (x > y ? 1 : x < y ? -1 : 0) * srt.dir; });
-    const phoneShut = typeof window !== "undefined" && window.innerWidth < 640 && !(ui.v5.mkq || "").trim() && !ui.v5.mkf && !ui.v5.mkg && ui.v5.mkcol[g] === undefined;   // phone: groups start collapsed (tap to open; a search or filter opens them)
+    const phoneShut = typeof window !== "undefined" && window.innerWidth < 640 && !(ui.v5.mkq || "").trim() && (!ui.v5.mkf || ui.v5.mkf === "all") && !ui.v5.mkg && ui.v5.mkcol[g] === undefined;   // phone: groups start collapsed (tap to open; a search or filter opens them)
     const shut = ui.v5.mkcol[g] || phoneShut;
     s += `<tr class="grp" data-mkcol="${g}"><td colspan="${MKC.length}">${shut ? "▸" : "▾"} ${g} (${list.length} races)</td></tr>`;
     if (shut) continue;
