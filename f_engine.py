@@ -66,8 +66,11 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      FM_TARGETS, FM_CLIP, FM_CAP_SH, FM_CAP_COST, FM_TTL_S, FM_WRITES_PER_MIN, FM_SKEW_PER_1K, FM_NEWS_C, FM_NEWS_WINDOW_S, FM_REQUOTE_S,
                      FM_AGE_LADDER_S, FM_OFF_REALIZED, FM_OFF_MO30, FM_OFF_MIN_FILLS, FM_GLIDE_START, FM_POLL_PULL_S,
                      FAST_PATH_ON, FAST_REARMS_PER_10M, FAST_WRITES_RESERVE, FAST_SLOW_S, FAST_PM_MOVE_C,
+                     TM_BUFFER_RESUME, TM_ENTRY_STOPS, SM_REGIME_WIN_S, SM_REGIME_EVERY_S, SM_REGIME, SM_QUOTE_REGIMES, SM_LOSS_MARKET_DAY, SM_LOSS_24H,
+                     SM_TUNE_AT, SM_TUNE_BOUNDS, SM_TUNE_MIN_GAIN, SM_TUNE_MIN_FILLS, RETIRED_LAYERS,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
+TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
 from a_config import (ENGINE_HOST, LOOP_S, BATCH_SIZE, PM_MAX_AGE_S, MIN_QTY, TICK, INITIAL_BALANCE,
                       RISK_MAX_EXPOSURE, CASH_RESERVE, POSITION_BOTS, POSITION_MAX_ADD, MANUAL_MARKETS, MB_PM_MAX_SPREAD,
                       MB_FOCUS, MB_REFILL_S, MB_QUOTE_TTL_S, PAIR_ENABLED, PAIR_EDGE, PAIR_THIRD_PARTY, PAIR_MAX_QTY,
@@ -403,8 +406,10 @@ class Engine:
         self.big_sweep, self.big_sweep_t = set(), 0.0                    # day 10 §4.2: big-sweep sides (clips to 4k)
         self.fm_now, self.fm_block, self.fm_fills, self.fm_note, self.fm_poll = {}, {}, collections.deque(maxlen=5000), {}, None   # mm_plan §1: the fair maker
         self.tm_now, self.tm_view, self.tm_block, self.tm_fills, self.tm_note, self.tm_depth, self.off24, self.tm_cov, self.tm_wpeak = {}, {}, {}, collections.deque(maxlen=5000), {}, {}, {}, {}, 0   # day 11 §2: the touch maker
+        self.tm_buf_paused, self.tm_stop_logged = False, None   # C87: the BUFFER pause and the pre-ring entry stop
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
+        self.prints, self.print_ids, self.sm_regime, self.sm_regime_t, self.sm_exits_only, self.sm_tune_mtime = {}, {}, {}, 0.0, None, None   # C87: print ring, live regimes, loss stop, re-tune
         self.entries_off, self.res_p10, self.res_p10_t, self.boot_t, self.ring_on = False, {}, {}, time.time(), None
         self.mkt_feed, self.feed_cmp, self.feed_report_t, self.feed_samples, self.feed_sweep_log_t = None, collections.deque(maxlen=5000), time.time(), 0, 0.0   # C86: the markets feed   # C84c: the entry guard's hysteresis; the reservoir's 24-h p10 of RI NO prints; the start time (optional reads wait 2 min)
         self.fast_seen, self.fast_rearms, self.fast_slow, self.fast_orders, self.fast_stats = set(), collections.defaultdict(list), {}, {}, collections.Counter()   # mm_plan §2: the fast path
@@ -446,6 +451,10 @@ class Engine:
             self.sm_migrations()
         except Exception as err:
             print(f"spread maker migrations: {err!r}")
+        try:
+            self.c87_migrations()                           # C87 (Piero 19:56 Oct 8): TM full, SM gated, FM / scalper deleted
+        except Exception as err:
+            print(f"C87 migrations: {err!r}")
         try:
             self.band_credit_migration()
         except Exception as err:
@@ -1245,6 +1254,7 @@ class Engine:
                 continue
             for r in new:
                 r["fair"] = self.fair_at(ex, r["ts"])
+                self.note_print(ex, r.get("id"), r["ts"], r["p"], r.get("q"), r["fair"])
                 self.intel_write(f"trades/{datetime.fromtimestamp(r['ts']).strftime('%Y-%m-%d')}.jsonl", r)
                 self.note_volume(ex, r["ts"], r["p"] * r["q"], off=self.print_off_fair(r))
             for e in intel.detect(new, self.fair_at, {ex: self.name(ex)}):
@@ -3527,88 +3537,8 @@ class Engine:
         return out
 
     def scalp_plan(self, now, cash, used):
-        """{ex: [want-spec]} (day 5 §2): on the 20 busiest markets (10 in the pilot) join the best bid, or improve it by a
-        tick when the spread is >= 2 ticks, only at <= fair_side - 2c; clips 300-500 shares; <= 2 resting buys per market;
-        inventory 3k per market and the slice in total (resting buys count against the room only for new placements, so
-        a resting order never cancels itself); no new buys while the dump catcher's funded reserve < 15k, new risk is
-        paused, or fills are blind; <= 6 placements/min for the layer (requotes and new sides wait for budget)."""
-        c = self.controls
-        if not c.on("scalp") or c.paused or self.fills_blind:
-            return {}
-        if SCALP_DAY_OFF and SCALP_DAY_OFF[0] <= time.localtime(now).tm_hour + time.localtime(now).tm_min / 60 < SCALP_DAY_OFF[3]:
-            return {}                                       # (day 6 §10.3: no schedule; the scalper runs all day and yields to the catcher)
-        if self.entry_budget(cash) <= 0:
-            return {}                                       # Oct 5 22:50 guard (b)
-        funded = self.dump_demand(cash, used)["funded"]
-        if funded < SCALP_YIELD_RESERVE:
-            if now - self.scalp_note.get("yield", 0) >= 1800:
-                self.scalp_note["yield"] = now
-                self.event("SCALP", f"scalper yields to the dump catcher: funded reserve {funded:,.0f} < {SCALP_YIELD_RESERVE:,.0f} (no new buys)")
-            return {}
-        budget = SCALP_WRITES_PER_MIN - sum(1 for o in self.ledger.orders.values()
-                                            if o.get("layer") in ("scalp", "scalpexit") and (o.get("ts") or 0) >= now - 60)
-        existing, resting_cost = {}, 0.0
-        for o in self.open:
-            rec = self.ledger.orders.get(o["id"])
-            if rec and rec.get("layer") == "scalp" and o["id"] not in self.ex.cancelling:
-                existing[(o["ex"], o["side"])] = o
-                resting_cost += o["qty"] * o["price"]
-        n = SCALP_MARKETS if c.state("scalp") == "full" else SCALP_PILOT_MARKETS
-        left = getattr(self, "entry_left", float("inf"))    # the entry budget left after the dump catcher (Oct 5 23:35)
-        room_total = min(self.scalp_slice() - self.scalp_cost() - resting_cost, left - resting_cost * ENTRY_WEIGHTS["scalp"])
-        self.entry_left = max(0.0, left - resting_cost * ENTRY_WEIGHTS["scalp"])   # day 8 §2: scalper weight 1.0
-        plan = {}
-        for ex in self.scalp_rank(n):
-            f, px = self.fair.get(ex), self.px.get(ex)
-            if f is None or px is None or px[0] is None or px[1] is None or px[1] <= px[0] or self.ex.is_frozen(ex):
-                continue
-            bid_y, ask_y = px[0], px[1]
-            held = self.book.get(ex, {}).get("pos", 0)
-            room_m = SCALP_INV_MARKET - self.scalp_cost(ex) - sum(o["qty"] * o["price"] for (e, _), o in existing.items() if e == ex)
-            n_rest = 0
-            for side in ("yes", "no"):
-                if n_rest >= SCALP_MAX_BUYS:
-                    break
-                fs = f if side == "yes" else 1 - f
-                best = bid_y if side == "yes" else round(1 - ask_y, 3)
-                p = round(best + TICK, 3) if round((ask_y - bid_y) / TICK) >= SCALP_IMPROVE_SPREAD else best
-                exits = [x["px"] for x in self.scalp_view.get(ex, []) if x["side"] == side]
-                if exits:                                                  # I4: the bid stays a tick under our own exit
-                    p = min(p, round(min(exits) - TICK, 3))
-                cur = existing.get((ex, side))
-                if cur is not None and exits and cur["price"] > min(exits) - TICK + 1e-9:
-                    if budget <= 0:                                        # it would trade with our exit: pull it (a cancel, no placement)
-                        continue
-                elif cur is not None and abs(cur["price"] - p) < 1e-9:    # resting at the right price: keep (no write)
-                    plan.setdefault(ex, []).append(dict(side=side, px=cur["price"], qty=int(cur["qty"]), sub=f"scalp:{ex}:{side}"))
-                    n_rest += 1
-                    continue
-                if (p > fs - SCALP_BUY_EDGE + 1e-9 or not (MB_MIN_PX <= p <= MB_MAX_PX)
-                        or (held <= -MIN_QTY if side == "yes" else held >= MIN_QTY)      # never bid against our own other side
-                        or self.dump_block.get((ex, side), 0) > now):                   # news guard (3c in 10 min)
-                    if cur is not None and budget <= 0:
-                        plan.setdefault(ex, []).append(dict(side=side, px=cur["price"], qty=int(cur["qty"]), sub=f"scalp:{ex}:{side}"))
-                        n_rest += 1
-                    continue
-                if cur is not None:                                        # the touch moved: requote when there is budget
-                    if budget <= 0:
-                        plan.setdefault(ex, []).append(dict(side=side, px=cur["price"], qty=int(cur["qty"]), sub=f"scalp:{ex}:{side}"))
-                    else:
-                        plan.setdefault(ex, []).append(dict(side=side, px=p, qty=int(cur["qty"]), sub=f"scalp:{ex}:{side}"))
-                        budget -= 1
-                    n_rest += 1
-                    continue
-                room = min(room_m, room_total)
-                q = min(SCALP_CLIP_MAX, int(room / p)) if room > 0 else 0
-                if q < SCALP_CLIP_MIN or budget <= 0:
-                    continue
-                plan.setdefault(ex, []).append(dict(side=side, px=p, qty=q, sub=f"scalp:{ex}:{side}"))
-                room_m -= q * p
-                room_total -= q * p
-                self.entry_left = max(0.0, self.entry_left - q * p * ENTRY_WEIGHTS["scalp"])
-                budget -= 1
-                n_rest += 1
-        return plan
+        """C87 (Piero 19:56 d): the scalper v1 is deleted (releases/archive/scalp_layer.py); its leftover shares went to 'held'."""
+        return {}
 
     def track_scalps(self, now):
         """Scalper inventory -> exits: ask at best ask - 1 tick, never below entry + 0.5c; after 30 min entry + 0 when that
@@ -5439,28 +5369,26 @@ class Engine:
 
     # ------------------------------------------------------------------------------------------------ mm_plan §1/§4: the fair maker (FM)
     def fm_targets(self):
-        """The pilot's targets (a control override wins); none at all when the pilot switch is off (the test package sets SIG_FM_PILOT=0)."""
-        return self.controls.d.get("fm_targets") or (FM_TARGETS if os.environ.get("SIG_FM_PILOT", "1") == "1" else [])
+        """C87: the fair maker is deleted (releases/archive/fm_layer.py): no targets; its markets are open to the TM and the SM."""
+        return []
 
     def fm_inventory(self, ex):
         """Signed YES inventory of the FM sub (YES buys +, NO buys -)."""
         return float(self.ledger.subbooks.get(ex, {}).get(f"fm:{ex}", 0.0))
 
     def fm_cost(self):
+        """The FM's leftover lots at cost (its fm:{ex} sub-books)."""
         out = 0.0
-        for t in self.fm_targets():
-            ex = str(t["ex"]); q = self.fm_inventory(ex)
+        for ex, books in self.ledger.subbooks.items():
+            q = books.get(f"fm:{ex}", 0.0)
             if abs(q) >= 1:
                 avg = (self.ledger.tranches.get(f"fm:{ex}") or {}).get("avg") or self.sig_mark(ex, "yes" if q > 0 else "no") or 0.5
                 out += abs(q) * float(avg)
         return out
 
     def fm_reserve(self):
-        """C81b: the FM's room in the entry budget, reserved before the dump's L1-L4 compete (mm_plan: ranked after L0, before the
-        scalper): its cost cap minus what it already holds, while the layer is on and has targets."""
-        if not self.controls.on("fm") or not self.fm_targets():
-            return 0.0
-        return max(0.0, FM_CAP_COST - self.fm_cost())
+        """C87: the FM is deleted: nothing reserved."""
+        return 0.0
 
     def fm_writes_last_min(self, now):
         """FM writes in the last minute = distinct placement seconds (one batch write places up to 50 orders)."""
@@ -5483,69 +5411,37 @@ class Engine:
         return now >= close - FM_POLL_PULL_S
 
     def fm_plan(self, now, cash):
-        """{ex: [quote-spec]}: a bid at fair - e and an ask at fair + e (skewed 0.5c per 1k of inventory), clip 500, never
-        crossing SIG's book; at the inventory cap only the reducing side quotes; the reducing side is an exit (rule 0, and
-        inventory older than 6 h exits at entry + 0.5..1c); pulled on a 2c / 10 min Polymarket move and re-quoted 5 min
-        after it settles; 120-s expiry; <= 5 writes/min; <= 5k at cost; weight 1.0 in the entry budget; cap 0 from Nov 2."""
-        c = self.controls
-        if not c.on("fm") or c.paused or self.fills_blind:
-            return {}
-        glide = now >= time.mktime(time.strptime(FM_GLIDE_START, "%Y-%m-%d %H:%M:%S"))
-        cap_sh = 0 if glide else FM_CAP_SH
-        cost_all = self.fm_cost()
-        writes_ok = self.fm_writes_last_min(now) < FM_WRITES_PER_MIN
+        """C87 (Piero 19:56 c): the fair maker is deleted (its quoting code: releases/archive/fm_layer.py). What is left are its
+        lots: each is offered at max(entry + 0.5c, the SIG touch ask on its side) — never below cost (rule 0) — one exit of the
+        whole lot at a time, kept in its queue place while the target moves by a tick or less, until it is sold."""
+        plan = {}
         resting = {}
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
-            if rec and rec.get("layer") in ("fm", "fmexit") and o["id"] not in self.ex.cancelling:
-                resting.setdefault(o["ex"], []).append(o)
-        plan = {}
-        for t in self.fm_targets():
-            ex, e = str(t["ex"]), float(t["e"])
-            if ex not in self.owner or self.ex.is_frozen(ex) or ex in self.manual_ex:
+            if rec and rec.get("layer") == "fmexit" and o["id"] not in self.ex.cancelling:
+                resting[o["ex"]] = o
+        for ex, books in list(self.ledger.subbooks.items()):
+            inv = float(books.get(f"fm:{ex}", 0.0))
+            if abs(inv) < MIN_QTY or ex not in self.owner or self.ex.is_frozen(ex):
                 continue
-            f = self.fair.get(ex)
-            if f is None or self.fm_poll_block(ex, now):
-                continue
-            h = [x for x in self.fair_hist.get(ex, []) if x[0] >= now - FM_NEWS_WINDOW_S]
-            if not h or now - h[-1][0] >= 5:
-                h.append((now, f))
-                self.fair_hist[ex] = h
-            if max(v for _, v in h) - min(v for _, v in h) >= FM_NEWS_C - 1e-9:
-                if self.fm_block.get(ex, 0) < now:
-                    self.event("FM", f"FM {t.get('name', self.name(ex))}: Polymarket moved {(max(v for _, v in h) - min(v for _, v in h)) * 100:.1f}c in 10 min: quotes pulled, re-quote 5 min after it settles")
-                self.fm_block[ex] = now + FM_REQUOTE_S
-            if self.fm_block.get(ex, 0) > now:
-                continue
-            inv = self.fm_inventory(ex)
-            skew = FM_SKEW_PER_1K * inv / 1000.0
-            bid, ask = bots.tick_down(round(f - e - skew, 6)), bots.tick_up(round(f + e - skew, 6))
-            b_sig, a_sig, _ = self.px.get(ex, (None, None, None))
-            quotes = []
             sub = f"fm:{ex}"
-            t_tr = self.ledger.tranches.get(sub) or {}
-            aged = inv != 0 and t_tr.get("ts") and now - t_tr["ts"] > FM_AGE_LADDER_S
-            avg = t_tr.get("avg")
-            # bid side: an exit while we are short (inv < 0), else an entry (needs room under the share cap and the cost cap)
-            if bid >= MB_MIN_PX and (a_sig is None or bid < a_sig - 1e-9):
-                if inv < 0:
-                    q = int(min(FM_CLIP, -inv))
-                    px = bid if not (aged and avg) else max(min(bid, round(1 - (avg + 0.01), 3)), round(1 - (avg + RULE0_MARGIN), 3))   # the NO lot sells at NO >= entry + 0.5c
-                    quotes.append(dict(reduce=True, held="no", sell_px=round(1 - px, 3), qty=q, sub=sub, ttl=FM_TTL_S, side="yes", px=px))
-                elif inv < cap_sh and cost_all + FM_CLIP * bid <= FM_CAP_COST + 1e-6:   # its budget room is reserved off the top (fm_reserve)
-                    quotes.append(dict(side="yes", px=bid, qty=FM_CLIP, sub=sub, ttl=FM_TTL_S))
-            # ask side (sell YES = buy NO at 1 - ask): an exit while long, else an entry
-            if ask <= MB_MAX_PX and (b_sig is None or ask > b_sig + 1e-9):
-                if inv > 0:
-                    q = int(min(FM_CLIP, inv))
-                    sell = ask if not (aged and avg) else max(min(ask, round(avg + 0.01, 3)), round(avg + RULE0_MARGIN, 3))
-                    quotes.append(dict(reduce=True, held="yes", sell_px=round(sell, 3), qty=q, sub=sub, ttl=FM_TTL_S, side="no", px=round(1 - sell, 3)))
-                elif -inv < cap_sh and cost_all + FM_CLIP * (1 - ask) <= FM_CAP_COST + 1e-6:
-                    quotes.append(dict(side="no", px=round(1 - ask, 3), qty=FM_CLIP, sub=sub, ttl=FM_TTL_S))
-            if not writes_ok and not resting.get(ex):
-                continue                                    # the write budget is spent: no new market this loop (resting quotes are re-stated)
-            if quotes:
-                plan[ex] = quotes
+            held = "yes" if inv > 0 else "no"
+            avg = (self.ledger.tranches.get(sub) or {}).get("avg")
+            if not avg:
+                continue
+            floor_ = max(float(avg), max((l[1] for l in self.lots(ex, held, sub) if l[2] == "engine" and l[0] > 0), default=0.0)) + RULE0_MARGIN
+            pxs = self.px.get(ex)
+            ask_s = bots.side_book(pxs[0], pxs[1], held)[1] if pxs and pxs[0] is not None and pxs[1] is not None else None
+            sell = bots.tick_up(round(max(floor_, ask_s if ask_s is not None else floor_), 6))
+            cur = resting.get(ex)
+            if cur is not None:
+                cur_sell = round(1 - cur["price"], 3)
+                if abs(cur_sell - sell) <= TICK + 1e-9 and cur_sell >= floor_ - 1e-9:
+                    sell = cur_sell                         # keep the queue place
+            if sell > MB_MAX_PX:
+                continue
+            plan[ex] = [dict(reduce=True, held=held, sell_px=round(sell, 3), qty=int(abs(inv)), sub=sub, ttl=TM_TTL_S,
+                             side="no" if held == "yes" else "yes", px=round(1 - sell, 3))]
         return plan
 
     def fm_fill_events(self, fills):
@@ -5609,10 +5505,9 @@ class Engine:
 
     def fm_view(self):
         st = self.controls.d.get("fm_stats") or {}
-        inv = {str(t["ex"]): self.fm_inventory(str(t["ex"])) for t in self.fm_targets()}
+        inv = {ex: float(books.get(f"fm:{ex}", 0.0)) for ex, books in self.ledger.subbooks.items() if abs(books.get(f"fm:{ex}", 0.0)) >= 1}
         return dict(fills=st.get("fills", 0), realized=round(st.get("realized", 0.0), 2), edge=round(st.get("edge", 0.0), 2),
-                    inventory={k: v for k, v in inv.items() if abs(v) >= 1}, cost=round(self.fm_cost(), 2), mo30=self.fm_markout(1800),
-                    writes_last_min=self.fm_writes_last_min(time.time()), on=self.controls.on("fm"))
+                    inventory=inv, cost=round(self.fm_cost(), 2), mo30=self.fm_markout(1800), writes_last_min=self.fm_writes_last_min(time.time()), on=False, retired=True)
 
     # ------------------------------------------------------------------------------------------------ day 11 §2: the touch maker (TM, scalper v2)
     def ring_window(self, now):
@@ -5652,9 +5547,29 @@ class Engine:
 
     def tm_reserve(self):
         """The TM's room in the entry budget, reserved off the top (weight 1.0, after L0, before the FM and L1-L4)."""
-        if not self.controls.on("tm") or self.ring_window(time.time()):
-            return 0.0                                      # (1c) in a ring window the reserve is what it holds: nothing off the top
-        return max(0.0, self.tm_cap(time.time(), log=False) - self.tm_cost())
+        now = time.time()
+        if not self.controls.on("tm") or self.ring_window(now) or self.tm_entry_stop(now) or (TM_BUFFER_GATE and getattr(self, "tm_buf_paused", False)):
+            return 0.0                                      # (1c / C87) no entries: nothing reserved off the top
+        return max(0.0, self.tm_cap(now, log=False) - self.tm_cost())
+
+    def tm_entry_stop(self, now):
+        """C87 (Piero 19:56 a): no TM entries from 60 min before each ring (20:00, 04:00, 13:00 PT) to the end of its window."""
+        hm = time.strftime("%H:%M", time.localtime(now))
+        return any((a <= hm < b) if a <= b else (hm >= a or hm < b) for a, b in TM_ENTRY_STOPS)
+
+    def tm_buffer_gate(self, now):
+        """C87 (Piero 19:56 a): TM entries pause while free < BUFFER and resume at BUFFER + 1k; logged on each change. True = paused."""
+        if not TM_BUFFER_GATE:
+            return False
+        free, buf = self.free_cash(), self.buffer()
+        was = getattr(self, "tm_buf_paused", False)
+        now_paused = free < buf if not was else free < buf + TM_BUFFER_RESUME
+        if now_paused != was:
+            self.tm_buf_paused = now_paused
+            msg = (f"TM entries PAUSED: free {free:,.0f} < BUFFER {buf:,.0f} (resting TM bids cancelled; exits keep running)" if now_paused
+                   else f"TM entries resume: free {free:,.0f} >= BUFFER {buf:,.0f} + {TM_BUFFER_RESUME:,}")
+            self.event("TM", msg); self.night.line(msg)
+        return now_paused
 
     def free_cash(self):
         return (min(self.cash_hist) if getattr(self, "cash_hist", None) else 0.0) - CASH_RESERVE
@@ -5790,6 +5705,16 @@ class Engine:
         if self.ring_window(now):
             self.tm_cov = dict(quoted=0, available=0, top=0, writes_left=0, writes_used=0, ring=True)
             return {}                                       # (1c) a ring window: no new TM entries (resting bids go; the exits in track_tm keep running)
+        stop = self.tm_entry_stop(now)
+        if stop != getattr(self, "tm_stop_logged", None):
+            if self.tm_stop_logged is not None or stop:
+                msg = ("TM entries STOP: 60 min before the ring (resting TM bids cancelled, cash back for the catcher; exits keep running)" if stop
+                       else "TM entries back after the ring window")
+                self.event("TM", msg); self.night.line(msg)
+            self.tm_stop_logged = stop
+        if stop or self.tm_buffer_gate(now):
+            self.tm_cov = dict(quoted=0, available=0, top=0, writes_left=0, writes_used=0, ring=stop, buffer_pause=not stop)
+            return {}                                       # C87: no TM entries (resting bids go; exits keep running)
         sz = self.tm_sizes()
         glide = now >= time.mktime(time.strptime(TM_GLIDE_START, "%Y-%m-%d %H:%M:%S"))
         cap_cost = 0.0 if glide else self.tm_cap(now)       # Piero 22:15 (C82 item 2): base + max(0, free - BUFFER)
@@ -6107,6 +6032,41 @@ class Engine:
         self.event("TM", msg)
         self.night.line(msg)
 
+    def c87_migrations(self):
+        """Once (C87, Piero 19:56 Oct 8): the touch maker at full size (clip 1k, 3k per market-side, every side >= 2c, base cap
+        30k at cost, entries only while free >= BUFFER); the spread maker on (cap 10k, regime-gated); the fair maker and the
+        scalper v1 deleted (their switches off for good; the scalper's leftover shares go to 'held'; the FM's two lots are
+        offered at max(entry + 0.5c, touch))."""
+        from a_config import WRITES_PER_MIN
+        c = self.controls
+        d = c.d.setdefault("c87", {})
+        if d.get("done") or os.environ.get("SIG_C87", "1") != "1":
+            return
+        moved = []
+        for ex, books in list(self.ledger.subbooks.items()):
+            for sub, q in list(books.items()):
+                if sub.startswith("scalp:") and abs(q) >= 1:
+                    self.ledger.move_sub(ex, sub, "inventory")
+                    moved.append(f"{self.name(ex)} {abs(q):,.0f} {'YES' if q > 0 else 'NO'}")
+        with c.lock:
+            c.d["layers"].setdefault("tm", dict(state="full", caps={}, killed=None))["state"] = "full"
+            sm = c.d["layers"].setdefault("sm", dict(state="pilot", caps={}, killed=None))
+            if sm.get("state") == "off":
+                sm["state"] = "pilot"
+            for l in RETIRED_LAYERS:
+                c.d["layers"].setdefault(l, dict(state="off", caps={}, killed=None))["state"] = "off"
+            d.update(done=stamp(), scalp_moved=moved)
+            c.save()
+        msg = (f"C87 (Piero 19:56): touch maker FULL SIZE — clip {TM_CLIP:,}, {TM_INV_MARKET:,} per market-side, every side >= {TM_E_MIN * 100:.0f}c cheap vs fair (no top-60), "
+               f"base cap {TM_CAP_COST:,} at cost (+ free above BUFFER), <= {TM_WRITES_PER_MIN} writes/min; entries pause while free < BUFFER (resume at BUFFER + {TM_BUFFER_RESUME:,}) and stop "
+               f"60 min before each ring ({', '.join(a + '-' + b for a, b in TM_ENTRY_STOPS)}); exits always run. Spread maker ON: cap {SM_CAP_COST_PILOT:,}, <= {SM_WRITES_PER_MIN} writes/min, "
+               f"new quotes only in BOUNCE markets (live regime every minute), exits >= entry + 0.5c elsewhere; a market < {SM_LOSS_MARKET_DAY:+.0f} on the SIG day is excluded for the day, "
+               f"rolling 24 h < {SM_LOSS_24H:+.0f} -> exits only; nightly {SM_TUNE_AT} re-tune applied only if the replay beats the current settings. Fair maker and scalper v1 DELETED "
+               f"(switches off for good, code in releases/archive/); the FM's lots offered at max(entry + 0.5c, touch); the scalper's leftover to held: {', '.join(moved) or 'none'}. "
+               f"Write budget: TM {TM_WRITES_PER_MIN}, SM {SM_WRITES_PER_MIN}, fast path {FAST_WRITES_RESERVE} reserved, total <= {WRITES_PER_MIN}/min. Catcher unchanged.")
+        self.event("CONTROL", msg)
+        self.night.line(msg)
+
     # ------------------------------------------------------------------------------------------------ turnover_plan §1: the spread maker (SM)
     def sm_pilot(self):
         return self.controls.state("sm") != "full"
@@ -6230,6 +6190,191 @@ class Engine:
         _, bids, asks = c
         return (bids[0][1] if bids else 0.0, asks[0][1] if asks else 0.0)
 
+    # ------------------------------------------------------------------------------------------------ C87: SM regime gate, loss stops, re-tune
+    def note_print(self, ex, pid, ts, p, q, fair=None):
+        """One SIG print into the 30-min ring of `ex` (deduplicated by trade id across the tape and the live feed)."""
+        if p is None or ts is None:
+            return
+        ex = str(ex)
+        ids = self.print_ids.setdefault(ex, collections.deque(maxlen=4000))
+        if pid is not None:
+            if pid in ids:
+                return
+            ids.append(pid)
+        ring = self.prints.setdefault(ex, collections.deque(maxlen=4000))
+        ring.append((float(ts), round(float(p), 3), float(q or 0), fair))
+
+    def seed_prints(self, now, exs):
+        """Once: the ring of each market from today's (and yesterday's) tape file, the last 30 min."""
+        cut = now - SM_REGIME_WIN_S
+        want = set(exs)
+        for day in sorted({cut, now}):
+            path = os.path.join(DATA, "intel", "trades", time.strftime("%Y-%m-%d", time.localtime(day)) + ".jsonl")
+            if not os.path.exists(path):
+                continue
+            with open(path) as fh:
+                fh.seek(max(0, os.path.getsize(path) - 8_000_000))   # the tail is plenty for 30 min
+                for line in fh:
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if str(r.get("ex")) in want and (r.get("ts") or 0) >= cut:
+                        self.note_print(r["ex"], r.get("id"), r["ts"], r.get("p"), r.get("q"), r.get("fair"))
+
+    @staticmethod
+    def classify_regime(rows, cfg=SM_REGIME):
+        """mm_playbook v0 (research/stats.regimes) on one window of prints [(ts, p, q, fair)] sorted by time: SWEEP if any print is
+        >= 10 ticks from the window's first; NEWS if the fair moved >= 2c; QUIET if < 5 prints; TREND if the net move >= 3 ticks
+        and < 40% of runs revert; BOUNCE if >= 20 prints and >= 50% of runs revert; else MIXED. -> (regime, stats)."""
+        n = len(rows)
+        if n == 0:
+            return "QUIET", dict(n=0, net=0.0, bshare=0.0, fmove=0.0)
+        p = [r[1] for r in rows]
+        runs = []
+        for x in p:
+            if not runs or abs(runs[-1] - x) >= 1e-9:
+                runs.append(x)
+        rev = sum(1 for i in range(len(runs) - 2) if abs(runs[i + 2] - runs[i]) < 1e-9 and abs(abs(runs[i + 1] - runs[i]) - TICK) < 1e-9)
+        bshare = rev / max(1, len(runs) - 2)
+        net = abs(p[-1] - p[0]) / TICK
+        sweep = any(abs(x - p[0]) >= cfg["sweep_ticks"] * TICK - 1e-9 for x in p)
+        fs = [r[3] for r in rows if r[3] is not None]
+        fmove = (max(fs) - min(fs)) if fs else 0.0
+        if sweep:
+            reg = "SWEEP"
+        elif fmove >= cfg["news_c"] - 1e-9:
+            reg = "NEWS"
+        elif n < cfg["quiet_prints"]:
+            reg = "QUIET"
+        elif net >= cfg["trend_ticks"] and bshare < cfg["trend_bounce_max"]:
+            reg = "TREND"
+        elif n >= cfg["bounce_prints"] and bshare >= cfg["bounce_share"]:
+            reg = "BOUNCE"
+        else:
+            reg = "MIXED"
+        return reg, dict(n=n, net=round(net, 1), bshare=round(bshare, 3), fmove=round(fmove, 4))
+
+    def sm_regime_update(self, now, exs):
+        """Every minute: the regime of each SM market from its trailing 30 min of prints (tape + live feed); changes logged."""
+        if not self.prints and exs:
+            try:
+                self.seed_prints(now, exs)
+            except Exception as err:
+                self.event("ERR", f"SM regime seed: {err!r}")
+        feed = getattr(self, "mkt_feed", None)
+        if feed is not None:
+            for ex in exs:
+                for t in list((getattr(feed, "trades", {}) or {}).get(ex) or []):
+                    try:
+                        self.note_print(ex, t[4], t[0], t[2], t[3], self.fair_at(ex, t[0]))
+                    except Exception:
+                        pass
+        cut = now - SM_REGIME_WIN_S
+        changes = []
+        for ex in exs:
+            rows = sorted(r for r in self.prints.get(ex, ()) if r[0] >= cut)
+            reg, st = self.classify_regime(rows)
+            prev = (self.sm_regime.get(ex) or {}).get("regime")
+            self.sm_regime[ex] = dict(regime=reg, t=now, **st)
+            if prev is not None and (prev in SM_QUOTE_REGIMES) != (reg in SM_QUOTE_REGIMES):
+                changes.append(f"{self.name(ex)} {prev} -> {reg}")
+        if changes:
+            self.event("SM", "SM regime: " + "; ".join(changes[:12]) + (" …" if len(changes) > 12 else "") + f" (new quotes only in {'/'.join(SM_QUOTE_REGIMES)})")
+
+    def sm_pnl(self, ex=None, since=0.0):
+        """SM P&L since `since`: realized on SM fills + the open SM inventory at the SIG mark vs its average (conservative: the open
+        part counts in full)."""
+        real = sum(f.get("realized") or 0.0 for f in self.fills_since(since) if f["layer"] in ("sm", "smexit") and (ex is None or f["ex"] == ex))
+        unreal = 0.0
+        for e, books in self.ledger.subbooks.items():
+            if ex is not None and e != ex:
+                continue
+            q = books.get(f"sm:{e}", 0.0)
+            if abs(q) < 1:
+                continue
+            side = "yes" if q > 0 else "no"
+            avg, m = self.sm_avg(e), self.sig_mark(e, side)
+            if avg and m is not None:
+                unreal += abs(q) * (float(m) - float(avg))
+        return real + unreal
+
+    def sm_loss_gate(self, now, exs):
+        """Piero 19:56 b: a market under -50 on the SIG day is excluded for the day; the SM's rolling 24 h under -150 -> exits only.
+        -> (excluded set, exits_only bool); every change is logged with its reason."""
+        c = self.controls
+        day = time.strftime("%Y-%m-%d", time.gmtime(now))
+        t0 = now - (now % 86400)                            # 00:00 UTC: the SIG day
+        ex_d = c.d.get("sm_excluded") or {}
+        if ex_d.get("day") != day:
+            ex_d = dict(day=day, markets={})
+        for ex in exs:
+            if ex in ex_d["markets"]:
+                continue
+            v = self.sm_pnl(ex, t0)
+            if v < SM_LOSS_MARKET_DAY:
+                ex_d["markets"][ex] = round(v, 2)
+                msg = f"SM {self.name(ex)} EXCLUDED for the SIG day: {v:+,.0f} today (< {SM_LOSS_MARKET_DAY:+.0f}); exits only there (>= entry + 0.5c)"
+                self.event("SM", msg); self.night.line(msg)
+        if ex_d != c.d.get("sm_excluded"):
+            with c.lock:
+                c.d["sm_excluded"] = ex_d
+                c.save()
+        tot = self.sm_pnl(None, now - 86400)
+        only = tot < SM_LOSS_24H
+        if only != self.sm_exits_only:
+            if self.sm_exits_only is not None or only:
+                msg = (f"SM EXITS ONLY: rolling 24 h {tot:+,.0f} < {SM_LOSS_24H:+.0f} (no new quotes; inventory exits at >= entry + 0.5c)" if only
+                       else f"SM entries back: rolling 24 h {tot:+,.0f} >= {SM_LOSS_24H:+.0f}")
+                self.event("SM", msg); self.night.line(msg)
+            self.sm_exits_only = only
+        return set(ex_d["markets"]), only
+
+    def sm_params(self, ex, sz):
+        """(clip, re-peg ticks, skew ticks) for ex: the nightly re-tune's per-market setting (bounded), else the defaults."""
+        t = ((self.controls.d.get("sm_tune") or {}).get("markets") or {}).get(ex) or {}
+        clip = int(min(max(int(t["clip"]), SM_TUNE_BOUNDS["clip"][0]), SM_TUNE_BOUNDS["clip"][1])) if "clip" in t else int(sz["clip"])
+        repeg = int(min(max(int(t.get("repeg", SM_REPEG_TICKS)), SM_TUNE_BOUNDS["repeg"][0]), SM_TUNE_BOUNDS["repeg"][1]))
+        skew = int(min(max(int(t.get("skew", 1)), SM_TUNE_BOUNDS["skew"][0]), SM_TUNE_BOUNDS["skew"][1]))
+        return clip, repeg, skew
+
+    def sm_tune_apply(self, now):
+        """The nightly re-tune (tools/sm_retune.py) writes data/intel/sm_tune_proposal.json: per market the setting that beat the
+        current one in the replay by >= SM_TUNE_MIN_GAIN a day on >= SM_TUNE_MIN_FILLS fills. Applied once per new file, bounded,
+        logged; anything malformed is ignored (the current settings stay)."""
+        path = os.path.join(DATA, "intel", "sm_tune_proposal.json")
+        try:
+            m = os.path.getmtime(path)
+        except OSError:
+            return
+        if m == self.sm_tune_mtime:
+            return
+        self.sm_tune_mtime = m
+        try:
+            with open(path) as fh:
+                prop = json.load(fh)
+        except (OSError, ValueError) as err:
+            self.event("ERR", f"SM re-tune proposal unreadable: {err!r}")
+            return
+        c = self.controls
+        if (c.d.get("sm_tune") or {}).get("applied_id") == prop.get("id"):
+            return
+        cur = dict((c.d.get("sm_tune") or {}).get("markets") or {})
+        changed = []
+        for ex, r in (prop.get("markets") or {}).items():
+            new = r.get("new") or {}
+            if not new or float(r.get("gain_day") or 0) < SM_TUNE_MIN_GAIN or int(r.get("fills") or 0) < SM_TUNE_MIN_FILLS:
+                continue
+            ok = all(k in SM_TUNE_BOUNDS and SM_TUNE_BOUNDS[k][0] <= int(v) <= SM_TUNE_BOUNDS[k][1] for k, v in new.items())
+            if ok:
+                cur[str(ex)] = {k: int(v) for k, v in new.items()}
+                changed.append(f"{self.name(str(ex))} {new} (+{float(r['gain_day']):.1f}/day on {int(r['fills'])} replayed fills)")
+        with c.lock:
+            c.d["sm_tune"] = dict(markets=cur, applied_id=prop.get("id"), t=stamp())
+            c.save()
+        msg = f"SM nightly re-tune {prop.get('id')}: " + ("; ".join(changed) if changed else "no setting beat the current one by enough; settings unchanged")
+        self.event("SM", msg); self.night.line(msg)
+
     def sm_plan(self, now, cash):
         """{ex: [quote-spec]} (turnover_plan §1): on the bounce universe join the best bid and the best ask (the ask = a buy of NO
         at 1 - ask), never crossing; keep each order while it is at the touch or one tick behind, re-peg only >= 2 ticks away;
@@ -6246,6 +6391,17 @@ class Engine:
         sz = self.sm_sizes()
         glide = now >= time.mktime(time.strptime(SM_GLIDE_START, "%Y-%m-%d %H:%M:%S"))
         cap_sh = 0 if glide else sz["cap_sh"]
+        universe = self.sm_universe(now)
+        inv_exs = [ex for ex, books in self.ledger.subbooks.items() if abs(books.get(f"sm:{ex}", 0.0)) >= MIN_QTY]
+        exs = list(dict.fromkeys(list(universe) + inv_exs))    # C87: inventory outside today's universe still exits
+        stale = [ex for ex in exs if now - float((self.sm_regime.get(ex) or {}).get("t") or 0) >= SM_REGIME_EVERY_S]
+        if stale:
+            self.sm_regime_update(now, stale)               # every minute per market (a market new to the list at once)
+        if now - self.sm_regime_t >= SM_REGIME_EVERY_S or getattr(self, "sm_gate_exs", None) != exs:
+            self.sm_regime_t, self.sm_gate_exs = now, list(exs)
+            self.sm_tune_apply(now)
+            self.sm_gate_cache = self.sm_loss_gate(now, exs)
+        excluded, exits_only = getattr(self, "sm_gate_cache", (set(), False))
         w_used = self.sm_writes_last_min(now)
         self.sm_wpeak = max(self.sm_wpeak, w_used)
         writes = SM_WRITES_PER_MIN - w_used
@@ -6256,8 +6412,12 @@ class Engine:
             if rec and rec.get("layer") in ("sm", "smexit") and o["id"] not in self.ex.cancelling:
                 existing[(o["ex"], o["side"])] = o
         cost_all = self.sm_cost()
-        plan, quoted = {}, 0
-        for ex in self.sm_universe(now):
+        plan, quoted, gated = {}, 0, collections.Counter()
+        for ex in exs:
+            reg = (self.sm_regime.get(ex) or {}).get("regime")
+            entries_ok = ex in universe and reg in SM_QUOTE_REGIMES and ex not in excluded and not exits_only   # C87: new quotes only in BOUNCE markets
+            gated["entries" if entries_ok else ("excluded" if ex in excluded else "exits_only" if exits_only else "not_universe" if ex not in universe else f"regime_{reg}")] += 1
+            clip, repeg, skew = self.sm_params(ex, sz)
             if ex not in self.owner or self.ex.is_frozen(ex) or ex in self.manual_ex or self.fm_poll_block(ex, now):
                 writes -= sum(1 for sd in ("yes", "no") if (ex, sd) in existing)
                 continue
@@ -6286,13 +6446,13 @@ class Engine:
             long_, short_ = inv >= MIN_QTY, inv <= -MIN_QTY
             bid_px, ask_px = bid, ask
             if long_:
-                bid_px = round(bid - TICK, 3)               # once long: the ask stays at the touch, the bid steps a tick lower
+                bid_px = round(bid - skew * TICK, 3)        # once long: the ask stays at the touch, the bid steps `skew` ticks lower (re-tuned nightly)
             if short_:
-                ask_px = round(ask + TICK, 3)               # (tick_up / tick_down only round to the grid)
+                ask_px = round(ask + skew * TICK, 3)        # (tick_up / tick_down only round to the grid)
             yes_cheap, no_cheap = bid <= f + 1e-9, ask >= f - 1e-9
             size = self.sm_touch_size(ex, now)
-            q_bid = int(min(sz["clip"], SM_DEPTH_SHARE * size[0])) if size else int(sz["clip"])
-            q_ask = int(min(sz["clip"], SM_DEPTH_SHARE * size[1])) if size else int(sz["clip"])
+            q_bid = int(min(clip, SM_DEPTH_SHARE * size[0])) if size else int(clip)
+            q_ask = int(min(clip, SM_DEPTH_SHARE * size[1])) if size else int(clip)
             quotes = []
             sub = f"sm:{ex}"
             ring = self.ring_window(now)                     # (1c) in a ring window only the reducing sides quote
@@ -6301,10 +6461,10 @@ class Engine:
                 hi = max(float(avg), max((l[1] for l in self.lots(ex, "no", sub) if l[2] == "engine" and l[0] > 0), default=0.0))
                 p = min(bid_px, round(1 - (hi + RULE0_MARGIN), 3))   # rule 0 on every NO lot
                 if MB_MIN_PX <= p < ask_px:
-                    quotes.append(dict(reduce=True, held="no", sell_px=round(1 - p, 3), qty=int(min(sz["clip"], -inv)), sub=sub, ttl=SM_TTL_S, side="yes", px=p))
+                    quotes.append(dict(reduce=True, held="no", sell_px=round(1 - p, 3), qty=int(min(clip, -inv)), sub=sub, ttl=SM_TTL_S, side="yes", px=p))
             elif not short_:
                 room_sh = cap_sh - max(0.0, inv)
-                allowed = room_sh >= SM_MIN_QTY and (yes_cheap or inv < sz["clip"] - 1e-9) and cost_all + q_bid * bid_px <= sz["cap"] + 1e-6 and not glide and not ring
+                allowed = room_sh >= SM_MIN_QTY and (yes_cheap or inv < clip - 1e-9) and cost_all + q_bid * bid_px <= sz["cap"] + 1e-6 and not glide and not ring and entries_ok
                 if allowed and q_bid >= SM_MIN_QTY and MB_MIN_PX <= bid_px < ask_px:
                     quotes.append(dict(side="yes", px=bid_px, qty=int(min(q_bid, room_sh)), sub=sub, ttl=SM_TTL_S))
             # the ask (sell YES = buy NO at 1 - ask): an exit while long (>= entry + 0.5c), else an entry
@@ -6312,10 +6472,10 @@ class Engine:
                 hi = max(float(avg), max((l[1] for l in self.lots(ex, "yes", sub) if l[2] == "engine" and l[0] > 0), default=0.0))
                 p = max(ask_px, round(hi + RULE0_MARGIN, 3))   # never below any held lot's entry + 0.5c
                 if p <= MB_MAX_PX and p > bid_px:
-                    quotes.append(dict(reduce=True, held="yes", sell_px=p, qty=int(min(sz["clip"], inv)), sub=sub, ttl=SM_TTL_S, side="no", px=round(1 - p, 3)))
+                    quotes.append(dict(reduce=True, held="yes", sell_px=p, qty=int(min(clip, inv)), sub=sub, ttl=SM_TTL_S, side="no", px=round(1 - p, 3)))
             elif not long_:
                 room_sh = cap_sh - max(0.0, -inv)
-                allowed = room_sh >= SM_MIN_QTY and (no_cheap or -inv < sz["clip"] - 1e-9) and cost_all + q_ask * (1 - ask_px) <= sz["cap"] + 1e-6 and not glide and not ring
+                allowed = room_sh >= SM_MIN_QTY and (no_cheap or -inv < clip - 1e-9) and cost_all + q_ask * (1 - ask_px) <= sz["cap"] + 1e-6 and not glide and not ring and entries_ok
                 if allowed and q_ask >= SM_MIN_QTY and ask_px <= MB_MAX_PX and ask_px > bid_px:
                     quotes.append(dict(side="no", px=round(1 - ask_px, 3), qty=int(min(q_ask, room_sh)), sub=sub, ttl=SM_TTL_S))
             # keep the queue: a resting quote within one tick of its target keeps its price (no write); >= 2 ticks away it is re-pegged (2 writes)
@@ -6324,7 +6484,7 @@ class Engine:
                 cur = existing.get((ex, q["side"]))
                 if cur is not None:
                     crossing = (cur["price"] >= ask - 1e-9) if q["side"] == "yes" else (round(1 - cur["price"], 3) <= bid + 1e-9)
-                    if ((cur["price"] <= q["px"] + 1e-9 and cur["price"] >= q["px"] - (SM_REPEG_TICKS - 1) * TICK - 1e-9) or writes < 2) and not crossing:
+                    if ((cur["price"] <= q["px"] + 1e-9 and cur["price"] >= q["px"] - (repeg - 1) * TICK - 1e-9) or writes < 2) and not crossing:
                         q = dict(q, px=cur["price"], qty=int(cur["qty"]))   # at the touch or one tick behind: keep the queue place (no write)
                         if q.get("reduce"):
                             q["sell_px"] = round(1 - cur["price"], 3)        # the resting order is the complement buy; the sale price is 1 - it
@@ -6344,7 +6504,7 @@ class Engine:
             if out:
                 plan[ex] = out
                 quoted += len(out)
-        self.sm_cov = dict(quoted=quoted, markets=len(plan), writes_left=writes, writes_used=w_used)
+        self.sm_cov = dict(quoted=quoted, markets=len(plan), writes_left=writes, writes_used=w_used, gate=dict(gated), exits_only=exits_only, excluded=sorted(excluded))
         return plan
 
     def sm_fill_events(self, fills):
@@ -8144,6 +8304,8 @@ class EngineControls:
             layer, state = args.get("layer"), args.get("state")
             if layer not in self.STRATEGY or state not in LAYER_STATES:
                 raise ValueError(f"layer must be one of {self.STRATEGY} and state one of {LAYER_STATES}")
+            if layer in RETIRED_LAYERS and state != "off":
+                raise ValueError(f"{layer} was deleted in C87 (Piero 19:56 Oct 8): it stays off")
             c.set_layer(layer, state, "dashboard", by="dashboard")
             return f"{layer}: {state}"
         if action == "backfill":                           # evening §1.3: once, inside the engine loop (it owns the ledger)

@@ -244,12 +244,12 @@ TM_CLIP, TM_CLIP_PILOT = 1_000, 500
 TM_DEPTH_SHARE = 0.20           # at most 20% of the visible touch depth (order-book read, cached 5 min, only with spare reads)
 TM_MIN_QTY = 100
 TM_INV_MARKET, TM_INV_MARKET_PILOT = 3_000, 1_500   # shares held per market and side; at the cap only the exit side quotes
-TM_CAP_COST, TM_CAP_COST_PILOT = 20_000, 8_000      # TM held at cost in total
+TM_CAP_COST, TM_CAP_COST_PILOT = 30_000, 8_000      # TM held at cost in total (Piero 19:56 Oct 8: base cap 30k at cost)
 TM_SIDES_PILOT = 60             # the pilot quotes the top 60 market-sides by 24-h SIG value printed >= 2c off fair (full size: every side with >= 2c edge)
 TM_TTL_S = 1200                 # 20-min expiry: a stalled engine leaves nothing stale for long
 TM_REPEG_TICKS = 2              # keep the order (queue priority) while at the touch or one tick behind; re-peg only >= 2 ticks behind or when its edge < e_min
 TM_EXIT_FIRST, TM_EXIT_STEP_S, TM_EXIT_LATE = 0.005, 600, 0.01   # exit at fill + 1 tick; fill + 1c after 10 min unfilled; never below entry + 0.5c (rule 0); hold-when-idle applies
-TM_WRITES_PER_MIN = 8           # placements batch (one write per loop), a cancel is one write each: re-pegs are rationed by priority
+TM_WRITES_PER_MIN = 12          # (Piero 19:56 Oct 8 e: TM 12 / SM 6 / fast path 5 reserved, total <= 25) placements batch (one write per loop), a cancel is one write each: re-pegs are rationed by priority
 TM_NEWS_C, TM_NEWS_WINDOW_S, TM_REQUOTE_S = 0.02, 600, 300   # pull a market's TM orders on a >= 2c Polymarket move in 10 min, back 5 min after
 TM_GLIDE_START = FM_GLIDE_START # inventory cap 0 from Nov 2 17:00 PT; no TM from a state's last poll close - 10 min (the FM's poll_close table)
 TM_DEPTH_CACHE_S = 300
@@ -262,15 +262,27 @@ TM_CLIP_HI, TM_INV_HI, TM_INV_LO = 1_000, 3_000, 1_000
 ROTATION_EDGE_LEFT, ROTATION_FUND_EDGE, ROTATION_MARKETS = 0.06, 0.08, 3   # (C82) turnover_plan §2.2; superseded by the return rule below (C84b)
 ROTATION_RET_LEFT, ROTATION_STOP_ABOVE = 0.08, 5_000   # Piero 06:35 Oct 8 (C84b): rotation by return, all day — lots with < 8% return left to settlement ((fair - ask) / ask), lowest first, an ask at the touch, while free < BUFFER; stops once free >= BUFFER + 5k (never >= 8c under fair; never manual / wall / sleeve / pair-set / swing / fm / recycle lots), lowest edge first, only to fund cut entries with >= 8c edge
 
+# Piero 19:56 Oct 8 strategy release (C87)
+TM_BUFFER_RESUME = 1_000        # TM entries pause while free < BUFFER and resume at BUFFER + 1k (no flapping); exits always run
+TM_ENTRY_STOPS = [("19:00", "21:00"), ("03:00", "06:00"), ("12:00", "14:00")]   # no TM entries from 60 min before each ring (20:00, 04:00, 13:00 PT) to the window's end: cash back for the catcher
+SM_REGIME_WIN_S, SM_REGIME_EVERY_S = 1800, 60   # live regime per SM market: the trailing 30 min of prints, recomputed every minute (mm_playbook v0 rules)
+SM_REGIME = dict(sweep_ticks=10, news_c=0.02, quiet_prints=5, trend_ticks=3, trend_bounce_max=0.40, bounce_prints=20, bounce_share=0.50)   # = research/params.py REGIME
+SM_QUOTE_REGIMES = ("BOUNCE",)  # new SM quotes only in these regimes; elsewhere exits only (>= entry + 0.5c)
+SM_LOSS_MARKET_DAY, SM_LOSS_24H = -50.0, -150.0   # a market under -50 on the SIG day is excluded for the day; SM rolling 24 h under -150 -> exits only
+SM_TUNE_AT = "03:00"            # nightly re-tune (clip / skew / re-peg per market), applied only if the replay beats the current settings
+SM_TUNE_BOUNDS = dict(clip=(100, 1000), repeg=(1, 4), skew=(0, 2))   # = research/params.py BOUNDS
+SM_TUNE_MIN_GAIN, SM_TUNE_MIN_FILLS = 2.0, 20   # a change must beat the current setting by >= 2 a day in the replay, on >= 20 replayed fills
+RETIRED_LAYERS = ("fm", "scalp")   # deleted (code in releases/archive/); their leftover lots: FM's offered at max(entry + 0.5c, touch), the scalper's moved to 'held'
+
 # turnover_plan §1 (C84): the spread maker (SM) — two-sided quoting at the touch on the bounciest markets, queue kept, refilled on fill
 SM_CLIP, SM_CLIP_PILOT = 1_000, 500            # clip = min(this, 30% of the touch level's size)
 SM_DEPTH_SHARE, SM_MIN_QTY = 0.30, 100
 SM_CAP_SH, SM_CAP_SH_PILOT = 2_000, 1_000      # inventory per market: +/- 1k shares in the pilot, +/- 2k after the gate
-SM_CAP_COST, SM_CAP_COST_PILOT = 20_000, 10_000   # capital at cost
+SM_CAP_COST, SM_CAP_COST_PILOT = 10_000, 10_000   # capital at cost (Piero 19:56 Oct 8: cap 10k)
 SM_MARKETS, SM_MARKETS_PILOT = 40, 20          # the top N by 24-h bounces x matched shares from our own tape, refreshed daily
 SM_FAIR_LO, SM_FAIR_HI = 0.05, 0.95            # never a sweep market (fair outside 5-95%), never RI, never an FM target
 SM_TTL_S, SM_REPEG_TICKS = 1200, 2             # 20-min expiry; keep the order at the touch or one tick behind, re-peg >= 2 ticks away
-SM_WRITES_PER_MIN = 10                         # batched refills; cancels only for re-pegs and pulls
+SM_WRITES_PER_MIN = 6                          # (Piero 19:56 Oct 8) batched refills; cancels only for re-pegs and pulls
 SM_NEWS_C, SM_NEWS_WINDOW_S, SM_REQUOTE_S = 0.02, 600, 300   # pull on a 2c / 10 min Polymarket move, back 5 min after
 SM_SWEEP_C, SM_SWEEP_HOLD_S = 0.05, 600        # pull on any SIG print >= 5c from the touch (a sweep is the catcher's job), 10 min
 SM_GLIDE_START = FM_GLIDE_START                # inventory -> 0 from Nov 2 17:00 PT; no SM from a state's poll close - 10 min
