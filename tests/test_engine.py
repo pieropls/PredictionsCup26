@@ -4766,8 +4766,7 @@ class C89Tests(EngineCase):
         self.assertAlmostEqual(plan[a]["px"], ask_a, places=3, msg="at the touch (the held side's ask)")
         self.assertGreaterEqual(plan[a]["px"], eng.ledger.tranches[f"dump:{a}:yes:1"]["avg"] + a_config.RULE0_MARGIN - 1e-9, "never at a loss")
         rets = [(eng.side_fair(ex, plan[ex]["side"]) - plan[ex]["px"]) / plan[ex]["px"] for ex in plan]
-        self.assertEqual(rets, sorted(rets), "lowest return left first (the rig's own inventory lots may rank before a)")
-        self.assertNotIn(b, [ex for ex in plan][:1], "the 12c lot is not first")
+        self.assertEqual(rets, sorted(rets), "lowest return left to settlement first (a market-level return at the touch, not the lot's entry)")
         self.assertTrue(any("TRADING SALE" in e["text"] and "return left" in e["text"] and "cash freed" in e["text"] for e in eng.events))
         eng.rotation_plan(a_config.CASH_RESERVE + 20_600, time.time())
         self.assertFalse(eng.rotation_on, "free >= 20k + 500: off")
