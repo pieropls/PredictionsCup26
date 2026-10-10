@@ -70,6 +70,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      SM_TUNE_AT, SM_TUNE_BOUNDS, SM_TUNE_MIN_GAIN, SM_TUNE_MIN_FILLS, RETIRED_LAYERS, DUMP_DEEP_OFF, DUMP_L0_CAP_RESTING, DUMP_THIN_SIDES,
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
+                     TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -411,6 +412,7 @@ class Engine:
         self.tm_buf_paused, self.tm_stop_logged = False, None   # C87: the BUFFER pause and the pre-ring entry stop
         self.pnl_alert_t, self.trims_seen, self.trim_t, self.book_scan_t, self.book_scan_rows, self.reads_before, self.reads_after_t = {}, 0, None, 0.0, [], None, None   # C88
         self.core_t, self.core_set, self.scoreboard_t, self.scoreboard = 0.0, set(), 0.0, {}   # C88: the two books and the scoreboard
+        self.trading_inv_stopped = None                     # C89: the 30k trading-inventory stop
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
         self.prints, self.print_ids, self.sm_regime, self.sm_regime_t, self.sm_exits_only, self.sm_tune_mtime = {}, {}, {}, 0.0, None, None   # C87: print ring, live regimes, loss stop, re-tune
@@ -2705,6 +2707,9 @@ class Engine:
         L1 goes out on every side first, then L2, then L3."""
         if not self.controls.on("dump"):
             return {}
+        if self.trading_inv_gate(now):
+            self.dump_cov = dict(eligible=0, covered=0, levels=0, weighted=0, budget=0, nominal=0, k=self.budget_k(), by_l={}, cut=0, inv_stop=True)
+            return {}                                       # C89: trading inventory over 30k at cost: no new catcher bids
         if self.entry_budget(cash) <= 0:                    # Oct 5 22:50 guard (b): under 2k free above the floor: no entry bids
             if now - self.scalp_note.get("nocash", 0) >= 1800:
                 self.scalp_note["nocash"] = now
@@ -3263,6 +3268,11 @@ class Engine:
             if fs is not None and fs - avg < CORE_NEAR_FAIR_C - 1e-9:
                 members.pop(k); swap_out[k] = dict(t=now, why="within 1c of fair")
                 changes.append(f"{self.name(ex)} {sub} leaves core: {(fs - avg) * 100:.1f}c from fair -> exit at max(entry + 0.5c, touch)")
+                continue
+            ask_s = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[1] if self.px.get(ex) else None
+            if fs is not None and ask_s and ask_s > avg + RULE0_MARGIN and (fs - ask_s) / ask_s < CORE_LOCK_RET - 1e-9:   # C89 (Piero 16:55 item 2): lock the gain
+                members.pop(k); swap_out[k] = dict(t=now, why=f"gain lock: {(fs - ask_s) / ask_s:.1%} return left at the touch {ask_s:.3f}")
+                changes.append(f"CORE LOCK {self.name(ex)} {sub} {q:,.0f} {side.upper()}: bought {avg:.3f}, touch {ask_s:.3f}, fair {fs:.3f} ({(fs - ask_s) / ask_s:.1%} return left < {CORE_LOCK_RET:.0%}) -> sold at the touch; its slot goes to the next candidate")
         for k in list(swap_out):
             if k not in lots:
                 swap_out.pop(k)
@@ -6127,9 +6137,9 @@ class Engine:
                        else "TM entries back after the ring window")
                 self.event("TM", msg); self.night.line(msg)
             self.tm_stop_logged = stop
-        if stop or self.tm_buffer_gate(now):
+        if stop or self.tm_buffer_gate(now) or self.trading_inv_gate(now):
             self.tm_cov = dict(quoted=0, available=0, top=0, writes_left=0, writes_used=0, ring=stop, buffer_pause=not stop)
-            return {}                                       # C87: no TM entries (resting bids go; exits keep running)
+            return {}                                       # C87 / C89: no TM entries (resting bids go; exits keep running)
         sz = self.tm_sizes()
         glide = now >= time.mktime(time.strptime(TM_GLIDE_START, "%Y-%m-%d %H:%M:%S"))
         cap_cost = 0.0 if glide else self.tm_cap(now)       # Piero 22:15 (C82 item 2): base + max(0, free - BUFFER)
@@ -6350,26 +6360,45 @@ class Engine:
 
     ROTATION_SKIP = ("manual", "pairset:", "recycle:", "sleeve:", "wall:", "swing:", "fm:", "tm:", "sm:")   # Piero 22:15: never manual, wall, sleeve or pair-set lots; swing / fm / recycle / tm / sm have their own exits (the TM's and SM's already sit at the touch ask)
 
+    ROTATION_SKIP = ("manual", "pairset:", "sleeve:", "wall:", "swing:")   # C89: Piero's position orders and pair sets only; every trading lot can be sold
+    OWN_EXIT_SUBS = ("dump:", "tm:", "sm:", "fm:", "touch:", "scalp:", "longshot:")   # subs whose layer rests its own exit while the lot is not held
+
+    def trading_cost(self):
+        """C89: the TRADING book at cost — every engine lot that is not core (RI, walls, manual, pair sets apart)."""
+        return sum(cost for ex, side, sub, q, avg, fs, cost in self.engine_lots() if (str(ex), sub) not in self.core_set)
+
+    def trading_inv_gate(self, now):
+        """C89 (Piero 16:55 item 3): no new trading buys (TM, catcher, SM) while trading inventory at cost > 30k. True = stopped; logged on change."""
+        tc = self.trading_cost()
+        stop = tc > TRADING_INV_CAP
+        if stop != getattr(self, "trading_inv_stopped", None):
+            if self.trading_inv_stopped is not None or stop:
+                msg = (f"TRADING INVENTORY {tc:,.0f} at cost > {TRADING_INV_CAP:,}: no new TM / catcher / SM buys until it is under" if stop
+                       else f"TRADING INVENTORY {tc:,.0f} at cost <= {TRADING_INV_CAP:,}: new buys allowed again")
+                self.event("CASH", msg); self.night.line(msg)
+            self.trading_inv_stopped = stop
+        return stop
+
     def rotation_plan(self, cash, now):
-        """Piero 22:15 Oct 7 (C82 item 4): while free cash < BUFFER, sell holdings with < 4c of edge left to settlement at the SIG
-        bid when it is >= entry + 0.5c (rule 0), never a lot >= 8c under fair, lowest edge first, only up to the cost of the
-        entries with >= 8c edge that were cut for budget (dump levels and TM sides). Each sale is logged with the edge
-        given up vs the edge bought. Sales flow through the release path (a limit at the bid, sized to the top of book)."""
+        """C89 (Piero 16:55 item 1): while free cash < 20k the TRADING book (never core) sells its lots lowest return-left first, at the
+        touch (the held side's best ask), only at >= entry + 0.5c (rule 0: never at a loss), until free >= 20k; this overrides the 3c
+        hold. Lots with their own exit layer are taken only while that exit is held (no double exit). Core lots that left core (a swap,
+        within 1c of fair, or the 3% gain lock) are sold at the touch whatever the cash. Each ask is logged with the return left, the
+        edge given up and the cash freed. Sales flow through the release path (a resting ask; never a market order)."""
         free = cash - CASH_RESERVE
-        B = self.buffer()
-        if self.controls.paused or self.fills_blind:
+        T = float(TRADING_CASH_TARGET)
+        if self.fills_blind:
             return {}
-        if free < B:
-            if not self.rotation_on:
-                self.rotation_on = True
-                self.event("RELEASE", f"ROTATION on: free {free:,.0f} < BUFFER {B:,.0f} — lots with < {ROTATION_RET_LEFT:.0%} return left to settlement rest asks at the touch, lowest return first, until free >= {B + ROTATION_STOP_ABOVE:,.0f}")
-        elif free >= B + ROTATION_STOP_ABOVE and self.rotation_on:
+        if free < T and not self.rotation_on:
+            self.rotation_on = True
+            self.event("RELEASE", f"TRADING CASH TARGET on: free {free:,.0f} < {T:,.0f} — the trading book sells lowest return-left first at the touch, >= entry + 0.5c, until free >= {T:,.0f} (Piero 16:55)")
+        elif free >= T + TRADING_CASH_HYST and self.rotation_on:
             self.rotation_on = False
-            self.event("RELEASE", f"ROTATION off: free {free:,.0f} >= BUFFER + {ROTATION_STOP_ABOVE:,}")
-        if not self.rotation_on:
+            self.event("RELEASE", f"TRADING CASH TARGET off: free {free:,.0f} >= {T:,.0f}")
+        forced = set(((self.controls.d.get("core") or {}).get("swap_out") or {}).keys())   # ex|sub keys sold whatever the cash
+        if not self.rotation_on and not forced:
             return {}
-        need = B + ROTATION_STOP_ABOVE - free              # Piero 06:35 Oct 8: run while free < BUFFER, stop once free >= BUFFER + 5k
-        demand_rows = sorted([(e, c, px) for e, c, px in self.dump_cut_rows + self.tm_unfunded if e >= ROTATION_FUND_EDGE - 1e-9], reverse=True)
+        need = max(0.0, T + TRADING_CASH_HYST - free) if self.rotation_on else 0.0
         cands = []
         for ex, b in self.book.items():
             q = b["pos"]
@@ -6380,28 +6409,31 @@ class Engine:
             fs = self.side_fair(ex, side)
             if ask is None or fs is None:
                 continue
-            bid = ask                                       # turnover_plan §2.2: a resting ask at the touch (joins the best ask of the held side), never a market order
-            left = fs - bid
-            ret = left / bid if bid > 0 else 1.0
-            if ret >= ROTATION_RET_LEFT - 1e-9:
-                continue                                    # still >= 8% return left to settlement: kept (C84b: by return, not by cents)
-            split = {}
+            px = ask                                        # a resting ask at the touch of the held side, never a market order
+            left = fs - px
+            split, is_forced = {}, False
             for sub, v in self.ledger.subbooks.get(ex, {}).items():
                 if v * q <= 0 or sub.startswith(self.ROTATION_SKIP) or (str(ex), sub) in self.core_set:
-                    continue                                # C88: never a core lot
+                    continue                                # never a core lot
+                key = f"{ex}|{sub}"
                 avg = (self.ledger.tranches.get(sub) or {}).get("avg")
-                if avg and fs - float(avg) >= HOLD_IDLE_GAP - 1e-9:
-                    continue                                # a lot >= 8c under fair is never rotated (the ladder's business)
-                take = self.rule0_allowed(ex, side, sub, bid, int(abs(v)))
+                pol = self.lot_policy(ex, side, sub, avg, fs) if avg else "exit"
+                if key in forced:
+                    is_forced = True
+                elif not self.rotation_on:
+                    continue
+                elif sub.startswith(self.OWN_EXIT_SUBS) and pol != "hold":
+                    continue                                # its own layer's exit already rests at max(entry + 0.5c, touch)
+                take = self.rule0_allowed(ex, side, sub, px, int(abs(v)))
                 if take >= MIN_QTY:
                     split[sub] = take
             if split:
-                cands.append((left, ex, side, bid, split))
+                cands.append((0 if is_forced else 1, left / px if px > 0 else 1.0, left, ex, side, px, split))
         plan, raised = {}, 0.0
-        for left, ex, side, bid, split in sorted(cands, key=lambda c_: (c_[0] / c_[3] if c_[3] > 0 else 1.0)):   # lowest return left first
-            if raised >= need or len(plan) >= ROTATION_MARKETS:
+        for forced_rank, ret, left, ex, side, px, split in sorted(cands, key=lambda c_: (c_[0], c_[1])):   # forced first, then the lowest return left
+            if forced_rank == 1 and (raised >= need or len(plan) >= ROTATION_MARKETS_C89):
                 break
-            qty = int(min(sum(split.values()), (need - raised) / bid))   # a resting ask: no depth cap
+            qty = int(sum(split.values())) if forced_rank == 0 else int(min(sum(split.values()), (need - raised) / px))
             if qty < MIN_QTY:
                 continue
             take, left_q = {}, qty
@@ -6414,22 +6446,16 @@ class Engine:
                 continue
             n = sum(take.values())
             given = max(left, 0.0) * n
-            bought, cover = 0.0, n * bid
-            for e, c, px in demand_rows:                    # the edge this sale funds: the best cut entries its proceeds cover
-                if cover <= 0:
-                    break
-                part = min(c, cover)                        # dollars of that entry funded
-                bought += e * (part / px)                   # x shares bought at px, each carrying e of edge
-                cover -= part
-            plan[ex] = dict(side=side, px=bid, cost=round(left, 4), subs=take, why="rotation", tier=0, ev=round(given, 2))
-            self.release_why[ex] = (now, "rotation")
-            raised += n * bid
-            key = (ex, round(bid, 3), n)
+            plan[ex] = dict(side=side, px=px, cost=round(left, 4), subs=take, why="rotation" if forced_rank else "core lock", tier=0, ev=round(given, 2))
+            self.release_why[ex] = (now, plan[ex]["why"])
+            if forced_rank:
+                raised += n * px
+            key = (ex, round(px, 3), n)
             if self.rotation_logged.get(ex) == key:
                 continue                                    # the same ask as last loop: already logged (C84: no line per loop)
             self.rotation_logged[ex] = key
-            msg = (f"ROTATION ask {self.name(ex)} {side.upper()} {n:,} at the touch {bid:.3f}: {left / bid:.1%} return left to settlement ({left * 100:.1f}c), free {free:,.0f}, target {B + ROTATION_STOP_ABOVE:,.0f}; "
-                   f"edge given up {given:+,.0f}, cash freed {n * bid:,.0f}" + (f" (cut entries with >= {ROTATION_FUND_EDGE * 100:.0f}c edge waiting: {sum(c for _, c, _ in demand_rows):,.0f})" if demand_rows else ""))
+            msg = (f"{'CORE LOCK' if forced_rank == 0 else 'TRADING SALE'} {self.name(ex)} {side.upper()} {n:,} at the touch {px:.3f}: {ret:.1%} return left to settlement ({left * 100:.1f}c), "
+                   f"free {free:,.0f}, target {T:,.0f}; edge given up {given:+,.0f}, cash freed {n * px:,.0f}; lots " + ", ".join(f"{k.split(':')[0]} {v:,}" for k, v in take.items()))
             self.rotation_log.append((now, msg))
             self.event("RELEASE", msg)
             self.night.line(msg)
@@ -6826,6 +6852,7 @@ class Engine:
             self.sm_tune_apply(now)
             self.sm_gate_cache = self.sm_loss_gate(now, exs)
         excluded, exits_only = getattr(self, "sm_gate_cache", (set(), False))
+        inv_stop = self.trading_inv_gate(now)
         w_used = self.sm_writes_last_min(now)
         self.sm_wpeak = max(self.sm_wpeak, w_used)
         writes = SM_WRITES_PER_MIN - w_used
@@ -6839,7 +6866,7 @@ class Engine:
         plan, quoted, gated = {}, 0, collections.Counter()
         for ex in exs:
             reg = (self.sm_regime.get(ex) or {}).get("regime")
-            entries_ok = ex in universe and reg in SM_QUOTE_REGIMES and ex not in excluded and not exits_only   # C87: new quotes only in BOUNCE markets
+            entries_ok = ex in universe and reg in SM_QUOTE_REGIMES and ex not in excluded and not exits_only and not inv_stop   # C87 / C89: regime gate and the 30k trading-inventory stop
             gated["entries" if entries_ok else ("excluded" if ex in excluded else "exits_only" if exits_only else "not_universe" if ex not in universe else f"regime_{reg}")] += 1
             clip, repeg, skew = self.sm_params(ex, sz)
             if ex not in self.owner or self.ex.is_frozen(ex) or ex in self.manual_ex or self.fm_poll_block(ex, now):

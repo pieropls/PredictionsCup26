@@ -213,7 +213,7 @@ class EngineCase(unittest.TestCase):
         self.addCleanup(setattr, f_engine, "STARTUP_HOLD_S", f_engine.STARTUP_HOLD_S)
         f_engine.STARTUP_HOLD_S = 0                         # the rigs read from their first loop (the 2-min start-up hold is a live-only guard)
         for k, v in (("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
-                     ("CORE_CAP_COST", 0.0), ("TRADING_HOLD_C", 99.0)):   # C88: the books and the 3c hold are off in the legacy rigs (C88Tests turn them on)
+                     ("CORE_CAP_COST", 0.0), ("TRADING_HOLD_C", 99.0), ("CORE_LOCK_RET", -99.0), ("TRADING_INV_CAP", 1e12), ("TRADING_CASH_TARGET", 0.0)):   # C88 / C89 rules off in the legacy rigs (C88Tests / C89Tests turn them on)
             self.addCleanup(setattr, f_engine, k, getattr(f_engine, k, None))
             setattr(f_engine, k, v)                         # C87 gates (real clock, no tape in the rigs, rig cash under BUFFER): off unless C87Tests set them
         for k in ("PNL_READ_S", "ORDERS_READ_S", "FILLS_READ_S", "POSITIONS_READ_S"):   # day 4 §4 / Oct 8 read caching have their own tests; the rigs (no realtime feed) read fresh each loop
@@ -3407,52 +3407,6 @@ class RulesV2Tests(EngineCase):
         self.assertTrue(any(w["l0"] for _, _, _, w in out), "the L0 takes the rest")
         self.assertLessEqual(sum(w["px"] * w["qty"] * w["weight"] for w in deep), a_config.L3_BUDGET_SHARE * 3_000 + 1e-6)
 
-    def test_rotation_sells_low_edge_lots_under_buffer_to_fund_8c_entries(self):
-        """Piero 22:15 Oct 7 (C82 item 4): under BUFFER, lots with < 4c left to settlement sell at the bid when >= entry + 0.5c
-        (rule 0), never a lot >= 8c under fair, never manual / wall / sleeve / pair-set lots, lowest edge first, only to fund
-        cut entries with >= 8c edge; each sale logged with the edge given up vs the edge bought."""
-        fake, eng, favs = self.rig(cash_above_floor=10_000)
-        eng.controls.d["buffer"] = dict(value=20_000, day=time.strftime("%Y-%m-%d"))
-        ex = favs[0]
-        fs = eng.fair[ex]
-        bid = bots.tick_down(round(fs - 0.02, 3))               # 2c left to settlement at the bid
-        fake.px[ex] = eng.px[ex] = (bid, round(bid + 0.005, 3), bid)
-        fake.pos[ex] = 3000; fake.avg_cost[ex] = round(bid - 0.02, 3)
-        loop(eng, fake)
-        eng.ledger.subbooks[ex] = {f"dump:{ex}:yes:1": 2000.0, f"wall:{ex}:yes:w1": 1000.0}
-        eng.ledger.tranches[f"dump:{ex}:yes:1"] = dict(ex=ex, side="yes", kind="dump", state="open", ts=time.time(), t="x", avg=round(bid - 0.02, 3))
-        eng.ledger.tranches[f"wall:{ex}:yes:w1"] = dict(ex=ex, side="yes", kind="wall", state="open", ts=time.time(), t="x", avg=round(bid - 0.02, 3))
-        eng.lots_cache = (None, {})
-        now = time.time()
-        # C84b (Piero 06:35): the rotation runs while free < BUFFER (no demand coupling), lowest return left first; the wall lot never
-        eng.dump_cut_rows, eng.tm_unfunded = [], []
-        plan = eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now)
-        self.assertTrue(eng.rotation_on)
-        self.assertIn(ex, plan, plan)
-        self.assertEqual(plan[ex]["why"], "rotation")
-        self.assertEqual(set(plan[ex]["subs"]), {f"dump:{ex}:yes:1"}, "never a wall lot")
-        self.assertTrue(any("ROTATION on:" in e["text"] for e in eng.events))
-        self.assertAlmostEqual(plan[ex]["px"], round(bid + 0.005, 3), places=3, msg="a resting ask at the touch ask (turnover_plan §2.2), not the bid")
-        line = next(e["text"] for e in eng.events if e["text"].startswith("ROTATION ask"))
-        self.assertIn("return left", line); self.assertIn("edge given up", line); self.assertIn("cash freed", line)
-        # rule 0: entry 0.5c above the ask -> this lot is not sold (the fixture's other holdings may still rotate)
-        eng.ledger.tranches[f"dump:{ex}:yes:1"]["avg"] = round(bid + 0.010, 3)
-        eng.lots_cache = (None, {})
-        self.assertNotIn(ex, eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now))
-        # a lot >= 8c under fair is never rotated, nor anything with >= 4c left, nor above BUFFER
-        eng.ledger.tranches[f"dump:{ex}:yes:1"]["avg"] = round(fs - 0.10, 3)
-        eng.lots_cache = (None, {})
-        self.assertNotIn(ex, eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now))
-        eng.ledger.tranches[f"dump:{ex}:yes:1"]["avg"] = round(bid - 0.02, 3)
-        eng.lots_cache = (None, {})
-        self.assertEqual(eng.rotation_plan(a_config.CASH_RESERVE + 30_000, now), {}, "free >= BUFFER + 5k: the rotation switches off")
-        self.assertFalse(eng.rotation_on)
-        eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now)
-        self.assertTrue(eng.rotation_on)
-        self.assertNotEqual(eng.rotation_plan(a_config.CASH_RESERVE + 22_000, now), {}, "between BUFFER and BUFFER + 5k it keeps running (hysteresis)")
-        fake.px[ex] = eng.px[ex] = (round(fs - 0.10, 3), round(fs - 0.095, 3), fs - 0.10)
-        self.assertNotIn(ex, eng.rotation_plan(a_config.CASH_RESERVE + 10_000, now), ">= 8% return left at the ask: kept")
-
     def test_ri_unfrozen_for_turnover_with_a_held_cap_and_the_15c_rule(self):
         fake, eng, favs = self.rig(cash_above_floor=60_000)
         ex = favs[0]
@@ -4656,6 +4610,7 @@ class C88Tests(EngineCase):
         eng.ledger.tranches[sub] = dict(ex=ex, side=side, kind="dump", state="open", ts=time.time() - 60, t="x", avg=avg)
 
     def test_core_picks_the_highest_edge_pct_within_50k_and_swaps_at_3c_more(self):
+        f_engine.CORE_LOCK_RET = -99.0                         # the rig's touch sits above fair: the C89 gain lock has its own test
         fake, eng, favs = self.rig()
         exs = [e for e in favs[:4]]
         fs = {e: eng.fair[e] for e in exs}
@@ -4775,6 +4730,82 @@ class C88Tests(EngineCase):
         self.assertAlmostEqual(c["net"], 68.0, places=2)
         self.assertIn("trading", sb["today"]["book"])
         self.assertEqual(sb["target_day"], a_config.SCOREBOARD_TARGET_DAY)
+
+
+class C89Tests(EngineCase):
+    """C89 (Piero 16:55 Oct 9): free < 20k -> the trading book (never core) sells lowest return-left first at the touch, >= entry + 0.5c,
+    until free >= 20k, overriding the 3c hold; a core lot within 3% return of fair at the touch is sold at the touch (gain lock);
+    no new TM / catcher / SM buys while trading inventory at cost > 30k."""
+
+    def rig(self):
+        f_engine.CORE_CAP_COST, f_engine.TRADING_HOLD_C = 50_000.0, 0.03
+        f_engine.CORE_LOCK_RET, f_engine.TRADING_INV_CAP, f_engine.TRADING_CASH_TARGET = 0.03, 30_000.0, 20_000.0
+        return DumpV3Tests.rig(self)
+
+    def lot(self, eng, ex, sub, qty, avg, side="yes"):
+        eng.ledger.subbooks.setdefault(ex, {})[sub] = float(qty if side == "yes" else -qty)
+        eng.ledger.tranches[sub] = dict(ex=ex, side=side, kind="dump", state="open", ts=time.time() - 60, t="x", avg=avg)
+
+    def test_trading_sale_under_20k_lowest_return_first_never_core_never_at_a_loss(self):
+        fake, eng, favs = self.rig()
+        a, b, c = favs[:3]
+        fs = {e: eng.fair[e] for e in (a, b, c)}
+        self.lot(eng, a, f"dump:{a}:yes:1", 3000, round(fs[a] - 0.04, 3))          # 4c under fair: held by the 3c rule -> the seller takes it
+        self.lot(eng, b, f"dump:{b}:yes:1", 3000, round(fs[b] - 0.12, 3))          # 12c under fair: more return left -> sold later
+        self.lot(eng, c, f"dump:{c}:yes:1", 3000, round(fs[c] - 0.10, 3))
+        eng.core_set = {(c, f"dump:{c}:yes:1")}                                      # core: never sold by the seller
+        for e in (a, b, c):
+            fake.pos[e] = 3000; fake.avg_cost[e] = eng.ledger.tranches[f"dump:{e}:yes:1"]["avg"]
+            eng.book.setdefault(e, {})["pos"] = 3000
+        eng.lots_cache = (None, {})
+        eng.rotation_on = False
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 8_000, time.time())
+        self.assertTrue(eng.rotation_on, "free 8k < 20k: the seller is on")
+        self.assertIn(a, plan, plan); self.assertNotIn(c, plan, "never a core lot")
+        ask_a = bots.side_book(eng.px[a][0], eng.px[a][1], "yes")[1]
+        self.assertAlmostEqual(plan[a]["px"], ask_a, places=3, msg="at the touch (the held side's ask)")
+        self.assertGreaterEqual(plan[a]["px"], eng.ledger.tranches[f"dump:{a}:yes:1"]["avg"] + a_config.RULE0_MARGIN - 1e-9, "never at a loss")
+        rets = [(eng.side_fair(ex, plan[ex]["side"]) - plan[ex]["px"]) / plan[ex]["px"] for ex in plan]
+        self.assertEqual(rets, sorted(rets), "lowest return left first (the rig's own inventory lots may rank before a)")
+        self.assertNotIn(b, [ex for ex in plan][:1], "the 12c lot is not first")
+        self.assertTrue(any("TRADING SALE" in e["text"] and "return left" in e["text"] and "cash freed" in e["text"] for e in eng.events))
+        eng.rotation_plan(a_config.CASH_RESERVE + 20_600, time.time())
+        self.assertFalse(eng.rotation_on, "free >= 20k + 500: off")
+        # a lot under water is never sold: rule 0 holds it back
+        FAIR[a] = fs[a]; self.addCleanup(FAIR.pop, a, None)
+        eng.ledger.tranches[f"dump:{a}:yes:1"]["avg"] = round(ask_a + 0.05, 3); fake.avg_cost[a] = round(ask_a + 0.05, 3)
+        eng.lots_cache = (None, {})
+        eng.rotation_on = False
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 8_000, time.time())
+        self.assertNotIn(a, plan, "its entry is above the touch: not sold")
+
+    def test_core_gain_lock_and_the_30k_inventory_stop(self):
+        fake, eng, favs = self.rig()
+        ex = favs[0]
+        fs = eng.fair[ex]
+        bid, ask = eng.px[ex][0], eng.px[ex][1]
+        self.lot(eng, ex, f"dump:{ex}:yes:1", 2000, round(ask - 0.10, 3))          # bought 10c under the touch
+        FAIR[ex] = round(ask * 1.02, 3); self.addCleanup(FAIR.pop, ex, None)          # fair 2% above the touch: within the 3% lock
+        loop(eng, fake)
+        eng.core_set = {(ex, f"dump:{ex}:yes:1")}
+        eng.controls.d["core"] = dict(lots={f"{ex}|dump:{ex}:yes:1": dict(ex=ex, side="yes", sub=f"dump:{ex}:yes:1", qty=2000, avg=round(ask - 0.10, 3), cost=2000 * (ask - 0.10), edge_c=0.1)}, swap_out={})
+        eng.core_t = 0
+        eng.core_update(time.time())
+        self.assertIn(f"{ex}|dump:{ex}:yes:1", eng.controls.d["core"]["swap_out"], "within 3% return at the touch: out of core")
+        self.assertTrue(any("CORE LOCK" in e["text"] for e in eng.events))
+        self.assertEqual(eng.lot_policy(ex, "yes", f"dump:{ex}:yes:1", round(ask - 0.10, 3), eng.fair[ex]), "exit")
+        eng.book.setdefault(ex, {})["pos"] = 2000; fake.pos[ex] = 2000; fake.avg_cost[ex] = round(ask - 0.10, 3)
+        eng.lots_cache = (None, {})
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 60_000, time.time())
+        self.assertIn(ex, plan, "sold at the touch whatever the cash"); self.assertEqual(plan[ex]["why"], "core lock")
+        # the 30k stop
+        self.lot(eng, favs[1], f"dump:{favs[1]}:yes:1", 40_000, 0.9)
+        self.assertTrue(eng.trading_inv_gate(time.time()))
+        self.assertEqual(eng.tm_plan(time.time(), a_config.CASH_RESERVE + 60_000, eng.bucket_usage()), {}, "no TM entries")
+        self.assertEqual(eng.dump_plan(time.time(), a_config.CASH_RESERVE + 60_000, eng.bucket_usage()), {}, "no catcher bids")
+        self.assertTrue(any("TRADING INVENTORY" in e["text"] for e in eng.events))
+        eng.ledger.subbooks[favs[1]].pop(f"dump:{favs[1]}:yes:1")
+        self.assertFalse(eng.trading_inv_gate(time.time()))
 
 
 class Dash5Tests(EngineCase):

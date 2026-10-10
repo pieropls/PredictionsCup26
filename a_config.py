@@ -299,7 +299,13 @@ I2_RESUME_S = 1800              # an I2 trim pauses; resume after 30 min without
 BOOK_SCAN_EVERY_S = 120         # the full scan of every book from the feed (gaps vs fair, with depth), zero REST reads
 RECYCLE_DEPTH_HOUR = 12         # daily snapshot (first loop after 12:00 PT) of resting bid depth >= 0.98 / 0.99 per contract (election night 5a)
 SCOREBOARD_EVERY_S = 300
-SCOREBOARD_TARGET_DAY = 2_500   # edge bought - edge given back per day   # deleted (code in releases/archive/); their leftover lots: FM's offered at max(entry + 0.5c, touch), the scalper's moved to 'held'
+SCOREBOARD_TARGET_DAY = 2_500   # edge bought - edge given back per day
+# Piero 16:55 Oct 9 (C89): the trading book keeps cash
+TRADING_CASH_TARGET = 20_000    # free < 20k -> the trading book (never core) sells its lots lowest return-left first, at the touch, >= entry + 0.5c, until free >= 20k
+TRADING_CASH_HYST = 500         # the seller switches off at target + 500 (no flapping at the line)
+CORE_LOCK_RET = 0.03            # a core lot within 3% return of fair (at the touch) is sold at the touch to lock the gain
+TRADING_INV_CAP = 30_000        # no new trading buys (TM, catcher, SM) while trading inventory at cost > 30k
+ROTATION_MARKETS_C89 = 6        # markets asked at once by the trading-book seller   # deleted (code in releases/archive/); their leftover lots: FM's offered at max(entry + 0.5c, touch), the scalper's moved to 'held'
 
 # turnover_plan §1 (C84): the spread maker (SM) — two-sided quoting at the touch on the bounciest markets, queue kept, refilled on fill
 SM_CLIP, SM_CLIP_PILOT = 1_000, 500            # clip = min(this, 30% of the touch level's size)
