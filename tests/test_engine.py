@@ -1528,7 +1528,7 @@ class DumpV3Tests(EngineCase):
     each <= fair - 3c; sell-back at max(pre-dump ref, fill + 1.5c) <= fair - 0.5c, stepping down after 60 min, inventory
     after 6 h; size = funded reserve / 8 (1.5k..6k), arena x 1.5, pilot x 0.5; concentration cap; slide freeze; gate."""
 
-    def rig(self, state="full", cash_above_floor=350_000, ref_gap=0.06):
+    def rig(self, state="full", cash_above_floor=300_000, ref_gap=0.06):
         """cash 300k above the floor: the Oct 5 22:50 entry budget (2 x free) then never binds; CashGuardTests covers it."""
         fresh_data(layers=dict(position=dict(state="full"), dump=dict(state=state)))
         fake = new_fake(writes_per_min=10_000)
