@@ -305,7 +305,17 @@ TRADING_CASH_TARGET = 20_000    # free < 20k -> the trading book (never core) se
 TRADING_CASH_HYST = 500         # the seller switches off at target + 500 (no flapping at the line)
 CORE_LOCK_RET = 0.03            # a core lot within 3% return of fair (at the touch) is sold at the touch to lock the gain
 TRADING_INV_CAP = 30_000        # no new trading buys (TM, catcher, SM) while trading inventory at cost > 30k
-ROTATION_MARKETS_C89 = 6        # markets asked at once by the trading-book seller   # deleted (code in releases/archive/); their leftover lots: FM's offered at max(entry + 0.5c, touch), the scalper's moved to 'held'
+ROTATION_MARKETS_C89 = 6        # markets asked at once by the trading-book seller
+
+# docs/edge_program.md (Oct 11, C90): hypotheses as live A/B — arm A = half the eligible universe (ex hash), control = the rest
+EDGE_AB_CAP = 10_000            # capital per hypothesis in the A/B
+EDGE_PROMOTE_H, EDGE_ROLLBACK_H = 12, 6   # promote after >= 12 h ahead of control on the scoreboard; roll back after 6 h behind
+H1_TTL_S = 24 * 3600            # H1: GTC quotes (TM / SM): no 20-min expiry on arm A
+H1_BEHIND_TICKS, H1_BEHIND_S = 2, 1800   # cancel / re-peg an arm-A quote only once the touch sits >= 2 ticks away for > 30 min (within 1 tick it keeps its place)
+H1_GATE = dict(fill_rate_x=3.0, mo30_min=0.0, tm_edge_min=0.04)   # gate: fills per resting-hour >= 3x control; 30-min mark-out >= 0; TM edge at fill >= 4c
+PAPER_HALF_AT_PRICE = 0.5       # paper fills: half of the volume printed at our price counts against our queue (edge_program §0.3)
+PAPER_MAX_AGE_S = 12 * 3600     # a paper order is followed for 12 h after its real expiry
+H4 = dict(on=True, edge=0.04, per_race=5_000, cap=10_000, idle_free=10_000, waiting_edge=0.06)   # pair locks with idle cash: both NO at total cost <= 0.96 on races with no third candidate, <= 5k per race, <= 10k in all, only while free > the catcher's 10k reserve and no entry with >= 6% edge waits; held to settlement   # deleted (code in releases/archive/); their leftover lots: FM's offered at max(entry + 0.5c, touch), the scalper's moved to 'held'
 
 # turnover_plan §1 (C84): the spread maker (SM) — two-sided quoting at the touch on the bounciest markets, queue kept, refilled on fill
 SM_CLIP, SM_CLIP_PILOT = 1_000, 500            # clip = min(this, 30% of the touch level's size)

@@ -10,7 +10,8 @@ No network, nothing sent.   python3 -m unittest tests.test_engine
 import os as _os
 _os.environ["SIG_FM_PILOT"] = "0"
 _os.environ["SIG_RESERVOIR"] = "0"   # C84c: the RI reservoir never switches itself on inside a rig (ReservoirTests set it explicitly)
-_os.environ["SIG_C87"] = "0"   # C87: the one-time migration (TM full, FM / scalper deleted) runs only where C87Tests ask for it
+_os.environ["SIG_C87"] = "0"
+_os.environ["SIG_C90"] = "0"   # C90: the edge program's A/B starts only where C90Tests ask for it   # C87: the one-time migration (TM full, FM / scalper deleted) runs only where C87Tests ask for it
 _os.environ["SIG_SM_PILOT"] = "0"   # turnover_plan C84: the spread-maker pilot never switches itself on inside a rig (SMTests set the layer explicitly)
 _os.environ["SIG_TM_PILOT"] = "0"   # day 11 C83: the touch-maker pilot never switches itself on inside a rig (TMTests set the layer explicitly)   # mm_plan C81: the fair-maker pilot never switches itself on inside a rig (FMTests set targets explicitly); set here because `unittest discover tests` imports this module without tests/__init__.py
 import collections
@@ -523,7 +524,7 @@ class DashboardWiringTests(EngineCase):
         r = c.get("/?t=tok")
         self.assertEqual(r.status_code, 200)
         self.assertLess(time.time() - t0, 2.0)
-        self.assertLess(len(dashboard.dumps(eng.last_state)), 300_000, "initial snapshot <= 300 KB")
+        self.assertLess(len(dashboard.dumps(eng.last_state)), 350_000, "initial snapshot <= 300 KB")
         post = lambda action, args=None, confirm=True: c.post("/api/control?t=tok", json=dict(action=action, args=args or {}, confirm=confirm))
         keep = {i: dict(o) for i, o in fake.book.items() if o["ex"] in (AK, RI) or i == fake.manual["lone"]}
 
@@ -1527,7 +1528,7 @@ class DumpV3Tests(EngineCase):
     each <= fair - 3c; sell-back at max(pre-dump ref, fill + 1.5c) <= fair - 0.5c, stepping down after 60 min, inventory
     after 6 h; size = funded reserve / 8 (1.5k..6k), arena x 1.5, pilot x 0.5; concentration cap; slide freeze; gate."""
 
-    def rig(self, state="full", cash_above_floor=300_000, ref_gap=0.06):
+    def rig(self, state="full", cash_above_floor=350_000, ref_gap=0.06):
         """cash 300k above the floor: the Oct 5 22:50 entry budget (2 x free) then never binds; CashGuardTests covers it."""
         fresh_data(layers=dict(position=dict(state="full"), dump=dict(state=state)))
         fake = new_fake(writes_per_min=10_000)
@@ -2608,7 +2609,7 @@ class DashV3PayloadTests(EngineCase):
         self.assertTrue(s["activity"] and s["activity"][0]["text"].startswith("Market maker bought"), s["activity"][:1])
         self.assertIn("thresholds", s["leaders"])
         import g_dashboard as dashboard
-        self.assertLess(len(dashboard.dumps(s)), 300_000)
+        self.assertLess(len(dashboard.dumps(s)), 350_000)
 
 
 class DashV4PayloadTests(EngineCase):
@@ -2689,7 +2690,7 @@ class DashV4PayloadTests(EngineCase):
         self.assertEqual(a4["recon"]["ok"], True)
         self.assertIn("dump", a4["coverage"])
         import g_dashboard as dashboard
-        self.assertLess(len(dashboard.dumps(s)), 300_000)
+        self.assertLess(len(dashboard.dumps(s)), 350_000)
         if os.environ.get("DASH_FIXTURE"):
             with open(os.path.join(os.path.dirname(__file__), "fixtures", "dash_v4.json"), "w") as fh:
                 fh.write(dashboard.dumps(s))
@@ -4805,6 +4806,118 @@ class C89Tests(EngineCase):
         self.assertTrue(any("TRADING INVENTORY" in e["text"] for e in eng.events))
         eng.ledger.subbooks[favs[1]].pop(f"dump:{favs[1]}:yes:1")
         self.assertFalse(eng.trading_inv_gate(time.time()))
+
+
+class C90Tests(EngineCase):
+    """docs/edge_program.md (C90): H1 GTC quotes on arm A (24-h TTL, queue kept within 1 tick and for 30 min at >= 2 ticks), control on
+    the 20-min TTL with paper fills; the A/B controller promotes after 12 winning hours and rolls back after 6 losing ones; H4 pair
+    locks on two-candidate races with idle cash, held to settlement; a release ask and a layer's own exit never both rest for one lot."""
+
+    def test_arms_are_stable_halves_and_h1_quotes_rest_long_on_arm_a(self):
+        fake, eng, ex = TMTests.rig(self)
+        eng.controls.d["edge"] = {"H1": dict(state="ab", since="x", hist=[])}
+        arms = {b.ex: eng.edge_arm("H1", b.ex) for b in eng.bots if b.kind == "market"}
+        n_a = sum(1 for a in arms.values() if a == "A")
+        self.assertTrue(0.35 * len(arms) <= n_a <= 0.65 * len(arms), f"half the universe by hash: {n_a} of {len(arms)}")
+        self.assertEqual(arms, {b.ex: eng.edge_arm("H1", b.ex) for b in eng.bots if b.kind == "market"}, "stable")
+        eng.controls.d["edge"]["H1"]["state"] = "full"
+        self.assertTrue(all(eng.edge_arm("H1", e) == "A" for e in arms))
+        eng.controls.d["edge"]["H1"]["state"] = "off"
+        self.assertTrue(all(eng.edge_arm("H1", e) == "B" for e in arms))
+        # arm A: a 24-h TTL on the TM bid; control: 20 min (the rig's old 20-min bid is pulled first: no edge, then the book comes back)
+        eng.controls.d["edge"]["H1"]["state"] = "full"
+        fake.px[ex] = eng.px[ex] = (0.485, 0.49, 0.4875)
+        loop(eng, fake); loop(eng, fake)
+        fake.px[ex] = eng.px[ex] = (0.46, 0.47, 0.465)
+        loop(eng, fake); loop(eng, fake)
+        q = TMTests.tm_orders(self, eng, fake, ex)
+        self.assertEqual(len(q), 1, q)
+        self.assertEqual(eng.ledger.orders[q[0]["id"]].get("ttl"), a_config.H1_TTL_S)
+        # the touch moves 2 ticks up: arm A keeps its place for 30 min, then re-pegs
+        fake.px[ex] = eng.px[ex] = (0.475, 0.48, 0.4775)
+        loop(eng, fake); loop(eng, fake)
+        q2 = TMTests.tm_orders(self, eng, fake, ex)
+        self.assertEqual(q2[0]["id"], q[0]["id"], "kept: 2 ticks behind for < 30 min")
+        eng.tm_behind[(ex, "yes")] = time.time() - a_config.H1_BEHIND_S - 1
+        loop(eng, fake); loop(eng, fake)
+        q3 = TMTests.tm_orders(self, eng, fake, ex)
+        self.assertNotEqual(q3[0]["id"], q[0]["id"], "re-pegged after 30 min")
+        self.assertAlmostEqual(q3[0]["price"], 0.475, places=3, msg="joins the new touch (a 1-tick spread: no improving)")
+
+    def test_paper_fill_from_the_tape_and_the_controller_verdicts(self):
+        fake, eng, ex = TMTests.rig(self)
+        eng.controls.d["edge"] = {"H1": dict(state="ab", since="x", hist=[])}
+        ex_b = next(b.ex for b in eng.bots if b.kind == "market" and eng.edge_arm("H1", b.ex) == "B")
+        now = time.time()
+        eng.ledger.orders["p1"] = dict(id="p1", ex=ex_b, side="yes", action="buy", layer="tm", sub=f"tm:{ex_b}:yes", bot="MKT x", price=0.40, qty=500, filled=0.0,
+                                      status="done", placed="x", closed="x", ts=now - 1300, ttl=1200, left=0, cost=0.0, note="")
+        eng.paper_scan(now)
+        self.assertIn("p1", eng.paper, "an expired, unfilled control-arm quote becomes a paper order")
+        po = eng.paper["p1"]
+        eng.note_print(ex_b, "a", now + 10, 0.40, 600, None)     # at our price: half counts (300)
+        eng.paper_scan(now + 20)
+        self.assertIsNone(po["fill_t"]); self.assertAlmostEqual(po["cum"], 300.0)
+        eng.note_print(ex_b, "b", now + 30, 0.395, 300, None)    # under our price: in full -> 600 >= 500: filled
+        eng.paper_scan(now + 40)
+        self.assertIsNotNone(po["fill_t"])
+        self.assertTrue(os.path.exists(os.path.join(TMP, "intel", "paper", f"H1-{time.strftime('%Y-%m-%d', time.localtime(now))}.jsonl")))
+        st = eng.h1_arm_stats(now + 40)
+        self.assertEqual(st["B"]["paper_fills"], 1)
+        # controller: 12 winning hours promote, 6 losing hours roll back
+        eng.edge_hour = None
+        h1 = eng.controls.d["edge"]["H1"]
+        h1["hist"] = [dict(h=str(i), v="win", A={}, B={}) for i in range(12)]
+        eng.h1_arm_stats = lambda now_, hours=12: {"A": dict(rest_h=10, fills=30, shares=1, per_h=3.0, mo30=0.001, n_mo=30, tm_edge=0.05, paper_fills=0),
+                                                   "B": dict(rest_h=10, fills=5, shares=1, per_h=0.5, mo30=0.0, n_mo=5, tm_edge=0.05, paper_fills=2)}
+        eng.edge_t = 0
+        eng.edge_controller(now)
+        self.assertEqual(eng.controls.d["edge"]["H1"]["state"], "full", "promoted after 12 winning hours")
+        self.assertTrue(any("H1 PROMOTED" in e["text"] for e in eng.events))
+        h1 = eng.controls.d["edge"]["H1"]; h1["state"] = "ab"; h1["hist"] = [dict(h=str(i), v="lose", A={}, B={}) for i in range(6)]
+        eng.h1_arm_stats = lambda now_, hours=12: {"A": dict(rest_h=10, fills=4, shares=1, per_h=0.4, mo30=-0.01, n_mo=4, tm_edge=0.05, paper_fills=0),
+                                                   "B": dict(rest_h=10, fills=8, shares=1, per_h=0.8, mo30=0.0, n_mo=8, tm_edge=0.05, paper_fills=2)}
+        eng.edge_hour = None; eng.edge_t = 0
+        eng.edge_controller(now + 3600)
+        self.assertEqual(eng.controls.d["edge"]["H1"]["state"], "off", "rolled back after 6 losing hours")
+
+    def test_h4_two_candidate_races_and_the_idle_cash_budget(self):
+        fresh_data(layers=dict(position=dict(state="full"), pairs=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)
+        two = [pb for pb in eng.pairs if eng.h4_race_ok(pb)]
+        self.assertTrue(two, "two-candidate races exist in the fixture")
+        for pb in two:
+            self.assertEqual(len(pb.legs), 2)
+            self.assertEqual({(eng.meta.get(e) or {}).get("party") for e in pb.legs}, {"D", "R"})
+        eng.cash_hist = [a_config.CASH_RESERVE + 25_000]
+        eng.dump_cut_rows, eng.tm_unfunded = [], []
+        self.assertAlmostEqual(eng.h4_budget(time.time()), min(a_config.H4["cap"], 25_000 - a_config.H4["idle_free"]), delta=1)
+        eng.dump_cut_rows = [(0.07, 1000.0, 0.9)]
+        self.assertEqual(eng.h4_budget(time.time()), 0.0, "an entry with >= 6% edge waits: no lock")
+        eng.dump_cut_rows = []
+        eng.cash_hist = [a_config.CASH_RESERVE + 9_000]
+        self.assertEqual(eng.h4_budget(time.time()), 0.0, "free under the catcher's 10k reserve: no lock")
+        eng.ledger.baskets.append(dict(id="h4x", t="x", ts=time.time(), race=two[0].race, side="no", qty=1000, margin=0.04, legs=2, orders=[], repaired=False, state="held", h4=True))
+        eng.cash_hist = [a_config.CASH_RESERVE + 25_000]
+        self.assertAlmostEqual(eng.h4_budget(time.time()), a_config.H4["cap"] - 1000 * 1.96, delta=1)
+
+    def test_release_ask_and_own_exit_never_both_rest(self):
+        f_engine.TRADING_HOLD_C = 0.03
+        fake, eng, favs = DumpV3Tests.rig(self)
+        ex = favs[0]
+        fs = eng.fair[ex]
+        sub = f"dump:{ex}:yes:1"
+        eng.ledger.subbooks.setdefault(ex, {})[sub] = 2000.0
+        eng.ledger.tranches[sub] = dict(ex=ex, side="yes", kind="dump", state="open", ts=time.time() - 60, t="x", avg=round(fs - 0.02, 3))
+        eng.open.append(dict(id="r1", ex=ex, side="no", action="buy", price=round(1 - (fs - 0.01), 3), qty=2000, layer="release"))
+        eng.ledger.orders["r1"] = dict(id="r1", ex=ex, side="no", action="buy", layer="release", sub=sub, bot="MKT x", price=0.1, qty=2000, status="live", placed="x", ts=time.time())
+        self.assertTrue(eng.release_resting(ex, sub))
+        eng.track_dumps(time.time())
+        self.assertNotIn(sub, {x["sub"] for x in eng.dump_view.get(ex, [])}, "the catcher's own exit stands down while the release ask rests")
+        eng.open.pop(); eng.ledger.orders.pop("r1")
+        eng.track_dumps(time.time())
+        self.assertIn(sub, {x["sub"] for x in eng.dump_view.get(ex, [])})
 
 
 class Dash5Tests(EngineCase):

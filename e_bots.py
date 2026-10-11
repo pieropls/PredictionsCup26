@@ -268,8 +268,8 @@ class MarketBot:
             have, close = rel["side"], ("no" if rel["side"] == "yes" else "yes")
             px = round(1 - rel["px"], 3)
             for sub, q in rel["subs"].items():
-                out.append(want(close, "buy", px, q, px - 0.005, px, 2 * QTY_TOL, "release", qmax=q, sub=sub, ttl=RECYCLE_TAKE_TTL_S,
-                                reduce=True))
+                out.append(want(close, "buy", px, q, px - 0.005, px + 0.005, 2 * QTY_TOL, "release", qmax=q, sub=sub, ttl=RECYCLE_TAKE_TTL_S,
+                                reduce=True))                   # C90: a resting ask within a tick of the touch keeps its queue place (no re-peg churn)
                 if rel.get("rule0_margin") is not None:
                     out[-1]["rule0_margin"] = rel["rule0_margin"]   # the cash rebuild's exception (Piero 23:00)
             subs = {k2: (v - (rel["subs"].get(k2, 0) if v > 0 else -rel["subs"].get(k2, 0))) for k2, v in subs.items()}

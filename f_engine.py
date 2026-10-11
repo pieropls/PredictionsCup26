@@ -12,6 +12,8 @@ Every loop:
   F5  record    data/ledger.json, data/state.json, data/dashboard.html, data/pnl.csv
 """
 import collections
+import hashlib
+import itertools
 import csv
 import fcntl
 from concurrent.futures import ThreadPoolExecutor
@@ -71,6 +73,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
+                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H4,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -413,6 +416,7 @@ class Engine:
         self.pnl_alert_t, self.trims_seen, self.trim_t, self.book_scan_t, self.book_scan_rows, self.reads_before, self.reads_after_t = {}, 0, None, 0.0, [], None, None   # C88
         self.core_t, self.core_set, self.scoreboard_t, self.scoreboard = 0.0, set(), 0.0, {}   # C88: the two books and the scoreboard
         self.trading_inv_stopped = None                     # C89: the 30k trading-inventory stop
+        self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
         self.prints, self.print_ids, self.sm_regime, self.sm_regime_t, self.sm_exits_only, self.sm_tune_mtime = {}, {}, {}, 0.0, None, None   # C87: print ring, live regimes, loss stop, re-tune
@@ -464,8 +468,9 @@ class Engine:
         try:
             self.core_set = {(str(m["ex"]), m["sub"]) for m in ((self.controls.d.get("core") or {}).get("lots") or {}).values()}   # C88: the books from the last run
             self.c88_migration(time.time())
+            self.c90_migration(time.time())
         except Exception as err:
-            print(f"C88 migration: {err!r}")
+            print(f"C88 / C90 migration: {err!r}")
         try:
             self.band_credit_migration()
         except Exception as err:
@@ -1821,7 +1826,7 @@ class Engine:
             msg = f"ALERT D5: bot P&L at fair {bot_24h:+,.0f} over 24 h (< {-LOSS_STOP:+,}) — alert only, no pause (Piero 01:55)"
             self.alerts.append(f"{time.strftime('%H:%M')} {msg}"); self.event("ALERT", msg)
         self.hard_pauses(now)
-        for fn in (self.core_update, self.scoreboard_update):
+        for fn in (self.core_update, self.scoreboard_update, self.paper_scan, self.edge_controller):
             try:
                 fn(now)
             except Exception as err:
@@ -3142,7 +3147,7 @@ class Engine:
             live.append((sub, t, ex, q, avg, self.side_fair(ex, t["side"])))
         held = self.hold_when_idle(live, now) if RULES_V2 else set()
         for sub, t, ex, q, avg, fs in live:
-            if sub in held:
+            if sub in held or self.release_resting(ex, sub):   # C90: a release ask already covers the lot -> no second exit (the I2 trims of Oct 10-11)
                 if not t.get("held"):
                     t["held"] = now
                     self.event("DUMP", f"{self.name(ex)}: {sub} {abs(q):,.0f} {t['side'].upper()} at {avg:.3f} is {(fs - avg) * 100:.1f}c under fair and cash is idle: held, not offered (day 11 §1.2)")
@@ -3309,6 +3314,198 @@ class Engine:
             else:
                 for ch in changes:
                     self.event("CORE", ch); self.night.line("CORE " + ch)
+
+    # ------------------------------------------------------------------------------------------------ C90: docs/edge_program.md
+    def edge_state(self, h):
+        return (self.controls.d.get("edge") or {}).get(h) or {}
+
+    def edge_arm(self, h, ex):
+        """'A' (the hypothesis) or 'B' (control) for a market: arm A = half the universe by a stable hash while the hypothesis is in
+        its A/B, every market once promoted, none once rolled back / off."""
+        st = self.edge_state(h).get("state", "off")
+        if st == "full":
+            return "A"
+        if st != "ab":
+            return "B"
+        return "A" if int(hashlib.md5(str(ex).encode()).hexdigest(), 16) % 2 == 0 else "B"
+
+    def h1_on(self, ex):
+        return self.edge_arm("H1", ex) == "A"
+
+    def release_resting(self, ex, sub):
+        """True when a release / rotation ask already rests for this sub-book (the layer's own exit must not double it)."""
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"]) or {}
+            if o["ex"] == ex and rec.get("sub") == sub and rec.get("layer") == "release" and o["id"] not in self.ex.cancelling:
+                return True
+        return False
+
+    def own_exit_resting(self, ex, sub):
+        """True when the sub-book's own layer (dumpexit / tmexit / smexit / fmexit ...) already rests an exit for it."""
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"]) or {}
+            if o["ex"] == ex and rec.get("sub") == sub and rec.get("layer") in self.REDUCING and rec.get("layer") != "release" and o["id"] not in self.ex.cancelling:
+                return True
+        return False
+
+    def h1_keep(self, which, ex, side, behind_ticks, now):
+        """H1 (arm A): a quote keeps its queue place while the touch is < 2 ticks away, and for 30 min once it is >= 2 ticks away;
+        only then is it re-pegged. -> True = keep the resting order."""
+        d = self.tm_behind if which == "tm" else self.sm_behind
+        key = (ex, side)
+        if behind_ticks < H1_BEHIND_TICKS:
+            d.pop(key, None)
+            return True
+        t0 = d.setdefault(key, now)
+        return now - t0 < H1_BEHIND_S
+
+    def paper_scan(self, now):
+        """Control-arm TM / SM entries that expired unfilled become paper orders (as if they had rested, H1 §0.3); each is followed
+        against the tape ring for 12 h: prints under our price count in full, prints at our price for half (the queue); when the
+        counted volume reaches the order's size it is a paper fill, with its 30-min mark-out written 30 min later.
+        -> data/intel/paper/H1-<day>.jsonl."""
+        for oid, o in list(self.ledger.orders.items()):
+            if oid in self.paper_seen or o.get("layer") not in ("tm", "sm") or o.get("status") != "done" or o.get("action") != "buy":
+                continue
+            left = float(o.get("qty") or 0) - float(o.get("filled") or 0)
+            ts, ttl = float(o.get("ts") or 0), float(o.get("ttl") or TM_TTL_S)
+            if left < MIN_QTY or not ts or now - ts < 0.8 * ttl or now - ts > ttl + 900:
+                continue
+            self.paper_seen.add(oid)
+            if self.edge_arm("H1", o["ex"]) != "B":
+                continue                                    # arm A's quotes rest for real
+            self.paper[oid] = dict(h="H1", ex=o["ex"], side=o["side"], px=float(o["price"]), qty=left, placed=ts, expired=now, last=now, cum=0.0,
+                                   layer=o["layer"], fill_t=None, mo30=None, fair=self.side_fair(o["ex"], o["side"]))
+        if len(self.paper_seen) > 20000:
+            self.paper_seen = set(list(self.paper_seen)[-10000:])
+        day = time.strftime("%Y-%m-%d", time.localtime(now))
+        for oid, po in list(self.paper.items()):
+            if po["fill_t"] is None:
+                if now - po["expired"] > PAPER_MAX_AGE_S:
+                    self.intel_write(f"paper/H1-{day}.jsonl", dict(po, oid=oid, event="unfilled", t=now))
+                    self.paper.pop(oid)
+                    continue
+                for ts_, p, q, _ in list(self.prints.get(po["ex"], ())):
+                    if ts_ <= po["last"]:
+                        continue
+                    yes_px = po["px"] if po["side"] == "yes" else round(1 - po["px"], 3)
+                    better = (p < yes_px - 1e-9) if po["side"] == "yes" else (p > yes_px + 1e-9)
+                    if better:
+                        po["cum"] += q
+                    elif abs(p - yes_px) < 1e-9:
+                        po["cum"] += PAPER_HALF_AT_PRICE * q
+                    if po["cum"] >= po["qty"]:
+                        po["fill_t"] = ts_
+                        self.intel_write(f"paper/H1-{day}.jsonl", dict(po, oid=oid, event="fill", t=now, rest_h=round((ts_ - po["placed"]) / 3600, 2)))
+                        break
+                po["last"] = now
+            elif po["mo30"] is None and now - po["fill_t"] >= 1800:
+                mid = self.side_mid(po["ex"], po["side"])
+                po["mo30"] = None if mid is None else round(mid - po["px"], 4)
+                self.intel_write(f"paper/H1-{day}.jsonl", dict(po, oid=oid, event="mo30", t=now))
+                self.paper.pop(oid)
+
+    def h1_arm_stats(self, now, hours=12):
+        """Per arm over the last `hours`: resting-hours of TM / SM entry quotes, fills, fills per resting-hour, 30-min mark-out, TM edge
+        at fill; control also gets its paper fills per resting-hour."""
+        cut = now - hours * 3600
+        st = {a: dict(rest_h=0.0, fills=0, shares=0.0, mo=[], edge=[], paper_fills=0, paper_rest_h=0.0) for a in ("A", "B")}
+        for o in self.ledger.orders.values():
+            if o.get("layer") not in ("tm", "sm") or o.get("action") != "buy":
+                continue
+            ts = float(o.get("ts") or 0)
+            if not ts:
+                continue
+            end = now
+            if o.get("status") in ("done", "cancelled", "rejected") and o.get("closed"):
+                try:
+                    end = time.mktime(time.strptime(o["closed"], "%Y-%m-%d %H:%M:%S"))
+                except ValueError:
+                    pass
+            lo, hi = max(ts, cut), min(end, now)
+            if hi > lo:
+                st[self.edge_arm("H1", o["ex"])]["rest_h"] += (hi - lo) / 3600
+        for f in self.fills_since(cut):
+            if f.get("layer") in ("tm", "sm") and f.get("action") == "buy":
+                a = st[self.edge_arm("H1", f["ex"])]
+                a["fills"] += 1; a["shares"] += f["qty"]
+                if f.get("mo30") is not None:
+                    a["mo"].append(f["mo30"])
+                if f.get("layer") == "tm" and f.get("edge") is not None:
+                    a["edge"].append(f["edge"])
+        for po in self.paper.values():
+            if po.get("fill_t") and po["fill_t"] >= cut:
+                st["B"]["paper_fills"] += 1
+        out = {}
+        for a, v in st.items():
+            out[a] = dict(rest_h=round(v["rest_h"], 1), fills=v["fills"], shares=round(v["shares"]), per_h=round(v["fills"] / v["rest_h"], 3) if v["rest_h"] > 0 else None,
+                          mo30=round(sum(v["mo"]) / len(v["mo"]), 4) if v["mo"] else None, n_mo=len(v["mo"]),
+                          tm_edge=round(sum(v["edge"]) / len(v["edge"]), 4) if v["edge"] else None, paper_fills=v["paper_fills"])
+        return out
+
+    def edge_controller(self, now):
+        """Every 10 min: the H1 A/B verdict for the hour (A wins when fills per resting-hour >= 3x control, 30-min mark-out >= 0, TM edge
+        at fill >= 4c, on >= 10 fills); promotion to every market after >= 12 consecutive winning hours, automatic rollback (off) after
+        6 consecutive losing hours; an 'H*' RUN_LOG line at the top of each hour (H1, H4, and H2 / H3 when live)."""
+        if now - self.edge_t < 600:
+            return
+        self.edge_t = now
+        c = self.controls
+        edge = c.d.setdefault("edge", {})
+        h1 = edge.setdefault("H1", dict(state="off", since=stamp(), hist=[]))
+        st = self.h1_arm_stats(now)
+        A, B = st["A"], st["B"]
+        verdict = "n/a"
+        if h1.get("state") == "ab" and A["fills"] + B["fills"] >= 10 and A["per_h"] is not None and B["per_h"] is not None:
+            win = (A["per_h"] >= H1_GATE["fill_rate_x"] * max(B["per_h"], 1e-6) and (A["mo30"] is None or A["mo30"] >= H1_GATE["mo30_min"] - 1e-9)
+                   and (A["tm_edge"] is None or A["tm_edge"] >= H1_GATE["tm_edge_min"] - 1e-9))
+            lose = A["per_h"] < B["per_h"] or (A["mo30"] is not None and A["mo30"] < -0.005)
+            verdict = "win" if win else "lose" if lose else "tie"
+        hour = time.strftime("%Y-%m-%d %H", time.localtime(now))
+        changed = False
+        if hour != self.edge_hour:
+            self.edge_hour = hour
+            if h1.get("state") in ("ab", "full"):
+                h1.setdefault("hist", []).append(dict(h=hour, v=verdict, A=A, B=B))
+                h1["hist"] = h1["hist"][-48:]
+                changed = True
+                hist = [x["v"] for x in h1["hist"]]
+                if h1["state"] == "ab" and len(hist) >= EDGE_PROMOTE_H and all(v == "win" for v in hist[-EDGE_PROMOTE_H:]):
+                    h1.update(state="full", promoted=stamp())
+                    msg = f"H1 PROMOTED to every market after {EDGE_PROMOTE_H} winning hours: A {A} vs control {B}"
+                    self.event("CONTROL", msg); self.night.line(msg); self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+                elif h1["state"] in ("ab", "full") and len(hist) >= EDGE_ROLLBACK_H and all(v == "lose" for v in hist[-EDGE_ROLLBACK_H:]):
+                    h1.update(state="off", rolled_back=stamp())
+                    msg = f"H1 ROLLED BACK (off) after {EDGE_ROLLBACK_H} losing hours: A {A} vs control {B}"
+                    self.event("CONTROL", msg); self.night.line(msg); self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+            fmt = lambda v: (f"{v['fills']} fills / {v['rest_h']:.0f} resting-h = {v['per_h'] if v['per_h'] is not None else 'n/a'}/h, mark-out 30m "
+                             f"{'n/a' if v['mo30'] is None else f'{v['mo30'] * 100:+.2f}c'} (n {v['n_mo']}), TM edge {'n/a' if v['tm_edge'] is None else f'{v['tm_edge'] * 100:.1f}c'}")
+            self.night.line(f"H1 ({h1.get('state')}) last 12 h — A (GTC): {fmt(A)}; control: {fmt(B)}, paper fills as-if-GTC {B['paper_fills']}; verdict this hour: {verdict}; "
+                            f"hours won/lost in a row: {sum(1 for _ in itertools.takewhile(lambda v: v == 'win', reversed([x['v'] for x in h1.get('hist', [])])))}/"
+                            f"{sum(1 for _ in itertools.takewhile(lambda v: v == 'lose', reversed([x['v'] for x in h1.get('hist', [])])))}")
+            h4 = [bk for bk in self.ledger.baskets if bk.get("h4")]
+            self.night.line(f"H4 pair locks: {len(h4)} sets, {sum(bk['qty'] for bk in h4):,} per leg, locked {sum(bk['qty'] * bk['margin'] for bk in h4):,.0f} at settlement, "
+                            f"{self.h4_used:,.0f} of {H4['cap']:,} used" if H4.get("on") else "H4 off")
+        if changed:
+            with c.lock:
+                c.save()
+
+    def c90_migration(self, now):
+        """Once (C90, docs/edge_program.md): H1 starts as a live A/B (arm A = half the universe by hash); H4 on; logged."""
+        c = self.controls
+        d = c.d.setdefault("c90", {})
+        if d.get("done") or os.environ.get("SIG_C90", "1") != "1":
+            return
+        with c.lock:
+            c.d.setdefault("edge", {})["H1"] = dict(state="ab", since=stamp(), hist=[])
+            d.update(done=stamp())
+            c.save()
+        n_a = sum(1 for b in self.bots if b.kind == "market" and self.edge_arm("H1", b.ex) == "A")
+        msg = (f"C90 (edge program): H1 GTC quotes live as an A/B — arm A = {n_a} markets by hash (TM / SM entries with a 24-h TTL, kept within 1 tick of the touch and for 30 min at >= 2 ticks; "
+               f"control = the rest on the 20-min TTL, with paper fills as if they had rested); gate: fills per resting-hour >= 3x control, 30-min mark-out >= 0, TM edge >= 4c; promote after "
+               f"{EDGE_PROMOTE_H} winning hours, roll back after {EDGE_ROLLBACK_H} losing hours. H4 pair locks on: both NO at total cost <= 0.96 on two-candidate races, <= {H4['per_race']:,} per race, "
+               f"<= {H4['cap']:,} in all, only with free > {H4['idle_free']:,} and no entry >= {H4['waiting_edge']:.0%} waiting; held to settlement. Also: a release ask and a layer's own exit never both rest for one lot (the I2 trims of Oct 10-11); the cash seller's ask keeps its place within a tick.")
+        self.event("CONTROL", msg); self.night.line(msg)
 
     def book_scan(self, now):
         """C88 (reads 3a): every 2 min, every book from the feed (zero REST reads): gap of the SIG mid vs fair, depth at the touch
@@ -5852,8 +6049,8 @@ class Engine:
             sub = f"fm:{ex}"
             held = "yes" if inv > 0 else "no"
             avg = (self.ledger.tranches.get(sub) or {}).get("avg")
-            if not avg or self.lot_policy(ex, held, sub, avg, self.side_fair(ex, held)) != "exit":
-                continue                                    # C88: a core lot or a lot >= 3c under fair is held
+            if not avg or self.lot_policy(ex, held, sub, avg, self.side_fair(ex, held)) != "exit" or self.release_resting(ex, sub):
+                continue                                    # C88: a core lot or a lot >= 3c under fair is held; C90: or a release ask covers it
             floor_ = max(float(avg), max((l[1] for l in self.lots(ex, held, sub) if l[2] == "engine" and l[0] > 0), default=0.0)) + RULE0_MARGIN
             pxs = self.px.get(ex)
             ask_s = bots.side_book(pxs[0], pxs[1], held)[1] if pxs and pxs[0] is not None and pxs[1] is not None else None
@@ -6202,11 +6399,13 @@ class Engine:
                 continue
             if cur is not None:
                 at_touch = cur["price"] >= best - (TM_REPEG_TICKS - 1) * TICK - 1e-9 and cur["price"] <= p + 1e-9
-                if (at_touch and fs - cur["price"] >= e_min - 1e-9) or writes < 2:   # queue priority kept; or no write budget for a re-peg
-                    plan.setdefault(ex, []).append(dict(side=side, px=cur["price"], qty=int(cur["qty"]), sub=sub, ttl=TM_TTL_S))
+                behind = int(round((best - cur["price"]) / TICK))
+                gtc_keep = self.h1_on(ex) and cur["price"] <= p + 1e-9 and fs - cur["price"] >= e_min - 1e-9 and self.h1_keep("tm", ex, side, behind, now)   # H1: keep the place up to 30 min at >= 2 ticks behind
+                if (at_touch and fs - cur["price"] >= e_min - 1e-9) or gtc_keep or writes < 2:   # queue priority kept; or no write budget for a re-peg
+                    plan.setdefault(ex, []).append(dict(side=side, px=cur["price"], qty=int(cur["qty"]), sub=sub, ttl=H1_TTL_S if self.h1_on(ex) else TM_TTL_S))
                     rest_used += cur["qty"] * cur["price"]
                 else:
-                    plan.setdefault(ex, []).append(dict(side=side, px=p, qty=int(cur["qty"]), sub=sub, ttl=TM_TTL_S))
+                    plan.setdefault(ex, []).append(dict(side=side, px=p, qty=int(cur["qty"]), sub=sub, ttl=H1_TTL_S if self.h1_on(ex) else TM_TTL_S))
                     rest_used += cur["qty"] * p
                     writes -= 2
                 quoted += 1
@@ -6232,7 +6431,7 @@ class Engine:
                     continue                                # the write budget is spent: new sides wait
                 writes -= 1
                 batched = True                              # placements of one loop batch into one write
-            plan.setdefault(ex, []).append(dict(side=side, px=p, qty=q, sub=sub, ttl=TM_TTL_S))
+            plan.setdefault(ex, []).append(dict(side=side, px=p, qty=q, sub=sub, ttl=H1_TTL_S if self.h1_on(ex) else TM_TTL_S))   # H1 arm A: GTC (no 20-min expiry)
             cost_all += q * p
             rest_used += q * p
             quoted += 1
@@ -6262,7 +6461,7 @@ class Engine:
                 live.append((sub, t, ex, q, avg, self.side_fair(ex, side)))
         held = self.hold_when_idle(live, now, merge=True) if RULES_V2 else set()
         for sub, t, ex, q, avg, fs in live:
-            if sub in held:
+            if sub in held or self.release_resting(ex, sub):   # C90: a release ask already covers the lot -> no second exit
                 if not t.get("held"):
                     t["held"] = now
                     self.event("TM", f"TM {self.name(ex)}: {abs(q):,.0f} {t['side'].upper()} at {avg:.3f} is {(fs - avg) * 100:.1f}c under fair and cash is idle: held, not offered")
@@ -6422,8 +6621,8 @@ class Engine:
                     is_forced = True
                 elif not self.rotation_on:
                     continue
-                elif sub.startswith(self.OWN_EXIT_SUBS) and pol != "hold":
-                    continue                                # its own layer's exit already rests at max(entry + 0.5c, touch)
+                elif sub.startswith(self.OWN_EXIT_SUBS) and (pol != "hold" or self.own_exit_resting(ex, sub)):
+                    continue                                # its own layer's exit already rests (or will) at max(entry + 0.5c, touch): never a second exit (C90)
                 take = self.rule0_allowed(ex, side, sub, px, int(abs(v)))
                 if take >= MIN_QTY:
                     split[sub] = take
@@ -6908,7 +7107,7 @@ class Engine:
             sub = f"sm:{ex}"
             ring = self.ring_window(now)                     # (1c) in a ring window only the reducing sides quote
             # the bid (buy YES): an exit while short (sells the NO at 1 - bid >= entry + 0.5c), else an entry
-            if short_ and avg and self.lot_policy(ex, "no", sub, avg, self.side_fair(ex, "no")) == "exit":
+            if short_ and avg and self.lot_policy(ex, "no", sub, avg, self.side_fair(ex, "no")) == "exit" and not self.release_resting(ex, sub):
                 hi = max(float(avg), max((l[1] for l in self.lots(ex, "no", sub) if l[2] == "engine" and l[0] > 0), default=0.0))
                 p = min(bid_px, round(1 - (hi + RULE0_MARGIN), 3))   # rule 0 on every NO lot
                 if MB_MIN_PX <= p < ask_px:
@@ -6917,9 +7116,9 @@ class Engine:
                 room_sh = cap_sh - max(0.0, inv)
                 allowed = room_sh >= SM_MIN_QTY and (yes_cheap or inv < clip - 1e-9) and cost_all + q_bid * bid_px <= sz["cap"] + 1e-6 and not glide and not ring and entries_ok
                 if allowed and q_bid >= SM_MIN_QTY and MB_MIN_PX <= bid_px < ask_px:
-                    quotes.append(dict(side="yes", px=bid_px, qty=int(min(q_bid, room_sh)), sub=sub, ttl=SM_TTL_S))
+                    quotes.append(dict(side="yes", px=bid_px, qty=int(min(q_bid, room_sh)), sub=sub, ttl=H1_TTL_S if self.h1_on(ex) else SM_TTL_S))
             # the ask (sell YES = buy NO at 1 - ask): an exit while long (>= entry + 0.5c), else an entry
-            if long_ and avg and self.lot_policy(ex, "yes", sub, avg, self.side_fair(ex, "yes")) == "exit":
+            if long_ and avg and self.lot_policy(ex, "yes", sub, avg, self.side_fair(ex, "yes")) == "exit" and not self.release_resting(ex, sub):
                 hi = max(float(avg), max((l[1] for l in self.lots(ex, "yes", sub) if l[2] == "engine" and l[0] > 0), default=0.0))
                 p = max(ask_px, round(hi + RULE0_MARGIN, 3))   # never below any held lot's entry + 0.5c
                 if p <= MB_MAX_PX and p > bid_px:
@@ -6928,14 +7127,16 @@ class Engine:
                 room_sh = cap_sh - max(0.0, -inv)
                 allowed = room_sh >= SM_MIN_QTY and (no_cheap or -inv < clip - 1e-9) and cost_all + q_ask * (1 - ask_px) <= sz["cap"] + 1e-6 and not glide and not ring and entries_ok
                 if allowed and q_ask >= SM_MIN_QTY and ask_px <= MB_MAX_PX and ask_px > bid_px:
-                    quotes.append(dict(side="no", px=round(1 - ask_px, 3), qty=int(min(q_ask, room_sh)), sub=sub, ttl=SM_TTL_S))
+                    quotes.append(dict(side="no", px=round(1 - ask_px, 3), qty=int(min(q_ask, room_sh)), sub=sub, ttl=H1_TTL_S if self.h1_on(ex) else SM_TTL_S))
             # keep the queue: a resting quote within one tick of its target keeps its price (no write); >= 2 ticks away it is re-pegged (2 writes)
             out = []
             for q in quotes:
                 cur = existing.get((ex, q["side"]))
                 if cur is not None:
                     crossing = (cur["price"] >= ask - 1e-9) if q["side"] == "yes" else (round(1 - cur["price"], 3) <= bid + 1e-9)
-                    if ((cur["price"] <= q["px"] + 1e-9 and cur["price"] >= q["px"] - (repeg - 1) * TICK - 1e-9) or writes < 2) and not crossing:
+                    behind = int(round((q["px"] - cur["price"]) / TICK))
+                    gtc_keep = self.h1_on(ex) and not q.get("reduce") and cur["price"] <= q["px"] + 1e-9 and self.h1_keep("sm", ex, q["side"], behind, now)   # H1 arm A
+                    if ((cur["price"] <= q["px"] + 1e-9 and cur["price"] >= q["px"] - (repeg - 1) * TICK - 1e-9) or gtc_keep or writes < 2) and not crossing:
                         q = dict(q, px=cur["price"], qty=int(cur["qty"]))   # at the touch or one tick behind: keep the queue place (no write)
                         if q.get("reduce"):
                             q["sell_px"] = round(1 - cur["price"], 3)        # the resting order is the complement buy; the sale price is 1 - it
@@ -7478,8 +7679,8 @@ class Engine:
         start, shots = budget, 0
         by_race = {pb.race: pb for pb in self.pairs}
         for bk in self.ledger.baskets:                          # early unwind
-            if bk.get("state", "held") != "held" or bk["race"] not in by_race or self.ex.admit() < 1:
-                continue
+            if bk.get("state", "held") != "held" or bk["race"] not in by_race or self.ex.admit() < 1 or bk.get("h4"):
+                continue                                    # H4 locks are held to settlement
             m = self.ledger.matched(bk)
             if m < MIN_QTY:
                 continue
@@ -7528,9 +7729,11 @@ class Engine:
             for e_, side in pb.screen(self.px, self.fair, PAIR_EDGE, PAIR_THIRD_PARTY):
                 if now - pb.last_shot >= PAIR_COOLDOWN_S and not any(self.ex.is_frozen(ex) for ex in pb.legs):
                     cands.append((e_, side, pb))
+        h4_budget = self.h4_budget(now) if H4.get("on") else 0.0
         for e_, side, pb in sorted(cands, key=lambda c: -c[0]):
             if shots >= PAIR_MAX_SHOTS or self.ex.admit() < 2 or not api.spare_reads(20):
                 break
+            h4_set = H4.get("on") and side == "no" and self.h4_race_ok(pb) and e_ >= H4["edge"] - 1e-9 and h4_budget > 0
             pb.last_shot = now
             books, key = {}, "bids" if side == "no" else "asks"
             try:                                                                # a bad read skips this pair, not the loop
@@ -7547,7 +7750,12 @@ class Engine:
             for ex, (bids, asks) in zip(pb.legs, fetched):
                 lv = bids if side == "no" else asks
                 books[ex] = [(p, q - own.get((ex, key, round(p, 3)), 0)) for p, q in lv if q - own.get((ex, key, round(p, 3)), 0) > 0]
-            orders, qty, margin = pb.size(side, books, self.fair, PAIR_EDGE, PAIR_THIRD_PARTY, PAIR_MAX_QTY)
+            if h4_set:
+                race_used = sum(bk["qty"] * (bk["legs"] - bk["margin"]) for bk in self.ledger.baskets if bk.get("h4") and bk["race"] == pb.race)
+                room = min(h4_budget, H4["per_race"] - race_used)
+                orders, qty, margin = pb.size(side, books, self.fair, H4["edge"], PAIR_THIRD_PARTY, int(max(0, room) / 0.96))
+            else:
+                orders, qty, margin = pb.size(side, books, self.fair, PAIR_EDGE, PAIR_THIRD_PARTY, PAIR_MAX_QTY)
             if not orders:
                 continue
             fairs = [self.side_fair(o[0], side) for o in orders]
@@ -7559,16 +7767,19 @@ class Engine:
                                    f"{sum(f - o[3] for f, o in zip(fairs, orders)) * 100:+.1f}c (A12.1)")
                 continue
             cost = sum(o[3] * o[4] for o in orders)
-            if cost > budget or qty * margin < PAIR_MIN_LOCK:
+            if (cost > budget and not h4_set) or (h4_set and cost > h4_budget) or qty * margin < PAIR_MIN_LOCK:
                 continue
+            if h4_set:
+                h4_budget -= cost
+                self.h4_used += cost
             set_id = f"{pb.race}:{int(now)}:{uuid.uuid4().hex[:6]}"                 # unique even for two sets a second
 
-            def recorded(results, pb=pb, side=side, qty=qty, margin=margin, n=len(orders), set_id=set_id, ts=now):
+            def recorded(results, pb=pb, side=side, qty=qty, margin=margin, n=len(orders), set_id=set_id, ts=now, h4_set=h4_set):
                 ids = [str(d.get("orderId")) for _, _, ok, d in results if ok and d.get("orderId") is not None]
                 if len(ids) == n or api.DRY_RUN:            # the set exists once SIG acked every leg
                     with self.ledger.lock:
                         self.ledger.baskets.append(dict(id=set_id, t=stamp(), ts=ts, race=pb.race, side=side, qty=qty,
-                                                        margin=round(margin, 4), legs=n, orders=ids, repaired=False, state="held"))
+                                                        margin=round(margin, 4), legs=n, orders=ids, repaired=False, state="held", h4=bool(h4_set)))
             if self.ex.place([(pb.name, f"pairset:{set_id}", "set", o) for o in orders], ttl_s=PAIR_TTL_S, atomic=True,
                              on_done=recorded):
                 budget -= cost
@@ -7577,6 +7788,25 @@ class Engine:
                                    f"{' + '.join(f'{o[3]:.3f}' for o in orders)} -> locks {margin * 100:.1f}c/set "
                                    f"(~{qty * margin:,.0f} SIG once every leg fills)")
         return shots, start - budget
+
+    def h4_race_ok(self, pb):
+        """H4: a two-candidate race (D and R only, no independent / third candidate listed)."""
+        if len(pb.legs) != 2:
+            return False
+        parties = {str((self.meta.get(ex) or {}).get("party") or "") for ex in pb.legs}
+        if parties != {"D", "R"}:
+            return False
+        race = (self.meta.get(pb.legs[0]) or {}).get("race")
+        return not any(m.get("race") == race and str(m.get("party") or "") not in ("D", "R") for m in self.meta.values())
+
+    def h4_budget(self, now):
+        """H4: cash for pair locks = min(10k cap - used, free - the catcher's 10k reserve), and 0 while an entry with >= 6% edge waits."""
+        used = sum(bk["qty"] * (bk["legs"] - bk["margin"]) for bk in self.ledger.baskets if bk.get("h4") and bk.get("state", "held") == "held")
+        self.h4_used = used
+        waiting = max([e for e, _, _ in self.dump_cut_rows] + [e for e, _, _ in self.tm_unfunded] + [0.0])
+        if waiting >= H4["waiting_edge"] - 1e-9:
+            return 0.0
+        return max(0.0, min(H4["cap"] - used, self.free_cash() - H4["idle_free"]))
 
     def settle_unwind(self, bk):
         """An early unwind is placed atomically but its legs fill independently. Once its orders are gone: what is left
