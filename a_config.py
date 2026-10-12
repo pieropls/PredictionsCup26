@@ -315,6 +315,8 @@ H1_BEHIND_TICKS, H1_BEHIND_S = 2, 1800   # cancel / re-peg an arm-A quote only o
 H1_GATE = dict(fill_rate_x=3.0, mo30_min=0.0, tm_edge_min=0.04)   # gate: fills per resting-hour >= 3x control; 30-min mark-out >= 0; TM edge at fill >= 4c
 PAPER_HALF_AT_PRICE = 0.5       # paper fills: half of the volume printed at our price counts against our queue (edge_program §0.3)
 PAPER_MAX_AGE_S = 12 * 3600     # a paper order is followed for 12 h after its real expiry
+H1_SM_UNIVERSE = ['896', '1066', '995', '1067', '894', '884', '841', '1001', '900', '920']   # H5 (docs/edge_h5_h4.md): the top 10 bounce markets by time-to-front (1.3-2.8 h); arm A = ranks 1/3/5/7/9
+H3 = dict(swap_c=0.03, converged_ret=0.02)   # H3 (arm A): a trading lot is sold only for a waiting entry with >= 3c more edge, sized to that entry's cost; converged lots (< 2% left) first
 H4 = dict(on=True, edge=0.04, per_race=5_000, cap=10_000, idle_free=10_000, waiting_edge=0.06)   # pair locks with idle cash: both NO at total cost <= 0.96 on races with no third candidate, <= 5k per race, <= 10k in all, only while free > the catcher's 10k reserve and no entry with >= 6% edge waits; held to settlement   # deleted (code in releases/archive/); their leftover lots: FM's offered at max(entry + 0.5c, touch), the scalper's moved to 'held'
 
 # turnover_plan §1 (C84): the spread maker (SM) — two-sided quoting at the touch on the bounciest markets, queue kept, refilled on fill

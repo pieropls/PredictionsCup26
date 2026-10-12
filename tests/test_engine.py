@@ -11,7 +11,8 @@ import os as _os
 _os.environ["SIG_FM_PILOT"] = "0"
 _os.environ["SIG_RESERVOIR"] = "0"   # C84c: the RI reservoir never switches itself on inside a rig (ReservoirTests set it explicitly)
 _os.environ["SIG_C87"] = "0"
-_os.environ["SIG_C90"] = "0"   # C90: the edge program's A/B starts only where C90Tests ask for it   # C87: the one-time migration (TM full, FM / scalper deleted) runs only where C87Tests ask for it
+_os.environ["SIG_C90"] = "0"   # C90: the edge program's A/B starts only where C90Tests ask for it
+_os.environ["SIG_C91"] = "0"   # C87: the one-time migration (TM full, FM / scalper deleted) runs only where C87Tests ask for it
 _os.environ["SIG_SM_PILOT"] = "0"   # turnover_plan C84: the spread-maker pilot never switches itself on inside a rig (SMTests set the layer explicitly)
 _os.environ["SIG_TM_PILOT"] = "0"   # day 11 C83: the touch-maker pilot never switches itself on inside a rig (TMTests set the layer explicitly)   # mm_plan C81: the fair-maker pilot never switches itself on inside a rig (FMTests set targets explicitly); set here because `unittest discover tests` imports this module without tests/__init__.py
 import collections
@@ -4901,6 +4902,35 @@ class C90Tests(EngineCase):
         eng.ledger.baskets.append(dict(id="h4x", t="x", ts=time.time(), race=two[0].race, side="no", qty=1000, margin=0.04, legs=2, orders=[], repaired=False, state="held", h4=True))
         eng.cash_hist = [a_config.CASH_RESERVE + 25_000]
         self.assertAlmostEqual(eng.h4_budget(time.time()), a_config.H4["cap"] - 1000 * 1.96, delta=1)
+
+    def test_h3_arm_sells_only_for_a_better_waiting_entry_sized_to_it(self):
+        f_engine.CORE_CAP_COST, f_engine.TRADING_HOLD_C, f_engine.TRADING_CASH_TARGET = 50_000.0, 0.03, 20_000.0
+        fake, eng, favs = DumpV3Tests.rig(self)
+        eng.controls.d["edge"] = {"H3": dict(state="full", since="x", hist=[])}   # every market on H3
+        a = favs[0]; fs = eng.fair[a]
+        sub = f"dump:{a}:yes:1"
+        eng.ledger.subbooks.setdefault(a, {})[sub] = 3000.0
+        eng.ledger.tranches[sub] = dict(ex=a, side="yes", kind="dump", state="open", ts=time.time() - 60, t="x", avg=round(fs - 0.05, 3))
+        fake.pos[a] = 3000; fake.avg_cost[a] = round(fs - 0.05, 3); eng.book.setdefault(a, {})["pos"] = 3000
+        ask_a = bots.side_book(eng.px[a][0], eng.px[a][1], "yes")[1]
+        FAIR[a] = round(min(0.99, ask_a + 0.06), 3); self.addCleanup(FAIR.pop, a, None)   # 6% return left at the touch: not converged
+        loop(eng, fake)
+        fs = eng.fair[a]
+        eng.ledger.tranches[sub]["avg"] = round(fs - 0.05, 3); fake.avg_cost[a] = round(fs - 0.05, 3)
+        eng.lots_cache = (None, {}); eng.rotation_on = False
+        left = fs - ask_a
+        eng.dump_cut_rows, eng.tm_unfunded = [], []
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 8_000, time.time())
+        self.assertNotIn(a, plan, "no waiting entry: no sale on arm A")
+        eng.dump_cut_rows = [(left + 0.02, 900.0, 0.9)]
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 8_000, time.time())
+        self.assertNotIn(a, plan, "a waiting entry with only 2c more edge: no sale")
+        eng.dump_cut_rows = [(left + 0.04, 900.0, 0.9)]
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 8_000, time.time())
+        self.assertIn(a, plan, "a waiting entry with >= 3c more edge: sold")
+        n = sum(plan[a]["subs"].values())
+        self.assertLessEqual(n * plan[a]["px"], 900.0 + plan[a]["px"], "sized to the entry's cost")
+        self.assertTrue(any("H3 SWAP SALE" in e["text"] for e in eng.events))
 
     def test_release_ask_and_own_exit_never_both_rest(self):
         f_engine.TRADING_HOLD_C = 0.03
