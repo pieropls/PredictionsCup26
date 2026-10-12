@@ -12,7 +12,8 @@ _os.environ["SIG_FM_PILOT"] = "0"
 _os.environ["SIG_RESERVOIR"] = "0"   # C84c: the RI reservoir never switches itself on inside a rig (ReservoirTests set it explicitly)
 _os.environ["SIG_C87"] = "0"
 _os.environ["SIG_C90"] = "0"   # C90: the edge program's A/B starts only where C90Tests ask for it
-_os.environ["SIG_C91"] = "0"   # C87: the one-time migration (TM full, FM / scalper deleted) runs only where C87Tests ask for it
+_os.environ["SIG_C91"] = "0"
+_os.environ["SIG_C92"] = "0"   # C87: the one-time migration (TM full, FM / scalper deleted) runs only where C87Tests ask for it
 _os.environ["SIG_SM_PILOT"] = "0"   # turnover_plan C84: the spread-maker pilot never switches itself on inside a rig (SMTests set the layer explicitly)
 _os.environ["SIG_TM_PILOT"] = "0"   # day 11 C83: the touch-maker pilot never switches itself on inside a rig (TMTests set the layer explicitly)   # mm_plan C81: the fair-maker pilot never switches itself on inside a rig (FMTests set targets explicitly); set here because `unittest discover tests` imports this module without tests/__init__.py
 import collections
@@ -4931,6 +4932,22 @@ class C90Tests(EngineCase):
         n = sum(plan[a]["subs"].values())
         self.assertLessEqual(n * plan[a]["px"], 900.0 + plan[a]["px"], "sized to the entry's cost")
         self.assertTrue(any("H3 SWAP SALE" in e["text"] for e in eng.events))
+
+    def test_dedup_vs_sig_drops_only_the_over_booked_synthetic_fills(self):
+        fake, eng, favs = DumpV3Tests.rig(self)
+        ex = favs[0]; t = time.strftime("%Y-%m-%d %H:%M:%S")
+        base = dict(ex=ex, side="yes", action="buy", layer="dump", bot="MKT x", before_engine=False, fair=0.9, edge=0.05, sig_mid=None, sig_edge=None, mo5=None, mo30=None, realized=0.0, price=0.85, t=t)
+        eng.ledger.orders["d1"] = dict(id="d1", ex=ex, side="yes", action="buy", layer="dump", sub=f"dump:{ex}:yes:1", bot="MKT x", price=0.85, qty=1000, filled=1000.0, status="done", placed=t, closed=t, ts=time.time(), left=0, cost=850.0, note="")
+        eng.ledger.orders["d2"] = dict(id="d2", ex=ex, side="yes", action="buy", layer="dump", sub=f"dump:{ex}:yes:2", bot="MKT x", price=0.85, qty=1000, filled=1000.0, status="done", placed=t, closed=t, ts=time.time(), left=0, cost=850.0, note="")
+        eng.ledger.fills.extend([dict(base, key="s1", order="d1", qty=500.0), dict(base, key="s2", order="d1", qty=500.0, source="order_shrink"),   # SIG filled 500: the synthetic 500 is a duplicate
+                                 dict(base, key="s3", order="d2", qty=500.0), dict(base, key="s4", order="d2", qty=500.0, source="order_shrink")])  # SIG filled 1,000: both genuine
+        truth = {"d1": 500.0, "d2": 1000.0}
+        r = eng.ledger.dedup_vs_truth(truth, dry_run=True)
+        self.assertEqual((r["removed"], r["shares"], r["orders"]), (["s2"], 500.0, 1))
+        r = eng.ledger.dedup_vs_truth(truth)
+        self.assertEqual(r["removed"], ["s2"])
+        self.assertEqual({f["key"] for f in eng.ledger.fills if f.get("order") in ("d1", "d2")}, {"s1", "s3", "s4"})
+        self.assertEqual(eng.ledger.orders["d1"]["filled"], 500.0)
 
     def test_release_ask_and_own_exit_never_both_rest(self):
         f_engine.TRADING_HOLD_C = 0.03

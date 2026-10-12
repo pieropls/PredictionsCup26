@@ -336,6 +336,47 @@ class Ledger:
                     books.pop("inventory", None)
             return netted
 
+    def dedup_vs_truth(self, truth, dry_run=False, since=None):
+        """Piero 17:35 Oct 11: `truth` = {orderId: shares SIG itself reports filled}. For every order with synthetic (order_shrink)
+        fills booked beyond that truth, drop its synthetic fills newest-first until the booking fits; the orders' filled / cost
+        follow; then the same sub-book repair as dedup_synthetic (phantom netting, same-sign trims).
+        -> dict(removed=[keys], shares, orders, netted=[...], trimmed=[...])."""
+        with self.lock:
+            booked, syn = {}, {}
+            for f in self.fills:
+                oid = str(f.get("order") or "")
+                if not oid:
+                    continue
+                booked[oid] = booked.get(oid, 0.0) + f["qty"]
+                if f.get("source") == "order_shrink" and (since is None or f.get("t", "") >= since):
+                    syn.setdefault(oid, []).append(f)
+            drop, orders = [], 0
+            for oid, fs in syn.items():
+                if oid not in truth:
+                    continue
+                excess = booked[oid] - truth[oid]
+                if excess <= 0.5:
+                    continue
+                orders += 1
+                for f in sorted(fs, key=lambda x: x["t"], reverse=True):
+                    if excess <= 0.5:
+                        break
+                    drop.append(f)
+                    excess -= f["qty"]
+            keys = {f["key"] for f in drop}
+            shares = sum(f["qty"] for f in drop)
+            if dry_run:
+                return dict(removed=[f["key"] for f in drop], shares=shares, orders=orders, netted=[], trimmed=[])
+            for f in drop:
+                order = self.orders.get(str(f.get("order")))
+                if order:
+                    order["filled"] = max(0.0, (order.get("filled") or 0) - f["qty"])
+                    order["cost"] = max(0.0, (order.get("cost") or 0) - f["qty"] * f["price"])
+                    order["truth_q"] = max(0.0, (order.get("truth_q") or 0) - f["qty"])
+            self.fills = [f for f in self.fills if f.get("key") not in keys]
+        res = self.dedup_synthetic(dry_run=False, window_s=0)     # the sub-book repair (phantom netting, same-sign trims) on the cleaned fills
+        return dict(removed=[f["key"] for f in drop], shares=shares, orders=orders, netted=res.get("netted") or [], trimmed=res.get("trimmed") or [])
+
     def dedup_synthetic(self, dry_run=False, window_s=0):
         """Oct 5 02:30: a synthetic (order_shrink) fill that duplicates one of SIG's own fills for the same order (same
         quantity, within 3 min) is removed from the fill history (stats, lots and the order's filled count follow). The

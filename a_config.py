@@ -316,6 +316,9 @@ H1_GATE = dict(fill_rate_x=3.0, mo30_min=0.0, tm_edge_min=0.04)   # gate: fills 
 PAPER_HALF_AT_PRICE = 0.5       # paper fills: half of the volume printed at our price counts against our queue (edge_program §0.3)
 PAPER_MAX_AGE_S = 12 * 3600     # a paper order is followed for 12 h after its real expiry
 H1_SM_UNIVERSE = ['896', '1066', '995', '1067', '894', '884', '841', '1001', '900', '920']   # H5 (docs/edge_h5_h4.md): the top 10 bounce markets by time-to-front (1.3-2.8 h); arm A = ranks 1/3/5/7/9
+CASH_PLAN_1735 = dict(target=12_000, low_ret=0.06, sell_subs=["974|wall:974:no:w1791344402", "974|wall:974:no:w1791344221"], h4_paused=True)   # Piero 17:35 Oct 11: by 03:30 free >= 12k from (a) trading lots with < 6% return left, lowest first, (b) the NM Senate R wall lots (3,791 NO, entry 0.915) at the touch, (c) H4 paused until H1's verdict; RI's 8,900 held; never below entry + 0.5c
+DEDUP_SINCE = "2026-10-09 19:30:00"   # Piero 17:35 item 2: repair the duplicate synthetic fills of the H3 window (the older ones: dry-run count in the morning report)
+H1_JUDGE_WINDOW = ("04:00", "08:00")   # Piero 17:35: H1 is judged on the morning flow (fills per resting-hour vs control, 30-min mark-out), not on the evening hours
 H3 = dict(swap_c=0.03, converged_ret=0.02)   # H3 (arm A): a trading lot is sold only for a waiting entry with >= 3c more edge, sized to that entry's cost; converged lots (< 2% left) first
 H4 = dict(on=True, edge=0.04, per_race=5_000, cap=10_000, idle_free=10_000, waiting_edge=0.06)   # pair locks with idle cash: both NO at total cost <= 0.96 on races with no third candidate, <= 5k per race, <= 10k in all, only while free > the catcher's 10k reserve and no entry with >= 6% edge waits; held to settlement   # deleted (code in releases/archive/); their leftover lots: FM's offered at max(entry + 0.5c, touch), the scalper's moved to 'held'
 
