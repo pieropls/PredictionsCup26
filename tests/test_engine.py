@@ -4917,7 +4917,6 @@ class C90Tests(EngineCase):
         ask_a = bots.side_book(eng.px[a][0], eng.px[a][1], "yes")[1]
         eng.ledger.subbooks[a] = {sub: 3000.0}               # the whole position is this catch lot, bought at 0.85 (under the touch: rule 0 allows the sale)
         eng.ledger.tranches[sub] = dict(ex=a, side="yes", kind="dump", state="open", ts=time.time() - 60, t="x", avg=0.85)
-        eng.ledger.tranches[sub]["avg"] = round(fs - 0.05, 3); fake.avg_cost[a] = round(fs - 0.05, 3)
         eng.lots_cache = (None, {}); eng.rotation_on = False
         left = fs - ask_a
         eng.dump_cut_rows, eng.tm_unfunded = [], []
