@@ -5009,6 +5009,56 @@ class C93Tests(EngineCase):
         self.assertTrue(eng.h1_shortfall_done)
         self.assertEqual(eng.h1_shortfall_plan(at(3, 20)), {}, "once")
 
+    def test_release_ask_uses_sig_average_when_the_lot_is_the_whole_position(self):
+        """C93b (Piero 16:15 item 4): U.S. House D / CO-03 D / Kansas D asked at a tranche average that mixed both sides' entries."""
+        fake, eng, favs = self.rig()
+        a = favs[0]
+        self.lot(eng, fake, a, f"sm:{a}", 492, 0.545, (0.315, 0.32, 0.3175), 0.275)   # the tranche says 0.545; SIG's position average is 0.33
+        fake.avg_cost[a] = 0.33
+        loop(eng, fake); loop(eng, fake)
+        eng.lots_cache = (None, {}); eng.ledger.subbooks[a] = {f"sm:{a}": 492.0}
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertIn(a, plan); self.assertAlmostEqual(plan[a]["px"], 0.335, places=3, msg="max(SIG avg 0.33 + 0.5c, touch 0.32)")
+        eng.ledger.subbooks[a] = {f"sm:{a}": 200.0, "inventory": 292.0}     # the lot is less than the position: the tranche average stands
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertIn(a, plan); self.assertAlmostEqual(plan[a]["px"], 0.55, places=3)
+
+    def test_own_exit_guard_counts_an_exit_being_repegged_or_planned(self):
+        """C93b (item 3): the 15:59 I2 trim — the release ask was posted while the TM exit for the same lot was in 'cancelling'."""
+        fake, eng, favs = self.rig()
+        a = favs[0]; sub = f"tm:{a}:yes"
+        eng.open.append(dict(id="z1", ex=a, side="no", action="buy", price=0.04, qty=201))
+        eng.ledger.orders["z1"] = dict(layer="tmexit", sub=sub, ex=a, side="no", action="buy", price=0.04, qty=201)
+        self.assertTrue(eng.own_exit_resting(a, sub))
+        eng.ex.cancelling.add("z1")
+        self.assertTrue(eng.own_exit_resting(a, sub), "being re-pegged: still covers the lot")
+        eng.open[:] = [o for o in eng.open if o["id"] != "z1"]
+        self.assertFalse(eng.own_exit_resting(a, sub))
+        eng.tm_view = {a: [dict(sub=sub, side="yes", px=0.96)]}
+        self.assertTrue(eng.own_exit_resting(a, sub), "planned this loop: covers the lot")
+
+    def test_h1_sleeve_is_touch_maker_quotes_only_inside_the_window(self):
+        """C93b (item 1): under the 10k pause the TM quotes only the test markets, ~600 a clip, within the sleeve; outside the window nothing."""
+        f_engine.TM_BUFFER_GATE = True
+        fake, eng, ex = TMTests.rig(self, cash_above_floor=1_000)   # free 1k < 10k: TM entries paused
+        tm = lambda: [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "tm"]
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(tm(), [], "paused under 10k")
+        eng.h1_test_markets = lambda: [ex]
+        eng.h1_test_active = lambda now_: True
+        loop(eng, fake); loop(eng, fake)
+        q = tm()
+        self.assertEqual(len(q), 1, q)
+        self.assertEqual(q[0]["side"], "yes"); self.assertEqual(q[0]["qty"], a_config.H1_TEST["clip"])
+        self.assertAlmostEqual(q[0]["price"], 0.465, places=3, msg="the side below fair, at the touch (improved by a tick on a 2-tick spread)")
+        self.assertLessEqual(eng.h1_cost(), a_config.H1_TEST["sleeve"])
+        self.assertAlmostEqual(eng.h1_cost(), q[0]["qty"] * q[0]["price"], places=2)
+        sm = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "sm"]
+        self.assertEqual(sm, [], "the spread maker stays exits-only")
+        eng.h1_test_active = lambda now_: False
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(tm(), [], "outside the window: the pause holds")
+
 class Dash5Tests(EngineCase):
     """Dashboard v5 (docs/dashboard_v5.md): §0 P&L by SIG day (00:00 UTC; realized at SIG's average cost; realized + open = the day
     exactly; past days fixed), the strategy registry and the cash-flow buckets that add up to account - 100,000, the status turning

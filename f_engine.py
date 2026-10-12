@@ -474,6 +474,7 @@ class Engine:
             self.c91_migration(time.time())
             self.c92_migration(time.time())
             self.c93_migration(time.time())
+            self.c93b_migration(time.time())
         except Exception as err:
             print(f"C88 / C90 migration: {err!r}")
         try:
@@ -3372,8 +3373,10 @@ class Engine:
         """True when the sub-book's own layer (dumpexit / tmexit / smexit / fmexit ...) already rests an exit for it."""
         for o in self.open:
             rec = self.ledger.orders.get(o["id"]) or {}
-            if o["ex"] == ex and rec.get("sub") == sub and rec.get("layer") in self.REDUCING and rec.get("layer") != "release" and o["id"] not in self.ex.cancelling:
-                return True
+            if o["ex"] == ex and rec.get("sub") == sub and rec.get("layer") in self.REDUCING and rec.get("layer") != "release":
+                return True                                 # C93b (Piero 16:15 item 3): an exit being re-pegged (cancelling) still covers the lot: its layer re-posts it this loop
+        if sub.startswith("tm:") and any(v.get("sub") == sub for v in (self.tm_view.get(ex) or [])):
+            return True                                     # C93b: the TM plans an exit for this lot this loop (the 15:59 I2 trim: release ask vs the TM exit's re-peg)
         return False
 
     def h1_keep(self, which, ex, side, behind_ticks, now):
@@ -3633,9 +3636,9 @@ class Engine:
                                 f"{-s3['B']['given']:+,.0f}, net {s3['B']['net']:+,.0f}, {s3['B']['sales']} sales / {s3['B']['entries']} entries, realized {s3['B']['realized']:+,.0f}; verdict: {v3}")
             if self.h1_test_day(now) and (self.controls.d.get("h1_test") or {}).get("opened"):
                 fl = self.h1_test_fills(now)
-                ent = [f for f in fl if f.get("layer") == "sm"]; ex_ = [f for f in fl if f.get("layer") == "smexit"]
+                ent = [f for f in fl if f.get("layer") == "tm"]; ex_ = [f for f in fl if f.get("layer") == "tmexit"]
                 self.night.line(f"H1 TEST hour: {len(ent)} entry fills / {len(ex_)} exit fills so far, {self.h1_test_pnl_fair(now):+,.0f} at fair, realized {sum(f.get('realized') or 0 for f in ex_):+,.0f}, "
-                                f"cost in use {self.h1_cost():,.0f} of {H1_TEST['sleeve']:,.0f}, quotes resting {sum(1 for o in self.open if o['ex'] in set(self.h1_test_markets()) and (self.ledger.orders.get(o['id']) or {}).get('layer') == 'sm')}, "
+                                f"cost in use {self.h1_cost():,.0f} of {H1_TEST['sleeve']:,.0f}, quotes resting {sum(1 for o in self.open if o['ex'] in set(self.h1_test_markets()) and (self.ledger.orders.get(o['id']) or {}).get('layer') == 'tm')}, "
                                 f"{'STOPPED' if self.h1_test_stopped else 'running'}")
             h4 = [bk for bk in self.ledger.baskets if bk.get("h4")]
             self.night.line(f"H4 pair locks: {len(h4)} sets, {sum(bk['qty'] for bk in h4):,} per leg, locked {sum(bk['qty'] * bk['margin'] for bk in h4):,.0f} at settlement, "
@@ -3705,6 +3708,23 @@ class Engine:
                f"(4) H1 DECISIVE TEST armed: {H1_TEST['day']} {H1_TEST['start']}-{H1_TEST['end']} PT on {', '.join(self.name(e) for e in self.h1_test_markets())}: a {H1_TEST['sleeve']:,.0f} sleeve ahead of the catcher from {H1_TEST['reserve_from']}, "
                f"shortfall sold at the best bid at {H1_TEST['shortfall_at']} (<= ~{H1_TEST['shortfall_max_cost']:,.0f} of settlement value), GTC quotes of {H1_TEST['clip']} with the TM pause and the SM 24-h stop lifted there, stop {H1_TEST['stop_fair']:+,.0f} at fair. "
                f"(5) the whole-ledger dedup against SIG's fills runs on the first controller pass (before / after line follows). H4 stays as it is.")
+        self.event("CONTROL", msg); self.night.line(msg)
+
+    def c93b_migration(self, now):
+        """Once (C93b, Piero 16:15 Oct 12): the H1 sleeve is touch-maker quotes only; the gate; the 15:59 I2 trim; the release-ask averages."""
+        c = self.controls
+        if (c.d.get("c93b") or {}).get("done"):
+            return
+        with c.lock:
+            c.d["c93b"] = dict(done=stamp()); c.save()
+        msg = (f"C93b (Piero 16:15): (1) the H1 sleeve is TOUCH-MAKER quotes only (the side below fair) on H5's ten markets ({', '.join(self.name(e) for e in self.h1_test_markets())}), "
+               f"inside {H1_TEST['sleeve']:,.0f}, clip {H1_TEST['clip']}, GTC; the spread maker stays exits-only; the TM 10k pause and the 30k inventory stop are lifted inside the sleeve only; "
+               f"the ring stops (03:00-06:00, 12:00-14:00) and every other rule stay. (2) GATE: round trips >= 0.5 per sleeve share inside 04:00-15:00, realized on round trips > 0, 30-min mark-out >= 0; "
+               f"fills per resting-hour and per quoted share-hour vs control (1.40 / 1.14), time to the front, fill rate at the front and P&L per 1k of sleeve per hour reported; I2 pause minutes left out of resting time. "
+               f"(3) the 15:59 I2 trim: the release ask Illinois Governor D YES 201 at 0.960 was posted in the loop in which the TM re-pegged its own exit for the same lot (NO 0.04 = YES 0.96, 201; the exit was in 'cancelling'); "
+               f"the own-exit guard now counts an exit being re-pegged or planned this loop; the release ask was the one trimmed. "
+               f"(4) a release ask takes SIG's own position average when the lot is the whole position (the tranche average had mixed both sides' entries): "
+               f"U.S. House D NO 502 (0.61 -> 0.12), CO-03 House race D YES 492 (0.545 -> 0.33), Kansas Senate D NO 1,355 (0.618 -> 0.598); their asks re-post at max(avg + 0.5c, touch) (POSTED lines follow).")
         self.event("CONTROL", msg); self.night.line(msg)
 
     def c92_migration(self, now):
@@ -6584,7 +6604,8 @@ class Engine:
         c = self.controls
         if not c.on("tm") or c.paused or self.fills_blind:
             return {}
-        if self.entry_budget(cash) <= 0:
+        h1m = set(self.h1_test_markets()) if self.h1_test_active(now) else set()   # C93b (Piero 16:15): the H1 sleeve = touch-maker quotes on H5's ten, inside 5,000
+        if self.entry_budget(cash) <= 0 and not h1m:
             return {}
         if c.state("tm") == "pilot" and self.free_cash() >= self.buffer() and c.d.get("tm_autofull", True):   # control 'tm_autofull': False keeps the pilot
             c.set_layer("tm", "full", f"Piero 16:10 §3: free {self.free_cash():,.0f} >= BUFFER {self.buffer():,.0f}", by="engine")
@@ -6600,9 +6621,12 @@ class Engine:
                        else "TM entries back after the ring window")
                 self.event("TM", msg); self.night.line(msg)
             self.tm_stop_logged = stop
+        h1_only = False
         if stop or self.tm_buffer_gate(now) or self.trading_inv_gate(now):
             self.tm_cov = dict(quoted=0, available=0, top=0, writes_left=0, writes_used=0, ring=stop, buffer_pause=not stop)
-            return {}                                       # C87 / C89: no TM entries (resting bids go; exits keep running)
+            if stop or not h1m:
+                return {}                                   # C87 / C89: no TM entries (resting bids go; exits keep running)
+            h1_only = True                                  # C93b: the 10k pause / inventory stop lifted inside the H1 sleeve only (the ring stops stay)
         sz = self.tm_sizes()
         glide = now >= time.mktime(time.strptime(TM_GLIDE_START, "%Y-%m-%d %H:%M:%S"))
         cap_cost = 0.0 if glide else self.tm_cap(now)       # Piero 22:15 (C82 item 2): base + max(0, free - BUFFER)
@@ -6625,6 +6649,10 @@ class Engine:
         cands = self.tm_candidates()
         top = cands[: sz["sides"]] if sz["sides"] else cands
         rows = top + [r for r in cands[len(top):] if (r[1], r[2]) in existing]   # a resting side that still qualifies is kept while it rests (no churn)
+        rows += [r for r in cands if r[1] in h1m and r not in rows]              # C93b: the H1 test markets quote whatever their rank
+        if h1_only:
+            rows = [r for r in rows if r[1] in h1m]
+        h1_allow = max(0.0, float(H1_TEST["sleeve"]) - self.h1_cost()) if h1m else 0.0   # the sleeve less what the test holds / rests
         plan, quoted = {}, 0
         for score, ex, side, fs, best, sp in rows:
             key = (ex, side)
@@ -6660,7 +6688,9 @@ class Engine:
                 continue                                    # no edge at the touch (a resting bid whose edge is gone is pulled)
             sub = f"tm:{ex}:{side}"
             clip, inv_cap = (profile.get(ex) or (sz["clip"], sz["inv"], None))[:2]
-            if cur is not None and rest_used + cur["qty"] * cur["price"] > allow + 1e-6:
+            if ex in h1m:
+                clip = int(H1_TEST["clip"])                 # C93b: ~600 a quote inside the sleeve
+            if cur is not None and ex not in h1m and rest_used + cur["qty"] * cur["price"] > allow + 1e-6:
                 writes -= 1                                 # C87b: over the allowance: this resting bid is dropped (a cancel write)
                 continue
             if cur is not None:
@@ -6676,7 +6706,7 @@ class Engine:
                     writes -= 2
                 quoted += 1
                 continue
-            if self.tm_inventory(ex, side) >= inv_cap - 1e-9 or cost_all >= cap_cost - 1e-6:
+            if self.tm_inventory(ex, side) >= inv_cap - 1e-9 or (cost_all >= cap_cost - 1e-6 and ex not in h1m):
                 if fs - p >= ROTATION_FUND_EDGE - 1e-9 and cost_all >= cap_cost - 1e-6:
                     self.tm_unfunded.append((fs - p, clip * p, p))   # (item 4): a >= 8c entry the rotation may fund
                 continue                                    # at a cap: only the exit side quotes
@@ -6685,8 +6715,11 @@ class Engine:
             q = int(min(clip, inv_cap - self.tm_inventory(ex, side)))   # never past the per-market cap (C82: 1,750 held on a 1.5k cap seen in the pilot)
             room = self.race_room(ex, side, fs)
             q = min(q, int(room / p)) if room > 0 else 0
-            q = min(q, int((cap_cost - cost_all) / p))
-            q = min(q, int(max(0.0, allow - rest_used) / p))   # C87b: resting + held within the cap and free - 10k (Piero 21:37: the catcher's last 10k)
+            if ex in h1m:
+                q = min(q, int(h1_allow / p))               # C93b: inside the H1 test the sleeve is the only cash limit
+            else:
+                q = min(q, int((cap_cost - cost_all) / p))
+                q = min(q, int(max(0.0, allow - rest_used) / p))   # C87b: resting + held within the cap and free - 10k (Piero 21:37: the catcher's last 10k)
             depth = self.tm_touch_depth(ex, side, now)
             if depth is not None:
                 q = min(q, int(TM_DEPTH_SHARE * depth))
@@ -6698,6 +6731,8 @@ class Engine:
                 writes -= 1
                 batched = True                              # placements of one loop batch into one write
             plan.setdefault(ex, []).append(dict(side=side, px=p, qty=q, sub=sub, ttl=H1_TTL_S if self.h1_on(ex) else TM_TTL_S))   # H1 arm A: GTC (no 20-min expiry)
+            if ex in h1m:
+                h1_allow -= q * p
             cost_all += q * p
             rest_used += q * p
             quoted += 1
@@ -6871,11 +6906,15 @@ class Engine:
                 if v * q <= 0 or sub.startswith(("manual", "pairset:", "sleeve:", "swing:")) or (str(ex), sub) in self.core_set:
                     continue                                # never a core lot, Piero's manual / pair / sleeve lots, or the RI reservoir
                 key = f"{ex}|{sub}"
-                avg = (self.ledger.tranches.get(sub) or {}).get("avg")
+                sig_avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
+                if sig_avg and abs(v) >= 0.95 * abs(q) - 1e-9:
+                    avg = sig_avg                           # C93b (Piero 16:15 item 4): the lot is the whole SIG position: SIG's own average is the lot average (the tranche average had mixed both sides' entries)
+                else:
+                    avg = (self.ledger.tranches.get(sub) or {}).get("avg")
                 if not avg:
                     lots = [l for l in self.lots(ex, side, sub) if l[0] > 0]
                     tot = sum(l[0] for l in lots)
-                    avg = (sum(l[0] * l[1] for l in lots) / tot) if tot else float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
+                    avg = (sum(l[0] * l[1] for l in lots) / tot) if tot else sig_avg
                 if not avg:
                     continue
                 floor_ = bots.tick_up(round(float(avg) + RULE0_MARGIN, 6))
@@ -7326,14 +7365,9 @@ class Engine:
         plan, quoted, gated = {}, 0, collections.Counter()
         for ex in exs:
             reg = (self.sm_regime.get(ex) or {}).get("regime")
-            h1t = self.h1_test_active(now) and ex in self.h1_test_markets()
-            entries_ok = (ex in universe and reg in SM_QUOTE_REGIMES and ex not in excluded and not exits_only and not inv_stop) or h1t   # C87 / C89 gates; C93 item 4: lifted inside the H1 test
+            entries_ok = ex in universe and reg in SM_QUOTE_REGIMES and ex not in excluded and not exits_only and not inv_stop   # C87 / C89 gates (C93b, Piero 16:15: the H1 sleeve is touch-maker quotes only; the SM stays exits-only)
             gated["entries" if entries_ok else ("excluded" if ex in excluded else "exits_only" if exits_only else "not_universe" if ex not in universe else f"regime_{reg}")] += 1
             clip, repeg, skew = self.sm_params(ex, sz)
-            if h1t:
-                clip = int(H1_TEST["clip"])
-                if self.h1_cost() >= float(H1_TEST["sleeve"]) - 1e-6:
-                    entries_ok = False                      # the sleeve is spent: exits only
             if ex not in self.owner or self.ex.is_frozen(ex) or ex in self.manual_ex or self.fm_poll_block(ex, now):
                 writes -= sum(1 for sd in ("yes", "no") if (ex, sd) in existing)
                 continue
@@ -8075,16 +8109,17 @@ class Engine:
         return max(0.0, float(H1_TEST["sleeve"]) - self.h1_cost())
 
     def h1_cost(self):
-        """What the H1 test uses: SM inventory at cost in its markets + the notional of its resting SM entry quotes."""
+        """What the H1 test uses (C93b: touch-maker quotes only): TM inventory at cost in its markets + the notional of its resting TM entry quotes."""
         out = 0.0
         for ex in self.h1_test_markets():
-            inv = self.sm_inventory(ex)
-            if abs(inv) >= 1:
-                avg = self.sm_avg(ex) or self.sig_mark(ex, "yes" if inv > 0 else "no") or 0.5
-                out += abs(inv) * float(avg)
+            for side in ("yes", "no"):
+                inv = self.tm_inventory(ex, side)
+                if inv >= 1:
+                    avg = (self.ledger.tranches.get(f"tm:{ex}:{side}") or {}).get("avg") or self.sig_mark(ex, side) or 0.5
+                    out += inv * float(avg)
             for o in self.open:
                 rec = self.ledger.orders.get(o["id"]) or {}
-                if o["ex"] == ex and rec.get("layer") == "sm" and o["action"] == "buy" and not jx.reduces(o["side"], "buy", self.book.get(ex, {}).get("pos", 0)):
+                if o["ex"] == ex and rec.get("layer") == "tm" and o["action"] == "buy" and not jx.reduces(o["side"], "buy", self.book.get(ex, {}).get("pos", 0)):
                     out += o["qty"] * o["price"]
         return out
 
@@ -8093,7 +8128,7 @@ class Engine:
         lt = time.localtime(now)
         t0 = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, int(H1_TEST["start"][:2]), int(H1_TEST["start"][3:]), 0, 0, 0, -1))
         mk = set(self.h1_test_markets())
-        return [f for f in self.fills_since(t0) if f["ex"] in mk and f.get("layer") in ("sm", "smexit")]
+        return [f for f in self.fills_since(t0) if f["ex"] in mk and f.get("layer") in ("tm", "tmexit")]   # C93b: the TM's fills
 
     def h1_test_pnl_fair(self, now):
         return sum(self.fill_pnl_fair(f) for f in self.h1_test_fills(now))
@@ -8115,8 +8150,8 @@ class Engine:
             if not st.get("opened"):
                 with self.controls.lock:
                     st["opened"] = stamp(); self.controls.save()
-                msg = (f"H1 TEST OPEN ({H1_TEST['start']}-{H1_TEST['end']} PT): GTC quotes on {', '.join(self.name(e) for e in self.h1_test_markets())} inside the {H1_TEST['sleeve']:,.0f} sleeve "
-                       f"(clip {H1_TEST['clip']}, the TM 10k pause and the SM 24-h stop lifted there), exits >= entry + 0.5c GTC; stop {H1_TEST['stop_fair']:+,.0f} at fair; free cash {self.free_cash():,.0f}")
+                msg = (f"H1 TEST OPEN ({H1_TEST['start']}-{H1_TEST['end']} PT): GTC touch-maker quotes (the side below fair) on {', '.join(self.name(e) for e in self.h1_test_markets())} inside the {H1_TEST['sleeve']:,.0f} sleeve "
+                       f"(clip {H1_TEST['clip']}, the TM 10k pause and the inventory stop lifted there; the spread maker stays exits-only; the ring stops 03:00-06:00 / 12:00-14:00 stay), exits per the TM rule GTC; stop {H1_TEST['stop_fair']:+,.0f} at fair; free cash {self.free_cash():,.0f}")
                 self.event("CONTROL", msg); self.night.line(msg)
         elif hm >= H1_TEST["end"] and st.get("opened") and not st.get("closed"):
             with self.controls.lock:
