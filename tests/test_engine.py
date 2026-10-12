@@ -4911,12 +4911,12 @@ class C90Tests(EngineCase):
         sub = f"dump:{a}:yes:1"
         fake.px[a] = eng.px[a] = (0.90, 0.905, 0.9025)
         FAIR[a] = 0.96; self.addCleanup(FAIR.pop, a, None)   # 5.5c = 6% return left at the touch ask 0.905: not converged
-        fake.pos[a] = 3000; fake.avg_cost[a] = 0.91
+        fake.pos[a] = 3000; fake.avg_cost[a] = 0.85
         loop(eng, fake); loop(eng, fake)
         fs = eng.fair[a]
         ask_a = bots.side_book(eng.px[a][0], eng.px[a][1], "yes")[1]
-        eng.ledger.subbooks[a] = {sub: 3000.0}               # the whole position is this catch lot
-        eng.ledger.tranches[sub] = dict(ex=a, side="yes", kind="dump", state="open", ts=time.time() - 60, t="x", avg=0.91)
+        eng.ledger.subbooks[a] = {sub: 3000.0}               # the whole position is this catch lot, bought at 0.85 (under the touch: rule 0 allows the sale)
+        eng.ledger.tranches[sub] = dict(ex=a, side="yes", kind="dump", state="open", ts=time.time() - 60, t="x", avg=0.85)
         eng.ledger.tranches[sub]["avg"] = round(fs - 0.05, 3); fake.avg_cost[a] = round(fs - 0.05, 3)
         eng.lots_cache = (None, {}); eng.rotation_on = False
         left = fs - ask_a
