@@ -416,6 +416,7 @@ class Engine:
         self.pnl_alert_t, self.trims_seen, self.trim_t, self.book_scan_t, self.book_scan_rows, self.reads_before, self.reads_after_t = {}, 0, None, 0.0, [], None, None   # C88
         self.core_t, self.core_set, self.scoreboard_t, self.scoreboard = 0.0, set(), 0.0, {}   # C88: the two books and the scoreboard
         self.trading_inv_stopped = None                     # C89: the 30k trading-inventory stop
+        self.dedup_pending = False
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
@@ -3477,8 +3478,8 @@ class Engine:
         h1 = (c.d.get("edge") or {}).get("H1") or {}
         day = time.strftime("%Y-%m-%d", time.localtime(now))
         hm = time.strftime("%H:%M", time.localtime(now))
-        if h1.get("state") != "ab" or h1.get("judged") == day or hm < H1_JUDGE_WINDOW[1]:
-            return
+        if h1.get("state") != "ab" or h1.get("judged") == day or not (H1_JUDGE_WINDOW[1] <= hm < "09:00"):
+            return                                          # once, in the hour after the window closes (never on a start-up later in the day)
         lt = time.localtime(now)
         t0 = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, int(H1_JUDGE_WINDOW[0][:2]), int(H1_JUDGE_WINDOW[0][3:]), 0, 0, 0, -1))
         t1 = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, int(H1_JUDGE_WINDOW[1][:2]), int(H1_JUDGE_WINDOW[1][3:]), 0, 0, 0, -1))
@@ -3555,6 +3556,12 @@ class Engine:
                    and (A["tm_edge"] is None or A["tm_edge"] >= H1_GATE["tm_edge_min"] - 1e-9))
             lose = A["per_h"] < B["per_h"] or (A["mo30"] is not None and A["mo30"] < -0.005)
             verdict = "win" if win else "lose" if lose else "tie"
+        if getattr(self, "dedup_pending", False) and getattr(self, "position_names", None) is not None:
+            self.dedup_pending = False
+            try:
+                self.dedup_vs_sig(now)
+            except Exception as err:
+                self.event("ERR", f"dedup vs SIG: {err!r}")
         try:
             self.h1_morning_verdict(now)
         except Exception as err:
@@ -3650,7 +3657,11 @@ class Engine:
         """Once (C92, Piero 17:35 Oct 11): the cash plan for H1's morning flow and the H1 morning verdict."""
         c = self.controls
         d = c.d.setdefault("c92", {})
-        if d.get("done") or os.environ.get("SIG_C92", "1") != "1":
+        if os.environ.get("SIG_C92", "1") != "1":
+            return
+        if d.get("done"):
+            if not d.get("dedup_done"):
+                self.dedup_pending = True                   # C92's start-up failed before the dedup (position names not built yet): run it now
             return
         with c.lock:
             c.d["cash_target_1735"] = CASH_PLAN_1735["target"]
@@ -3659,7 +3670,7 @@ class Engine:
             c.d.setdefault("edge", {})["h4_paused"] = bool(CASH_PLAN_1735["h4_paused"])
             d.update(done=stamp())
             c.save()
-        self.dedup_vs_sig(now)
+        self.dedup_pending = True                           # the dedup needs the roster (position names): it runs on the first controller pass
         msg = (f"C92 (Piero 17:35): cash for H1's 04:00-07:00 flow — by 03:30 free >= {CASH_PLAN_1735['target']:,}: (a) trading lots with < {CASH_PLAN_1735['low_ret']:.0%} return left sell first, lowest first, on both arms; "
                f"(b) the NM Senate R wall lots (3,791 NO, entry 0.915) are offered at the touch while short ({', '.join(k.split('|')[1] for k in CASH_PLAN_1735['sell_subs'])}); (c) H4 pair locks paused until H1's verdict; "
                f"RI's 8,900 held; never below entry + 0.5c. H1 is judged on the {H1_JUDGE_WINDOW[0]}-{H1_JUDGE_WINDOW[1]} PT window (fills per resting-hour vs control, 30-min mark-out) at 08:00.")
@@ -3700,6 +3711,9 @@ class Engine:
         self.event("AUDIT", msg); self.night.line(msg)
         if fixed["removed"] or fixed["netted"]:
             self.ledger.save()
+        with self.controls.lock:
+            self.controls.d.setdefault("c92", {})["dedup_done"] = stamp()
+            self.controls.save()
 
     def book_scan(self, now):
         """C88 (reads 3a): every 2 min, every book from the feed (zero REST reads): gap of the SIG mid vs fair, depth at the touch

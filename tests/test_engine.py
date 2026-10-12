@@ -4949,6 +4949,19 @@ class C90Tests(EngineCase):
         self.assertEqual({f["key"] for f in eng.ledger.fills if f.get("order") in ("d1", "d2")}, {"s1", "s3", "s4"})
         self.assertEqual(eng.ledger.orders["d1"]["filled"], 500.0)
 
+    def test_h1_morning_verdict_fires_only_in_the_hour_after_the_window(self):
+        fake, eng, ex = TMTests.rig(self)
+        eng.controls.d["edge"] = {"H1": dict(state="ab", since="x", hist=[]), "h4_paused": True}
+        lt = time.localtime()
+        at = lambda hh, mm: time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, 0, 0, 0, -1))
+        eng.h1_morning_verdict(at(18, 4))
+        self.assertIsNone(eng.controls.d["edge"]["H1"].get("judged"), "18:04: not the verdict hour (the C92 defect)")
+        self.assertTrue(eng.controls.d["edge"]["h4_paused"])
+        eng.h1_morning_verdict(at(8, 10))
+        self.assertEqual(eng.controls.d["edge"]["H1"].get("judged"), time.strftime("%Y-%m-%d"))
+        self.assertFalse(eng.controls.d["edge"]["h4_paused"], "H4 resumes with the verdict")
+        self.assertTrue(any("H1 MORNING VERDICT" in e["text"] for e in eng.events))
+
     def test_release_ask_and_own_exit_never_both_rest(self):
         f_engine.TRADING_HOLD_C = 0.03
         fake, eng, favs = DumpV3Tests.rig(self)
