@@ -247,7 +247,7 @@ TM_INV_MARKET, TM_INV_MARKET_PILOT = 3_000, 1_500   # shares held per market and
 TM_CAP_COST, TM_CAP_COST_PILOT = 30_000, 8_000      # TM held at cost in total (Piero 19:56 Oct 8: base cap 30k at cost)
 TM_SIDES_PILOT = 60             # the pilot quotes the top 60 market-sides by 24-h SIG value printed >= 2c off fair (full size: every side with >= 2c edge)
 TM_TTL_S = 1200                 # 20-min expiry: a stalled engine leaves nothing stale for long
-TM_REPEG_TICKS = 2              # keep the order (queue priority) while at the touch or one tick behind; re-peg only >= 2 ticks behind or when its edge < e_min
+TM_REPEG_TICKS = 1              # C93 (Piero 15:30 item 3): the plan re-pegs at >= 1 tick behind; the engine defers the re-peg 10 min (REPEG_AWAY_S)
 TM_EXIT_FIRST, TM_EXIT_STEP_S, TM_EXIT_LATE = 0.005, 600, 0.01   # exit at fill + 1 tick; fill + 1c after 10 min unfilled; never below entry + 0.5c (rule 0); hold-when-idle applies
 TM_WRITES_PER_MIN = 12          # (Piero 19:56 Oct 8 e: TM 12 / SM 6 / fast path 5 reserved, total <= 25) placements batch (one write per loop), a cancel is one write each: re-pegs are rationed by priority
 TM_NEWS_C, TM_NEWS_WINDOW_S, TM_REQUOTE_S = 0.02, 600, 300   # pull a market's TM orders on a >= 2c Polymarket move in 10 min, back 5 min after
@@ -311,7 +311,7 @@ ROTATION_MARKETS_C89 = 6        # markets asked at once by the trading-book sell
 EDGE_AB_CAP = 10_000            # capital per hypothesis in the A/B
 EDGE_PROMOTE_H, EDGE_ROLLBACK_H = 12, 6   # promote after >= 12 h ahead of control on the scoreboard; roll back after 6 h behind
 H1_TTL_S = 24 * 3600            # H1: GTC quotes (TM / SM): no 20-min expiry on arm A
-H1_BEHIND_TICKS, H1_BEHIND_S = 2, 1800   # cancel / re-peg an arm-A quote only once the touch sits >= 2 ticks away for > 30 min (within 1 tick it keeps its place)
+H1_BEHIND_TICKS, H1_BEHIND_S = 1, 600   # cancel / re-peg an arm-A quote only once the touch sits >= 2 ticks away for > 30 min (within 1 tick it keeps its place)
 H1_GATE = dict(fill_rate_x=3.0, mo30_min=0.0, tm_edge_min=0.04)   # gate: fills per resting-hour >= 3x control; 30-min mark-out >= 0; TM edge at fill >= 4c
 PAPER_HALF_AT_PRICE = 0.5       # paper fills: half of the volume printed at our price counts against our queue (edge_program §0.3)
 PAPER_MAX_AGE_S = 12 * 3600     # a paper order is followed for 12 h after its real expiry
@@ -319,7 +319,13 @@ H1_SM_UNIVERSE = ['896', '1066', '995', '1067', '894', '884', '841', '1001', '90
 CASH_PLAN_1735 = dict(target=12_000, low_ret=0.06, sell_subs=["974|wall:974:no:w1791344402", "974|wall:974:no:w1791344221"], h4_paused=True)   # Piero 17:35 Oct 11: by 03:30 free >= 12k from (a) trading lots with < 6% return left, lowest first, (b) the NM Senate R wall lots (3,791 NO, entry 0.915) at the touch, (c) H4 paused until H1's verdict; RI's 8,900 held; never below entry + 0.5c
 DEDUP_SINCE = "2026-10-09 19:30:00"   # Piero 17:35 item 2: repair the duplicate synthetic fills of the H3 window (the older ones: dry-run count in the morning report)
 H1_JUDGE_WINDOW = ("04:00", "08:00")   # Piero 17:35: H1 is judged on the morning flow (fills per resting-hour vs control, 30-min mark-out), not on the evening hours
-H3 = dict(swap_c=0.03, converged_ret=0.02)   # H3 (arm A): a trading lot is sold only for a waiting entry with >= 3c more edge, sized to that entry's cost; converged lots (< 2% left) first
+H3 = dict(swap_c=0.03, converged_ret=0.02)
+# Piero 15:30 Oct 12 (C93): hold the favourites; release the no-edge lots as GTC asks; orders keep their place; the H1 decisive test
+HOLD_RET = 0.06                 # no seller touches a lot with >= 6% return left to settlement (the C89 target seller and the H3 swap seller are gone)
+NOEDGE = dict(ret=0.06, low_fair=0.85, low_edge_c=0.03)   # item 2: a lot with < 6% return left at the sale price, or on a side with fair < 0.85 and < 3c of edge left -> one GTC ask at max(lot average + 0.5c, touch ask)
+GTC_TTL_S = 24 * 3600           # item 3: every seller and quote rests until re-pegged (no timer re-posts)
+REPEG_AWAY_TICKS, REPEG_AWAY_S = 1, 600   # item 3: re-peg only once the touch has moved >= 1 tick away for > 10 min; re-size only when the target changes > 25% (QTY_TOL)
+H1_TEST = dict(day="2026-10-13", start="04:00", end="15:00", reserve_from="03:45", shortfall_at="03:15", sleeve=5_000.0, n_markets=4, clip=600, stop_fair=-150.0, shortfall_max_cost=400.0)   # item 4   # H3 (arm A): a trading lot is sold only for a waiting entry with >= 3c more edge, sized to that entry's cost; converged lots (< 2% left) first
 H4 = dict(on=True, edge=0.04, per_race=5_000, cap=10_000, idle_free=10_000, waiting_edge=0.06)   # pair locks with idle cash: both NO at total cost <= 0.96 on races with no third candidate, <= 5k per race, <= 10k in all, only while free > the catcher's 10k reserve and no entry with >= 6% edge waits; held to settlement   # deleted (code in releases/archive/); their leftover lots: FM's offered at max(entry + 0.5c, touch), the scalper's moved to 'held'
 
 # turnover_plan §1 (C84): the spread maker (SM) — two-sided quoting at the touch on the bounciest markets, queue kept, refilled on fill
@@ -329,7 +335,7 @@ SM_CAP_SH, SM_CAP_SH_PILOT = 2_000, 1_000      # inventory per market: +/- 1k sh
 SM_CAP_COST, SM_CAP_COST_PILOT = 10_000, 10_000   # capital at cost (Piero 19:56 Oct 8: cap 10k)
 SM_MARKETS, SM_MARKETS_PILOT = 40, 20          # the top N by 24-h bounces x matched shares from our own tape, refreshed daily
 SM_FAIR_LO, SM_FAIR_HI = 0.05, 0.95            # never a sweep market (fair outside 5-95%), never RI, never an FM target
-SM_TTL_S, SM_REPEG_TICKS = 1200, 2             # 20-min expiry; keep the order at the touch or one tick behind, re-peg >= 2 ticks away
+SM_TTL_S, SM_REPEG_TICKS = 1200, 1             # C93: GTC in practice (GTC_TTL_S overrides); re-peg at >= 1 tick behind, deferred 10 min by the engine
 SM_WRITES_PER_MIN = 6                          # (Piero 19:56 Oct 8) batched refills; cancels only for re-pegs and pulls
 SM_NEWS_C, SM_NEWS_WINDOW_S, SM_REQUOTE_S = 0.02, 600, 300   # pull on a 2c / 10 min Polymarket move, back 5 min after
 SM_SWEEP_C, SM_SWEEP_HOLD_S = 0.05, 600        # pull on any SIG print >= 5c from the touch (a sweep is the catcher's job), 10 min

@@ -13,7 +13,8 @@ _os.environ["SIG_RESERVOIR"] = "0"   # C84c: the RI reservoir never switches its
 _os.environ["SIG_C87"] = "0"
 _os.environ["SIG_C90"] = "0"   # C90: the edge program's A/B starts only where C90Tests ask for it
 _os.environ["SIG_C91"] = "0"
-_os.environ["SIG_C92"] = "0"   # C87: the one-time migration (TM full, FM / scalper deleted) runs only where C87Tests ask for it
+_os.environ["SIG_C92"] = "0"
+_os.environ["SIG_C93"] = "0"   # C87: the one-time migration (TM full, FM / scalper deleted) runs only where C87Tests ask for it
 _os.environ["SIG_SM_PILOT"] = "0"   # turnover_plan C84: the spread-maker pilot never switches itself on inside a rig (SMTests set the layer explicitly)
 _os.environ["SIG_TM_PILOT"] = "0"   # day 11 C83: the touch-maker pilot never switches itself on inside a rig (TMTests set the layer explicitly)   # mm_plan C81: the fair-maker pilot never switches itself on inside a rig (FMTests set targets explicitly); set here because `unittest discover tests` imports this module without tests/__init__.py
 import collections
@@ -216,7 +217,8 @@ class EngineCase(unittest.TestCase):
         self.addCleanup(setattr, f_engine, "STARTUP_HOLD_S", f_engine.STARTUP_HOLD_S)
         f_engine.STARTUP_HOLD_S = 0                         # the rigs read from their first loop (the 2-min start-up hold is a live-only guard)
         for k, v in (("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
-                     ("CORE_CAP_COST", 0.0), ("TRADING_HOLD_C", 99.0), ("CORE_LOCK_RET", -99.0), ("TRADING_INV_CAP", 1e12), ("TRADING_CASH_TARGET", 0.0)):   # C88 / C89 rules off in the legacy rigs (C88Tests / C89Tests turn them on)
+                     ("CORE_CAP_COST", 0.0), ("TRADING_HOLD_C", 99.0), ("CORE_LOCK_RET", -99.0), ("TRADING_INV_CAP", 1e12), ("TRADING_CASH_TARGET", 0.0),
+                     ("NOEDGE", dict(ret=-99.0, low_fair=0.0, low_edge_c=0.0)), ("REPEG_AWAY_S", 0.0), ("GTC_TTL_S", 0), ("SM_REPEG_TICKS", 2), ("TM_REPEG_TICKS", 2)):   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
             self.addCleanup(setattr, f_engine, k, getattr(f_engine, k, None))
             setattr(f_engine, k, v)                         # C87 gates (real clock, no tape in the rigs, rig cash under BUFFER): off unless C87Tests set them
         for k in ("PNL_READ_S", "ORDERS_READ_S", "FILLS_READ_S", "POSITIONS_READ_S"):   # day 4 §4 / Oct 8 read caching have their own tests; the rigs (no realtime feed) read fresh each loop
@@ -4749,38 +4751,6 @@ class C89Tests(EngineCase):
         eng.ledger.subbooks.setdefault(ex, {})[sub] = float(qty if side == "yes" else -qty)
         eng.ledger.tranches[sub] = dict(ex=ex, side=side, kind="dump", state="open", ts=time.time() - 60, t="x", avg=avg)
 
-    def test_trading_sale_under_20k_lowest_return_first_never_core_never_at_a_loss(self):
-        fake, eng, favs = self.rig()
-        a, b, c = favs[:3]
-        fs = {e: eng.fair[e] for e in (a, b, c)}
-        self.lot(eng, a, f"dump:{a}:yes:1", 3000, round(fs[a] - 0.04, 3))          # 4c under fair: held by the 3c rule -> the seller takes it
-        self.lot(eng, b, f"dump:{b}:yes:1", 3000, round(fs[b] - 0.12, 3))          # 12c under fair: more return left -> sold later
-        self.lot(eng, c, f"dump:{c}:yes:1", 3000, round(fs[c] - 0.10, 3))
-        eng.core_set = {(c, f"dump:{c}:yes:1")}                                      # core: never sold by the seller
-        for e in (a, b, c):
-            fake.pos[e] = 3000; fake.avg_cost[e] = eng.ledger.tranches[f"dump:{e}:yes:1"]["avg"]
-            eng.book.setdefault(e, {})["pos"] = 3000
-        eng.lots_cache = (None, {})
-        eng.rotation_on = False
-        plan = eng.rotation_plan(a_config.CASH_RESERVE + 8_000, time.time())
-        self.assertTrue(eng.rotation_on, "free 8k < 20k: the seller is on")
-        self.assertIn(a, plan, plan); self.assertNotIn(c, plan, "never a core lot")
-        ask_a = bots.side_book(eng.px[a][0], eng.px[a][1], "yes")[1]
-        self.assertAlmostEqual(plan[a]["px"], ask_a, places=3, msg="at the touch (the held side's ask)")
-        self.assertGreaterEqual(plan[a]["px"], eng.ledger.tranches[f"dump:{a}:yes:1"]["avg"] + a_config.RULE0_MARGIN - 1e-9, "never at a loss")
-        rets = [(eng.side_fair(ex, plan[ex]["side"]) - plan[ex]["px"]) / plan[ex]["px"] for ex in plan]
-        self.assertEqual(rets, sorted(rets), "lowest return left to settlement first (a market-level return at the touch, not the lot's entry)")
-        self.assertTrue(any("TRADING SALE" in e["text"] and "return left" in e["text"] and "cash freed" in e["text"] for e in eng.events))
-        eng.rotation_plan(a_config.CASH_RESERVE + 20_600, time.time())
-        self.assertFalse(eng.rotation_on, "free >= 20k + 500: off")
-        # a lot under water is never sold: rule 0 holds it back
-        FAIR[a] = fs[a]; self.addCleanup(FAIR.pop, a, None)
-        eng.ledger.tranches[f"dump:{a}:yes:1"]["avg"] = round(ask_a + 0.05, 3); fake.avg_cost[a] = round(ask_a + 0.05, 3)
-        eng.lots_cache = (None, {})
-        eng.rotation_on = False
-        plan = eng.rotation_plan(a_config.CASH_RESERVE + 8_000, time.time())
-        self.assertNotIn(a, plan, "its entry is above the touch: not sold")
-
     def test_core_gain_lock_and_the_30k_inventory_stop(self):
         fake, eng, favs = self.rig()
         ex = favs[0]
@@ -4904,35 +4874,6 @@ class C90Tests(EngineCase):
         eng.cash_hist = [a_config.CASH_RESERVE + 25_000]
         self.assertAlmostEqual(eng.h4_budget(time.time()), a_config.H4["cap"] - 1000 * 1.96, delta=1)
 
-    def test_h3_arm_sells_only_for_a_better_waiting_entry_sized_to_it(self):
-        f_engine.CORE_CAP_COST, f_engine.TRADING_HOLD_C, f_engine.TRADING_CASH_TARGET = 50_000.0, 0.03, 20_000.0
-        fake, eng, favs = DumpV3Tests.rig(self)
-        eng.controls.d["edge"] = {"H3": dict(state="full", since="x", hist=[])}   # every market on H3
-        a = favs[0]; fs = eng.fair[a]
-        sub = f"dump:{a}:yes:1"
-        fake.px[a] = eng.px[a] = (0.90, 0.905, 0.9025)
-        FAIR[a] = 0.96; self.addCleanup(FAIR.pop, a, None)   # 5.5c = 6% return left at the touch ask 0.905: not converged
-        fake.pos[a] = 3000; fake.avg_cost[a] = 0.85
-        loop(eng, fake); loop(eng, fake)
-        fs = eng.fair[a]
-        ask_a = bots.side_book(eng.px[a][0], eng.px[a][1], "yes")[1]
-        eng.ledger.subbooks[a] = {sub: 3000.0}               # the whole position is this catch lot, bought at 0.85 (under the touch: rule 0 allows the sale)
-        eng.ledger.tranches[sub] = dict(ex=a, side="yes", kind="dump", state="open", ts=time.time() - 60, t="x", avg=0.85)
-        eng.lots_cache = (None, {}); eng.rotation_on = False
-        left = fs - ask_a
-        eng.dump_cut_rows, eng.tm_unfunded = [], []
-        plan = eng.rotation_plan(a_config.CASH_RESERVE + 8_000, time.time())
-        self.assertNotIn(a, plan, "no waiting entry: no sale on arm A")
-        eng.dump_cut_rows = [(left + 0.02, 900.0, 0.9)]
-        plan = eng.rotation_plan(a_config.CASH_RESERVE + 8_000, time.time())
-        self.assertNotIn(a, plan, "a waiting entry with only 2c more edge: no sale")
-        eng.dump_cut_rows = [(left + 0.04, 900.0, 0.9)]
-        plan = eng.rotation_plan(a_config.CASH_RESERVE + 8_000, time.time())
-        self.assertIn(a, plan, "a waiting entry with >= 3c more edge: sold")
-        n = sum(plan[a]["subs"].values())
-        self.assertLessEqual(n * plan[a]["px"], 900.0 + plan[a]["px"], "sized to the entry's cost")
-        self.assertTrue(any("H3 SWAP SALE" in e["text"] for e in eng.events))
-
     def test_dedup_vs_sig_drops_only_the_over_booked_synthetic_fills(self):
         fake, eng, favs = DumpV3Tests.rig(self)
         ex = favs[0]; t = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -4979,6 +4920,94 @@ class C90Tests(EngineCase):
         eng.track_dumps(time.time())
         self.assertIn(sub, {x["sub"] for x in eng.dump_view.get(ex, [])})
 
+
+class C93Tests(EngineCase):
+    """Piero 15:30 Oct 12 (C93): no seller touches a lot with >= 6% return left; a no-edge lot (< 6% return at its sale price, or a
+    fair < 0.85 side with < 3c of edge) gets one GTC ask at max(lot average + 0.5c, touch ask); core never; a re-peg waits 10 min; the
+    H1 test's sleeve, window, stop and 03:15 shortfall sale."""
+
+    def rig(self):
+        f_engine.CORE_CAP_COST, f_engine.TRADING_HOLD_C = 50_000.0, 0.03
+        f_engine.NOEDGE, f_engine.REPEG_AWAY_S, f_engine.GTC_TTL_S = dict(a_config.NOEDGE), a_config.REPEG_AWAY_S, a_config.GTC_TTL_S
+        f_engine.SM_REPEG_TICKS, f_engine.TM_REPEG_TICKS = a_config.SM_REPEG_TICKS, a_config.TM_REPEG_TICKS
+        return DumpV3Tests.rig(self)
+
+    def lot(self, eng, fake, ex, sub, qty, avg, px3, fair, side="yes"):
+        fake.px[ex] = eng.px[ex] = px3
+        FAIR[ex] = fair; self.addCleanup(FAIR.pop, ex, None)
+        fake.pos[ex] = qty; fake.avg_cost[ex] = avg
+        eng.ledger.subbooks[ex] = {sub: float(qty)}
+        eng.ledger.tranches[sub] = dict(ex=ex, side=side, kind="dump", state="open", ts=time.time() - 60, t="x", avg=avg)
+
+    def test_hold_above_6pct_release_no_edge_lots_gtc_at_max_avg_touch(self):
+        fake, eng, favs = self.rig()
+        a, b, c, d = favs[:4]
+        self.lot(eng, fake, a, f"dump:{a}:yes:1", 2000, 0.85, (0.90, 0.905, 0.9025), 0.97)   # 7.2% left at the touch 0.905: HELD
+        self.lot(eng, fake, b, f"dump:{b}:yes:1", 2000, 0.85, (0.90, 0.905, 0.9025), 0.94)   # 3.9% left: released at the touch 0.905
+        self.lot(eng, fake, c, f"dump:{c}:yes:1", 2000, 0.92, (0.90, 0.905, 0.9025), 0.94)   # lot average 0.92 > touch: ask at 0.925 (avg + 0.5c), 1.6% left
+        self.lot(eng, fake, d, f"dump:{d}:yes:1", 2000, 0.40, (0.78, 0.79, 0.785), 0.81)     # fair 0.81 < 0.85 and 2c of edge left: released (even at 2.5% return)
+        loop(eng, fake); loop(eng, fake)
+        eng.lots_cache = (None, {})
+        for e_, sub_ in ((a, f"dump:{a}:yes:1"), (b, f"dump:{b}:yes:1"), (c, f"dump:{c}:yes:1"), (d, f"dump:{d}:yes:1")):
+            eng.ledger.subbooks[e_] = {sub_: 2000.0}
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertNotIn(a, plan, "7% left: held whatever the cash")
+        self.assertIn(b, plan); self.assertAlmostEqual(plan[b]["px"], 0.905, places=3, msg="at the touch ask")
+        self.assertIn(c, plan); self.assertAlmostEqual(plan[c]["px"], 0.925, places=3, msg="max(lot average + 0.5c, touch)")
+        self.assertIn(d, plan); self.assertEqual(plan[d]["why"], "no-edge")
+        eng.core_set = {(b, f"dump:{b}:yes:1")}
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertNotIn(b, plan, "core: never")
+        self.assertTrue(any(e["text"].startswith("POSTED NO-EDGE ask") for e in eng.events))
+        self.assertFalse(any("TRADING SALE" in e["text"] or "H3 SWAP" in e["text"] for e in eng.events))
+
+    def test_release_asks_are_gtc_and_a_repeg_waits_ten_minutes(self):
+        fake, eng, favs = self.rig()
+        eng.controls.d["layers"].setdefault("release", dict(state="off", caps={}, killed=None))   # the release asks are reducing orders: they pass with the layer off, as live
+        b = favs[0]
+        self.lot(eng, fake, b, f"dump:{b}:yes:1", 2000, 0.85, (0.90, 0.905, 0.9025), 0.94)
+        loop(eng, fake); loop(eng, fake)
+        eng.ledger.subbooks[b] = {f"dump:{b}:yes:1": 2000.0}; eng.lots_cache = (None, {})
+        loop(eng, fake); loop(eng, fake)
+        rel = [o for o in fake.open_orders() if o["ex"] == b and (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "release"]
+        self.assertEqual(len(rel), 1, rel)
+        self.assertEqual(eng.ledger.orders[rel[0]["id"]].get("ttl"), a_config.GTC_TTL_S, "GTC")
+        oid = rel[0]["id"]
+        fake.px[b] = eng.px[b] = (0.91, 0.915, 0.9125)        # the touch moves 2 ticks up
+        loop(eng, fake); loop(eng, fake)
+        rel2 = [o for o in fake.open_orders() if o["ex"] == b and (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "release"]
+        self.assertEqual([o["id"] for o in rel2], [oid], "kept: the re-peg waits")
+        eng.drift_since[oid] = time.time() - a_config.REPEG_AWAY_S - 1
+        loop(eng, fake); loop(eng, fake)
+        rel3 = [o for o in fake.open_orders() if o["ex"] == b and (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "release"]
+        self.assertEqual(len(rel3), 1); self.assertNotEqual(rel3[0]["id"], oid, "re-pegged after 10 min")
+        self.assertAlmostEqual(1 - rel3[0]["price"], 0.915, places=3)
+
+    def test_h1_test_window_sleeve_stop_and_shortfall(self):
+        fake, eng, favs = self.rig()
+        day = a_config.H1_TEST["day"]
+        at = lambda hh, mm: time.mktime(time.strptime(f"{day} {hh:02d}:{mm:02d}:00", "%Y-%m-%d %H:%M:%S"))
+        self.assertFalse(eng.h1_test_active(at(3, 50))); self.assertTrue(eng.h1_test_active(at(9, 0))); self.assertFalse(eng.h1_test_active(at(15, 0)))
+        self.assertEqual(eng.h1_sleeve_reserve(at(3, 30)), 0.0)
+        self.assertAlmostEqual(eng.h1_sleeve_reserve(at(3, 50)), a_config.H1_TEST["sleeve"], places=1)
+        self.assertEqual(eng.h1_sleeve_reserve(at(15, 1)), 0.0)
+        eng.h1_test_pnl_fair = lambda now_: -160.0
+        eng.h1_test_check(at(9, 0))
+        self.assertTrue(eng.h1_test_stopped); self.assertFalse(eng.h1_test_active(at(9, 1)))
+        self.assertTrue(any("H1 TEST STOPPED" in e["text"] for e in eng.events))
+        # the 03:15 shortfall: lowest return first, at the bid, >= avg + 0.5c, capped by the edge given up
+        eng.h1_test_stopped = False
+        a, b = favs[:2]
+        self.lot(eng, fake, a, f"dump:{a}:yes:1", 3000, 0.80, (0.90, 0.905, 0.9025), 0.93)   # 3.3% left: first
+        self.lot(eng, fake, b, f"dump:{b}:yes:1", 3000, 0.80, (0.90, 0.905, 0.9025), 0.99)   # 10% left: later
+        loop(eng, fake); loop(eng, fake)
+        eng.ledger.subbooks[a] = {f"dump:{a}:yes:1": 3000.0}; eng.ledger.subbooks[b] = {f"dump:{b}:yes:1": 3000.0}; eng.lots_cache = (None, {})
+        eng.cash_hist = [a_config.CASH_RESERVE + 1_000]
+        plan = eng.h1_shortfall_plan(at(3, 16))
+        self.assertIn(a, plan); self.assertGreaterEqual(plan[a], 10)
+        self.assertLessEqual(sum(plan.values()) * 0.90, a_config.H1_TEST["sleeve"] + 1)
+        self.assertTrue(eng.h1_shortfall_done)
+        self.assertEqual(eng.h1_shortfall_plan(at(3, 20)), {}, "once")
 
 class Dash5Tests(EngineCase):
     """Dashboard v5 (docs/dashboard_v5.md): §0 P&L by SIG day (00:00 UTC; realized at SIG's average cost; realized + open = the day

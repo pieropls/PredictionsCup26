@@ -73,7 +73,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
-                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE,
+                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -417,6 +417,7 @@ class Engine:
         self.core_t, self.core_set, self.scoreboard_t, self.scoreboard = 0.0, set(), 0.0, {}   # C88: the two books and the scoreboard
         self.trading_inv_stopped = None                     # C89: the 30k trading-inventory stop
         self.dedup_pending = False
+        self.drift_since, self.h1_test_stopped, self.h1_shortfall_done, self.noedge_listed = {}, False, False, False   # C93
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
@@ -472,6 +473,7 @@ class Engine:
             self.c90_migration(time.time())
             self.c91_migration(time.time())
             self.c92_migration(time.time())
+            self.c93_migration(time.time())
         except Exception as err:
             print(f"C88 / C90 migration: {err!r}")
         try:
@@ -751,6 +753,11 @@ class Engine:
                 self.scalp_fill_events(new_f)
                 self.touch_fill_events(new_f)
                 self.wall_fill_events(new_f)
+                for f_ in new_f:                            # C93 item 3: FILLED is logged from SIG's fills only (cash freed counts here, never at POSTED)
+                    if f_.get("layer") == "release" and f_.get("action") == "buy":
+                        px_s = round(1 - f_["price"], 3)
+                        msg = f"FILLED release {self.name(f_['ex'])} {('NO' if f_['side'] == 'yes' else 'YES')} {f_['qty']:,.0f} at {px_s:.3f}: cash freed {f_['qty'] * px_s:,.0f}, realized {(f_.get('realized') or 0):+,.0f}"
+                        self.event("RELEASE", msg); self.night.line(msg)
                 self.sleeve_fill_events(new_f)
                 self.swing_fill_events(new_f)
                 self.rule0_fill_check(new_f)
@@ -935,7 +942,16 @@ class Engine:
                         if w.get("qmax") is not None:
                             w["qmax"] = min(w["qmax"], w["qty"])
                 wants = [w for w in wants if w["qty"] >= MIN_QTY]
+            if self.drift_since:                            # C93: a timer only lives while its order rests
+                open_ids = {o["id"] for o in self.open}
+                for oid in list(self.drift_since):
+                    if oid not in open_ids:
+                        self.drift_since.pop(oid, None)
+            for w in (wants if GTC_TTL_S else ()):          # C93 item 3: GTC — every seller, exit and TM / SM quote rests until re-pegged
+                if w.get("reduce") or w.get("layer") in ("tm", "sm", "release"):
+                    w["ttl"] = GTC_TTL_S
             kept, cancels, places = bots.reconcile(wants, mine.get(b.name, []))
+            cancels, places = self.repeg_grace(b, cancels, places, now)
             places = self.no_self_cross(b, places, cancels)
             if b.kind == "market":
                 places = self.admit(b, places, used, cash)
@@ -2832,7 +2848,7 @@ class Engine:
         # Day 9 §2-§3: the budget is k x free cash above the floor (minus Piero's walls); levels are allocated resting-first
         # (hysteresis: a resting level loses its slot only when the resting set alone no longer fits), L0 first within its
         # 8k cap (held + resting), then by expected edge = (fair - price) x reach / weight.
-        budget = max(0.0, self.entry_budget(cash) - self.wall_resting() - self.fm_reserve() - self.tm_reserve() - self.sm_reserve() - self.reservoir_resting())   # C84c: the reservoir's rebuys come first   # C70: Piero's walls, (C81b) the FM's cap and (C83) the TM's cap come off the top (weight 1.0)
+        budget = max(0.0, self.entry_budget(cash) - self.wall_resting() - self.fm_reserve() - self.tm_reserve() - self.sm_reserve() - self.reservoir_resting() - self.h1_sleeve_reserve(now))   # C93 item 4: the H1 sleeve ahead of the catcher   # C84c: the reservoir's rebuys come first   # C70: Piero's walls, (C81b) the FM's cap and (C83) the TM's cap come off the top (weight 1.0)
         out, cut, spent = self.allocate_levels(rows, budget, float(DUMP_L0_BUDGET) if DUMP_L0_CAP_RESTING else max(0.0, DUMP_L0_BUDGET - self.l0_held()))   # fix #1: the L0 rows themselves (resting + new) fit the cap
         self.entry_spent = round(spent)
         self.entry_left = max(0.0, budget - spent)
@@ -3556,10 +3572,14 @@ class Engine:
                    and (A["tm_edge"] is None or A["tm_edge"] >= H1_GATE["tm_edge_min"] - 1e-9))
             lose = A["per_h"] < B["per_h"] or (A["mo30"] is not None and A["mo30"] < -0.005)
             verdict = "win" if win else "lose" if lose else "tie"
+        try:
+            self.h1_test_check(now)
+        except Exception as err:
+            self.event("ERR", f"H1 test: {err!r}")
         if getattr(self, "dedup_pending", False) and getattr(self, "position_names", None) is not None:
             self.dedup_pending = False
             try:
-                self.dedup_vs_sig(now)
+                self.dedup_vs_sig(now, since=None if (self.controls.d.get("c93") or {}).get("dedup_all") else DEDUP_SINCE)
             except Exception as err:
                 self.event("ERR", f"dedup vs SIG: {err!r}")
         try:
@@ -3611,6 +3631,12 @@ class Engine:
                 self.night.line(f"H3 ({h3.get('state')}) last 12 h — A (swap-only sales): bought {s3['A']['bought']:+,.0f}, given back {-s3['A']['given']:+,.0f}, net {s3['A']['net']:+,.0f}, "
                                 f"{s3['A']['sales']} sales / {s3['A']['entries']} entries, realized {s3['A']['realized']:+,.0f}; control (C89 seller): bought {s3['B']['bought']:+,.0f}, given back "
                                 f"{-s3['B']['given']:+,.0f}, net {s3['B']['net']:+,.0f}, {s3['B']['sales']} sales / {s3['B']['entries']} entries, realized {s3['B']['realized']:+,.0f}; verdict: {v3}")
+            if self.h1_test_day(now) and (self.controls.d.get("h1_test") or {}).get("opened"):
+                fl = self.h1_test_fills(now)
+                ent = [f for f in fl if f.get("layer") == "sm"]; ex_ = [f for f in fl if f.get("layer") == "smexit"]
+                self.night.line(f"H1 TEST hour: {len(ent)} entry fills / {len(ex_)} exit fills so far, {self.h1_test_pnl_fair(now):+,.0f} at fair, realized {sum(f.get('realized') or 0 for f in ex_):+,.0f}, "
+                                f"cost in use {self.h1_cost():,.0f} of {H1_TEST['sleeve']:,.0f}, quotes resting {sum(1 for o in self.open if o['ex'] in set(self.h1_test_markets()) and (self.ledger.orders.get(o['id']) or {}).get('layer') == 'sm')}, "
+                                f"{'STOPPED' if self.h1_test_stopped else 'running'}")
             h4 = [bk for bk in self.ledger.baskets if bk.get("h4")]
             self.night.line(f"H4 pair locks: {len(h4)} sets, {sum(bk['qty'] for bk in h4):,} per leg, locked {sum(bk['qty'] * bk['margin'] for bk in h4):,.0f} at settlement, "
                             f"{self.h4_used:,.0f} of {H4['cap']:,} used" if H4.get("on") else "H4 off")
@@ -3653,6 +3679,34 @@ class Engine:
                f"judged hourly on net edge (bought - given back) per arm, promote after {EDGE_PROMOTE_H} winning hours, roll back after {EDGE_ROLLBACK_H} losing hours.")
         self.event("CONTROL", msg); self.night.line(msg)
 
+    def c93_migration(self, now):
+        """Once (C93, Piero 15:30 Oct 12): the 12k target and the H3 swap seller are retired (HOLD the favourites; release the no-edge
+        lots as GTC asks); orders keep their place; the whole-ledger dedup; the H1 decisive test is armed for Oct 13."""
+        c = self.controls
+        d = c.d.setdefault("c93", {})
+        if os.environ.get("SIG_C93", "1") != "1":
+            return
+        if d.get("done"):
+            if not (c.d.get("c92") or {}).get("dedup_all_done"):
+                self.dedup_pending = True
+            return
+        with c.lock:
+            c.d.pop("cash_target_1735", None); c.d.pop("cash_low_ret", None); c.d.pop("sell_subs", None)
+            e = c.d.setdefault("edge", {})
+            if (e.get("H3") or {}).get("state") in ("ab", "full"):
+                e["H3"].update(state="off", retired=stamp(), why="Piero 15:30: HOLD the favourites — no seller touches a lot with >= 6% return left")
+            d.update(done=stamp(), dedup_all=True)
+            c.save()
+        self.dedup_pending = True
+        msg = (f"C93 (Piero 15:30): (1) HOLD THE FAVOURITES — the C89 cash-target seller and the H3 swap seller are retired (H3 A/B closed: arm A ahead in every hourly read; "
+               f"the lesson is 'do not churn'); no seller touches a lot with >= {HOLD_RET:.0%} return left; the catcher's / TM's round-trip exits and core's rule stay. "
+               f"(2) RELEASE THE NO-EDGE LOTS: one GTC ask at max(lot average + 0.5c, touch ask) on every non-core lot with < {NOEDGE['ret']:.0%} return left at that price or on a side with fair < {NOEDGE['low_fair']} and < {NOEDGE['low_edge_c'] * 100:.0f}c of edge (RI-GOV-D and the RI reservoir excluded); the list follows. "
+               f"(3) ORDERS KEEP THEIR PLACE: every seller, exit and TM / SM quote is GTC ({GTC_TTL_S // 3600} h); a re-peg waits until the touch has sat >= {REPEG_AWAY_TICKS} tick away for > {REPEG_AWAY_S // 60} min; re-size only beyond 25%; POSTED and FILLED logged apart (cash freed counts from SIG fills only). "
+               f"(4) H1 DECISIVE TEST armed: {H1_TEST['day']} {H1_TEST['start']}-{H1_TEST['end']} PT on {', '.join(self.name(e) for e in self.h1_test_markets())}: a {H1_TEST['sleeve']:,.0f} sleeve ahead of the catcher from {H1_TEST['reserve_from']}, "
+               f"shortfall sold at the best bid at {H1_TEST['shortfall_at']} (<= ~{H1_TEST['shortfall_max_cost']:,.0f} of settlement value), GTC quotes of {H1_TEST['clip']} with the TM pause and the SM 24-h stop lifted there, stop {H1_TEST['stop_fair']:+,.0f} at fair. "
+               f"(5) the whole-ledger dedup against SIG's fills runs on the first controller pass (before / after line follows). H4 stays as it is.")
+        self.event("CONTROL", msg); self.night.line(msg)
+
     def c92_migration(self, now):
         """Once (C92, Piero 17:35 Oct 11): the cash plan for H1's morning flow and the H1 morning verdict."""
         c = self.controls
@@ -3676,7 +3730,7 @@ class Engine:
                f"RI's 8,900 held; never below entry + 0.5c. H1 is judged on the {H1_JUDGE_WINDOW[0]}-{H1_JUDGE_WINDOW[1]} PT window (fills per resting-hour vs control, 30-min mark-out) at 08:00.")
         self.event("CONTROL", msg); self.night.line(msg)
 
-    def dedup_vs_sig(self, now):
+    def dedup_vs_sig(self, now, since=DEDUP_SINCE):
         """Piero 17:35 item 2 (bookkeeping only): a synthetic (order_shrink) fill is a duplicate when the order is booked for more shares
         than SIG's own fills for it (data/fills_archive.jsonl, complete since Oct 1). Drop those synthetic fills newest-first until the
         booking matches SIG, repair the sub-books, recompute the scoreboard; log before / after."""
@@ -3698,7 +3752,7 @@ class Engine:
         self.scoreboard_t = 0; self.scoreboard_update(now)
         sb0 = dict(self.scoreboard or {})
         cat0 = (sb0.get("since") or {}).get("strategy", {}).get("catcher") or {}
-        fixed = self.ledger.dedup_vs_truth(truth, since=DEDUP_SINCE)   # Piero 17:35: the duplicates since the H3 window (Oct 9 19:30); the older ones are reported, not touched
+        fixed = self.ledger.dedup_vs_truth(truth, since=since)   # C92: the H3 window; C93 (Piero 15:30 item 5): the whole ledger
         self.lots_cache = (None, {})
         self.scoreboard_t = 0; self.scoreboard_update(now)
         sb1 = dict(self.scoreboard or {})
@@ -3713,6 +3767,8 @@ class Engine:
             self.ledger.save()
         with self.controls.lock:
             self.controls.d.setdefault("c92", {})["dedup_done"] = stamp()
+            if since is None:
+                self.controls.d["c92"]["dedup_all_done"] = stamp()
             self.controls.save()
 
     def book_scan(self, now):
@@ -6789,105 +6845,80 @@ class Engine:
         return stop
 
     def rotation_plan(self, cash, now):
-        """C89 (Piero 16:55 item 1): while free cash < 20k the TRADING book (never core) sells its lots lowest return-left first, at the
-        touch (the held side's best ask), only at >= entry + 0.5c (rule 0: never at a loss), until free >= 20k; this overrides the 3c
-        hold. Lots with their own exit layer are taken only while that exit is held (no double exit). Core lots that left core (a swap,
-        within 1c of fair, or the 3% gain lock) are sold at the touch whatever the cash. Each ask is logged with the return left, the
-        edge given up and the cash freed. Sales flow through the release path (a resting ask; never a market order)."""
-        free = cash - CASH_RESERVE
-        T = float(self.controls.d.get("cash_target_1735") or TRADING_CASH_TARGET)   # Piero 17:35: 12k tonight
-        low_ret = float(self.controls.d.get("cash_low_ret") or 0.0)          # Piero 17:35 (a): lots with < 6% return left sell first on both arms
-        listed = set(self.controls.d.get("sell_subs") or [])                  # Piero 17:35 (b): named lots (the NM Senate R walls) sold at the touch while short
+        """C93 (Piero 15:30 Oct 12). Item 1, HOLD THE FAVOURITES: no seller touches a lot with >= 6% return left to settlement (the
+        C89 cash-target seller and the H3 swap seller are gone; the layers' own round-trip exits at >= entry + 0.5c and core's rule
+        stay). Item 2, RELEASE THE NO-EDGE LOTS: every non-core lot (RI-GOV-D and the RI reservoir excluded) with < 6% return left at
+        its sale price, or on a side with fair < 0.85 and < 3c of edge left, gets ONE GTC ask at max(lot average + 0.5c, touch ask).
+        Core lots that left core (swap / 1c / gain lock) sell at the touch as before. Item 3: an ask keeps its place (the engine
+        defers any re-peg 10 min); POSTED is logged here, FILLED from SIG's fills only. The 03:15 H1 shortfall sale (item 4) adds
+        asks at the best bid from the lowest-return trading lots, capped by the edge it gives up."""
         if self.fills_blind:
             return {}
-        if free < T and not self.rotation_on:
-            self.rotation_on = True
-            self.event("RELEASE", f"TRADING CASH TARGET on: free {free:,.0f} < {T:,.0f} — the trading book sells lowest return-left first at the touch, >= entry + 0.5c, until free >= {T:,.0f} (Piero 16:55)")
-        elif free >= T + TRADING_CASH_HYST and self.rotation_on:
-            self.rotation_on = False
-            self.event("RELEASE", f"TRADING CASH TARGET off: free {free:,.0f} >= {T:,.0f}")
-        forced = set(((self.controls.d.get("core") or {}).get("swap_out") or {}).keys())   # ex|sub keys sold whatever the cash
-        if not self.rotation_on and not forced:
-            return {}
-        need = max(0.0, T + TRADING_CASH_HYST - free) if self.rotation_on else 0.0
-        cands = []
+        forced = set(((self.controls.d.get("core") or {}).get("swap_out") or {}).keys())
+        shortfall = self.h1_shortfall_plan(now)              # {ex: shares} at the bid, once, on the test day at 03:15
+        plan, listing = {}, []
         for ex, b in self.book.items():
             q = b["pos"]
-            if not q or ex not in self.owner or self.owner[ex].kind != "market" or self.ex.is_frozen(ex):
-                continue
+            if not q or ex not in self.owner or self.owner[ex].kind != "market" or self.ex.is_frozen(ex) or ex in self.manual_ex or str(ex) in dash5.RI_EX or ex in self.reservoirs():
+                continue                                    # Piero's manual market (RI-GOV-D), RI Senate R (his reservoir) and any reservoir market stay out
             side = "yes" if q > 0 else "no"
             bid, ask = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[:2]
             fs = self.side_fair(ex, side)
             if ask is None or fs is None:
                 continue
-            px = ask                                        # a resting ask at the touch of the held side, never a market order
-            left = fs - px
-            split, is_forced = {}, False
+            split, why, px_sale = {}, None, None
             for sub, v in self.ledger.subbooks.get(ex, {}).items():
+                if v * q <= 0 or sub.startswith(("manual", "pairset:", "sleeve:", "swing:")) or (str(ex), sub) in self.core_set:
+                    continue                                # never a core lot, Piero's manual / pair / sleeve lots, or the RI reservoir
                 key = f"{ex}|{sub}"
-                if v * q <= 0 or (sub.startswith(self.ROTATION_SKIP) and key not in listed) or (str(ex), sub) in self.core_set:
-                    continue                                # never a core lot; Piero's listed wall lots may be sold
                 avg = (self.ledger.tranches.get(sub) or {}).get("avg")
-                pol = self.lot_policy(ex, side, sub, avg, fs) if avg else "exit"
-                if key in forced:
-                    is_forced = True
-                elif not self.rotation_on:
+                if not avg:
+                    lots = [l for l in self.lots(ex, side, sub) if l[0] > 0]
+                    tot = sum(l[0] for l in lots)
+                    avg = (sum(l[0] * l[1] for l in lots) / tot) if tot else float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
+                if not avg:
                     continue
-                elif sub.startswith(self.OWN_EXIT_SUBS) and (pol != "hold" or self.own_exit_resting(ex, sub)):
-                    continue                                # its own layer's exit already rests (or will) at max(entry + 0.5c, touch): never a second exit (C90)
-                take = self.rule0_allowed(ex, side, sub, px, int(abs(v)))
-                if take >= MIN_QTY:
-                    split[sub] = take
-            if split:
-                cands.append((0 if is_forced else 1, left / px if px > 0 else 1.0, left, ex, side, px, split))
-        plan, raised = {}, 0.0
-        waiting = sorted([(e, c_, p_) for e, c_, p_ in list(self.dump_cut_rows) + list(self.tm_unfunded)], reverse=True)   # H3: entries cut for cash (edge, cost, px), best first
-        h3_log = []
-        for forced_rank, ret, left, ex, side, px, split in sorted(cands, key=lambda c_: (c_[0], c_[1])):   # forced first, then the lowest return left
-            if forced_rank == 1 and (raised >= need or len(plan) >= ROTATION_MARKETS_C89):
-                break
-            h3 = forced_rank == 1 and self.edge_arm("H3", ex) == "A" and ret >= low_ret - 1e-9 and not any(f"{ex}|{k}" in listed for k in split)
-            if h3:                                          # (a lot under the 6% line, or a listed one, sells on both arms: Piero 17:35)                                          # H3 (edge_program): sell only for a waiting entry with >= 3c more edge than this lot keeps, sized to that entry's cost
-                if ret >= H3["converged_ret"] - 1e-9:
-                    picks = [i for i, (e, c_, p_) in enumerate(waiting) if e >= left + H3["swap_c"] - 1e-9]
-                    if not picks:
-                        continue
-                    chosen = [waiting[i] for i in picks]
-                    for i in sorted(picks, reverse=True):
-                        waiting.pop(i)
-                    c_w = sum(c_ for _, c_, _ in chosen)
-                    h3_cap = c_w / px                       # sized to the cost of EVERY waiting entry that beats the lot by >= 3c (stable from loop to loop: no re-size churn)
-                    h3_log.append(f"{self.name(ex)}: lot keeps {left * 100:.1f}c, {len(chosen)} waiting entr{'y' if len(chosen) == 1 else 'ies'} at {min(e for e, _, _ in chosen) * 100:.1f}-{max(e for e, _, _ in chosen) * 100:.1f}c ({c_w:,.0f} at cost)")
+                floor_ = bots.tick_up(round(float(avg) + RULE0_MARGIN, 6))
+                if key in forced:
+                    px, reason = max(ask, floor_), "core lock"
+                elif ex in shortfall and bid is not None and bid >= floor_ - 1e-9:
+                    px, reason = bid, "h1 shortfall"      # item 4: at the best bid, >= lot average + 0.5c
                 else:
-                    h3_cap = float("inf")                   # converged (< 2% left): sold first, whole
-                    h3_log.append(f"{self.name(ex)}: converged ({ret:.1%} left)")
-            qty = int(sum(split.values())) if forced_rank == 0 else int(min(sum(split.values()), (need - raised) / px, h3_cap if h3 else float("inf")))
-            if qty < MIN_QTY:
+                    px = max(ask, floor_)
+                    ret = (fs - px) / px if px > 0 else 1.0
+                    if ret < NOEDGE["ret"] - 1e-9 or (fs < NOEDGE["low_fair"] - 1e-9 and fs - px < NOEDGE["low_edge_c"] - 1e-9):
+                        reason = "no-edge"
+                    else:
+                        continue                            # item 1: >= 6% return left -> HOLD
+                if sub.startswith(self.OWN_EXIT_SUBS) and self.own_exit_resting(ex, sub):
+                    continue                                # its own layer's exit already rests at the same price: never a second one
+                take = self.rule0_allowed(ex, side, sub, px, int(abs(v)))
+                if reason == "h1 shortfall":
+                    take = min(take, int(shortfall[ex]))
+                if take >= MIN_QTY:
+                    if px_sale is not None and abs(px - px_sale) > 1e-9:
+                        continue                            # one price per market per loop (the other lot waits for the next)
+                    px_sale, why = px, reason
+                    split[sub] = take
+            if not split:
                 continue
-            take, left_q = {}, qty
-            for sub, v in sorted(split.items(), key=lambda kv: -kv[1]):
-                t_ = int(min(v, left_q))
-                if t_ >= MIN_QTY:
-                    take[sub] = t_
-                    left_q -= t_
-            if not take:
-                continue
-            n = sum(take.values())
-            given = max(left, 0.0) * n
-            plan[ex] = dict(side=side, px=px, cost=round(left, 4), subs=take, why="rotation" if forced_rank else "core lock", tier=0, ev=round(given, 2))
-            self.release_why[ex] = (now, plan[ex]["why"])
-            if forced_rank:
-                raised += n * px
-            key = (ex, round(px, 3), n)
+            n = sum(split.values())
+            left = fs - px_sale
+            plan[ex] = dict(side=side, px=px_sale, cost=round(left, 4), subs=split, why=why, tier=0, ev=round(max(left, 0.0) * n, 2))
+            self.release_why[ex] = (now, why)
+            key = (ex, round(px_sale, 3), n)
+            listing.append(f"{self.name(ex)} {side.upper()} {n:,} @ {px_sale:.3f} ({(left / px_sale):.1%} left)")
             if self.rotation_logged.get(ex) == key:
-                continue                                    # the same ask as last loop: already logged (C84: no line per loop)
+                continue
             self.rotation_logged[ex] = key
-            tag = 'CORE LOCK' if forced_rank == 0 else 'H3 SWAP SALE' if h3 else 'WALL SALE (Piero 17:35)' if any(f"{ex}|{k}" in listed for k in take) else 'LOW-RETURN SALE' if ret < low_ret - 1e-9 else 'TRADING SALE'
-            msg = (f"{tag} {self.name(ex)} {side.upper()} {n:,} at the touch {px:.3f}: {ret:.1%} return left to settlement ({left * 100:.1f}c), "
-                   f"free {free:,.0f}, target {T:,.0f}; edge given up {given:+,.0f}, cash freed {n * px:,.0f}; lots " + ", ".join(f"{k.split(':')[0]} {v:,}" for k, v in take.items()))
-            self.rotation_log.append((now, msg + (f"; H3: {h3_log[-1]}" if h3 and h3_log else "")))
-            self.event("RELEASE", msg + (f"; H3: {h3_log[-1]}" if h3 and h3_log else ""))
-            self.night.line(msg + (f"; H3: {h3_log[-1]}" if h3 and h3_log else ""))
+            msg = (f"POSTED {why.upper()} ask {self.name(ex)} {side.upper()} {n:,} at {px_sale:.3f} ({'touch' if abs(px_sale - ask) < 1e-9 else 'lot average + 0.5c' if why != 'h1 shortfall' else 'the bid'}): "
+                   f"{left / px_sale:.1%} return left to settlement ({left * 100:.1f}c), would free {n * px_sale:,.0f}; lots " + ", ".join(f"{k.split(':')[0]} {v:,}" for k, v in split.items()))
+            self.rotation_log.append((now, msg))
+            self.event("RELEASE", msg)
+            self.night.line(msg)
+        if listing and not getattr(self, "noedge_listed", False):
+            self.noedge_listed = True
+            self.night.line(f"NO-EDGE ASKS (Piero 15:30 item 2), {len(listing)} markets, {sum(p['px'] * sum(p['subs'].values()) for p in plan.values()):,.0f} at those prices: " + "; ".join(listing))
         return plan
 
     def tm_migrations(self):
@@ -7295,9 +7326,14 @@ class Engine:
         plan, quoted, gated = {}, 0, collections.Counter()
         for ex in exs:
             reg = (self.sm_regime.get(ex) or {}).get("regime")
-            entries_ok = ex in universe and reg in SM_QUOTE_REGIMES and ex not in excluded and not exits_only and not inv_stop   # C87 / C89: regime gate and the 30k trading-inventory stop
+            h1t = self.h1_test_active(now) and ex in self.h1_test_markets()
+            entries_ok = (ex in universe and reg in SM_QUOTE_REGIMES and ex not in excluded and not exits_only and not inv_stop) or h1t   # C87 / C89 gates; C93 item 4: lifted inside the H1 test
             gated["entries" if entries_ok else ("excluded" if ex in excluded else "exits_only" if exits_only else "not_universe" if ex not in universe else f"regime_{reg}")] += 1
             clip, repeg, skew = self.sm_params(ex, sz)
+            if h1t:
+                clip = int(H1_TEST["clip"])
+                if self.h1_cost() >= float(H1_TEST["sleeve"]) - 1e-6:
+                    entries_ok = False                      # the sleeve is spent: exits only
             if ex not in self.owner or self.ex.is_frozen(ex) or ex in self.manual_ex or self.fm_poll_block(ex, now):
                 writes -= sum(1 for sd in ("yes", "no") if (ex, sd) in existing)
                 continue
@@ -8018,6 +8054,133 @@ class Engine:
                                    f"{' + '.join(f'{o[3]:.3f}' for o in orders)} -> locks {margin * 100:.1f}c/set "
                                    f"(~{qty * margin:,.0f} SIG once every leg fills)")
         return shots, start - budget
+
+    # ------------------------------------------------------------------------------------------------ C93 item 4: the H1 decisive test (Oct 13 04:00-15:00 PT)
+    def h1_test_day(self, now):
+        return time.strftime("%Y-%m-%d", time.localtime(now)) == H1_TEST["day"]
+
+    def h1_test_markets(self):
+        return [str(x) for x in H1_SM_UNIVERSE[:int(H1_TEST["n_markets"])]]
+
+    def h1_test_active(self, now):
+        """True inside the window on the test day while the -150-at-fair stop has not fired."""
+        hm = time.strftime("%H:%M", time.localtime(now))
+        return self.h1_test_day(now) and H1_TEST["start"] <= hm < H1_TEST["end"] and not self.h1_test_stopped and not self.controls.d.get("h1_test_off")
+
+    def h1_sleeve_reserve(self, now):
+        """Item 4: 5,000 reserved ahead of the catcher from 03:45 to 15:00 on the test day, less what the test already holds / rests."""
+        hm = time.strftime("%H:%M", time.localtime(now))
+        if not self.h1_test_day(now) or not (H1_TEST["reserve_from"] <= hm < H1_TEST["end"]) or self.h1_test_stopped:
+            return 0.0
+        return max(0.0, float(H1_TEST["sleeve"]) - self.h1_cost())
+
+    def h1_cost(self):
+        """What the H1 test uses: SM inventory at cost in its markets + the notional of its resting SM entry quotes."""
+        out = 0.0
+        for ex in self.h1_test_markets():
+            inv = self.sm_inventory(ex)
+            if abs(inv) >= 1:
+                avg = self.sm_avg(ex) or self.sig_mark(ex, "yes" if inv > 0 else "no") or 0.5
+                out += abs(inv) * float(avg)
+            for o in self.open:
+                rec = self.ledger.orders.get(o["id"]) or {}
+                if o["ex"] == ex and rec.get("layer") == "sm" and o["action"] == "buy" and not jx.reduces(o["side"], "buy", self.book.get(ex, {}).get("pos", 0)):
+                    out += o["qty"] * o["price"]
+        return out
+
+    def h1_test_fills(self, now):
+        """The test's own fills (SM entries and exits in its markets since the window opened on the test day)."""
+        lt = time.localtime(now)
+        t0 = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, int(H1_TEST["start"][:2]), int(H1_TEST["start"][3:]), 0, 0, 0, -1))
+        mk = set(self.h1_test_markets())
+        return [f for f in self.fills_since(t0) if f["ex"] in mk and f.get("layer") in ("sm", "smexit")]
+
+    def h1_test_pnl_fair(self, now):
+        return sum(self.fill_pnl_fair(f) for f in self.h1_test_fills(now))
+
+    def h1_test_check(self, now):
+        """Every controller pass on the test day: the -150 stop at fair on the test's own fills; the window's open / close lines."""
+        if not self.h1_test_day(now):
+            return
+        hm = time.strftime("%H:%M", time.localtime(now))
+        st = self.controls.d.setdefault("h1_test", {})
+        if H1_TEST["start"] <= hm < H1_TEST["end"] and not self.h1_test_stopped:
+            pf = self.h1_test_pnl_fair(now)
+            if pf < H1_TEST["stop_fair"] - 1e-9:
+                self.h1_test_stopped = True
+                with self.controls.lock:
+                    st["stopped"] = stamp(); st["pnl_fair_at_stop"] = round(pf, 2); self.controls.save()
+                msg = f"H1 TEST STOPPED: {pf:+,.0f} at fair on its own fills < {H1_TEST['stop_fair']:+,.0f}; back to control (the sleeve is released)"
+                self.event("CONTROL", msg); self.night.line(msg); self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+            if not st.get("opened"):
+                with self.controls.lock:
+                    st["opened"] = stamp(); self.controls.save()
+                msg = (f"H1 TEST OPEN ({H1_TEST['start']}-{H1_TEST['end']} PT): GTC quotes on {', '.join(self.name(e) for e in self.h1_test_markets())} inside the {H1_TEST['sleeve']:,.0f} sleeve "
+                       f"(clip {H1_TEST['clip']}, the TM 10k pause and the SM 24-h stop lifted there), exits >= entry + 0.5c GTC; stop {H1_TEST['stop_fair']:+,.0f} at fair; free cash {self.free_cash():,.0f}")
+                self.event("CONTROL", msg); self.night.line(msg)
+        elif hm >= H1_TEST["end"] and st.get("opened") and not st.get("closed"):
+            with self.controls.lock:
+                st["closed"] = stamp(); self.controls.save()
+            fills = self.h1_test_fills(now)
+            msg = f"H1 TEST CLOSED: {len(fills)} fills, {self.h1_test_pnl_fair(now):+,.0f} at fair, cost in use {self.h1_cost():,.0f}; the report follows (docs/h1_report_oct13.md)"
+            self.event("CONTROL", msg); self.night.line(msg)
+
+    def h1_shortfall_plan(self, now):
+        """Item 4: at 03:15 on the test day, once: if free cash is under the 5,000 sleeve, {ex: shares} to sell at the best bid from the
+        lowest-return trading lots (>= lot average + 0.5c), until the shortfall is covered or the edge given up reaches ~400."""
+        if self.h1_shortfall_done or not self.h1_test_day(now):
+            return {}
+        hm = time.strftime("%H:%M", time.localtime(now))
+        if not (H1_TEST["shortfall_at"] <= hm < H1_TEST["reserve_from"]):
+            return {}
+        self.h1_shortfall_done = True
+        short = float(H1_TEST["sleeve"]) - self.free_cash()
+        if short <= 0:
+            self.night.line(f"H1 shortfall check 03:15: free {self.free_cash():,.0f} >= the {H1_TEST['sleeve']:,.0f} sleeve: nothing to sell")
+            return {}
+        cands = []
+        for ex, side, sub, q, avg, fs, cost in self.engine_lots():
+            if (ex, sub) in self.core_set or fs is None:
+                continue
+            bid = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
+            if bid is None or bid < bots.tick_up(round(avg + RULE0_MARGIN, 6)) - 1e-9:
+                continue
+            cands.append(((fs - bid) / bid, ex, side, sub, q, bid, fs))
+        out, raised, given = {}, 0.0, 0.0
+        for ret, ex, side, sub, q, bid, fs in sorted(cands):
+            if raised >= short or given >= H1_TEST["shortfall_max_cost"]:
+                break
+            take = int(min(q, (short - raised) / bid, max(0.0, (H1_TEST["shortfall_max_cost"] - given) / max(fs - bid, 1e-6))))
+            if take < MIN_QTY:
+                continue
+            out[ex] = out.get(ex, 0) + take
+            raised += take * bid; given += take * (fs - bid)
+        self.night.line(f"H1 shortfall sale 03:15: free {self.free_cash():,.0f}, short {short:,.0f} of the sleeve -> {len(out)} markets at the best bid, ~{raised:,.0f} raised, ~{given:,.0f} of settlement value given up (cap {H1_TEST['shortfall_max_cost']:,.0f})")
+        return out
+
+    def repeg_grace(self, b, cancels, places, now):
+        """C93 item 3: a re-peg (a cancel paired with a new want on the same layer / sub / side) waits until the order has sat off its
+        target for > 10 min; a pull (no replacement) goes at once. -> (cancels, places) to act on now."""
+        key = lambda o: (o.get("layer"), o.get("sub"), o.get("side"), o.get("action"))
+        want_keys = collections.Counter(key(w) for w in places)
+        keep_c, deferred = [], collections.Counter()
+        for o in cancels:
+            k = key(o)
+            if o.get("id") and want_keys.get(k):
+                t0 = self.drift_since.setdefault(o["id"], now)
+                if now - t0 < REPEG_AWAY_S:
+                    want_keys[k] -= 1
+                    deferred[k] += 1
+                    continue                                # the order keeps its place a little longer
+            keep_c.append(o)
+        keep_p = []
+        for w in places:
+            k = key(w)
+            if deferred.get(k):
+                deferred[k] -= 1
+                continue                                    # the replacement waits with it
+            keep_p.append(w)
+        return keep_c, keep_p
 
     def h4_active(self):
         """H4 runs unless paused (Piero 17:35: paused until H1's verdict)."""
