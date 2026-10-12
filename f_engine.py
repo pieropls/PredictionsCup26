@@ -475,6 +475,7 @@ class Engine:
             self.c92_migration(time.time())
             self.c93_migration(time.time())
             self.c93b_migration(time.time())
+            self.c93c_migration(time.time())
         except Exception as err:
             print(f"C88 / C90 migration: {err!r}")
         try:
@@ -3639,7 +3640,7 @@ class Engine:
                 ent = [f for f in fl if f.get("layer") == "tm"]; ex_ = [f for f in fl if f.get("layer") == "tmexit"]
                 self.night.line(f"H1 TEST hour: {len(ent)} entry fills / {len(ex_)} exit fills so far, {self.h1_test_pnl_fair(now):+,.0f} at fair, realized {sum(f.get('realized') or 0 for f in ex_):+,.0f}, "
                                 f"cost in use {self.h1_cost():,.0f} of {H1_TEST['sleeve']:,.0f}, quotes resting {sum(1 for o in self.open if o['ex'] in set(self.h1_test_markets()) and (self.ledger.orders.get(o['id']) or {}).get('layer') == 'tm')}, "
-                                f"{'STOPPED' if self.h1_test_stopped else 'running'}")
+                                f"{'STOPPED' if self.h1_test_stopped else 'running'}, {'ring-stop hours (lifted for the sleeve)' if self.tm_entry_stop(now) or self.ring_window(now) else 'outside the ring stops'}")
             h4 = [bk for bk in self.ledger.baskets if bk.get("h4")]
             self.night.line(f"H4 pair locks: {len(h4)} sets, {sum(bk['qty'] for bk in h4):,} per leg, locked {sum(bk['qty'] * bk['margin'] for bk in h4):,.0f} at settlement, "
                             f"{self.h4_used:,.0f} of {H4['cap']:,} used" if H4.get("on") else "H4 off")
@@ -3708,6 +3709,19 @@ class Engine:
                f"(4) H1 DECISIVE TEST armed: {H1_TEST['day']} {H1_TEST['start']}-{H1_TEST['end']} PT on {', '.join(self.name(e) for e in self.h1_test_markets())}: a {H1_TEST['sleeve']:,.0f} sleeve ahead of the catcher from {H1_TEST['reserve_from']}, "
                f"shortfall sold at the best bid at {H1_TEST['shortfall_at']} (<= ~{H1_TEST['shortfall_max_cost']:,.0f} of settlement value), GTC quotes of {H1_TEST['clip']} with the TM pause and the SM 24-h stop lifted there, stop {H1_TEST['stop_fair']:+,.0f} at fair. "
                f"(5) the whole-ledger dedup against SIG's fills runs on the first controller pass (before / after line follows). H4 stays as it is.")
+        self.event("CONTROL", msg); self.night.line(msg)
+
+    def c93c_migration(self, now):
+        """Once (C93c, Piero 16:30 Oct 12): the ring stops lifted inside the H1 sleeve only; no self-trade; the report split by ring hours."""
+        c = self.controls
+        if (c.d.get("c93c") or {}).get("done"):
+            return
+        with c.lock:
+            c.d["c93c"] = dict(done=stamp()); c.save()
+        msg = (f"C93c (Piero 16:30): (1) RING STOPS LIFTED FOR THE H1 SLEEVE ONLY: inside the {H1_TEST['sleeve']:,.0f} sleeve on H5's ten the TM quotes {H1_TEST['start']}-{H1_TEST['end']} continuously, "
+               f"03:00-06:00 and 12:00-14:00 included (the sleeve is reserved apart from the catcher); everywhere else the TM ring stops stay; the {H1_TEST['stop_fair']:+,.0f}-at-fair stop stays. "
+               f"(2) NO SELF-TRADE: a sleeve bid is never placed at or through one of our own resting asks on the same market (release / exit asks, re-pegging ones included): a tick below it or the market is skipped, logged ('H1 SKIP'). "
+               f"(3) the H1 report splits fills, mark-out and P&L by ring-stop hours vs outside.")
         self.event("CONTROL", msg); self.night.line(msg)
 
     def c93b_migration(self, now):
@@ -6567,8 +6581,8 @@ class Engine:
         best = None
         for o in self.open:
             rec = self.ledger.orders.get(o["id"])
-            if o["ex"] != ex or o["action"] != "buy" or o["side"] == side or not rec or rec.get("layer") not in self.REDUCING or o["id"] in self.ex.cancelling:
-                continue
+            if o["ex"] != ex or o["action"] != "buy" or o["side"] == side or not rec or rec.get("layer") not in self.REDUCING:
+                continue                                    # C93c: an ask being re-pegged still counts (its layer re-posts it)
             px = round(1 - o["price"], 3)
             best = px if best is None else min(best, px)
         return best
@@ -6611,9 +6625,12 @@ class Engine:
             c.set_layer("tm", "full", f"Piero 16:10 §3: free {self.free_cash():,.0f} >= BUFFER {self.buffer():,.0f}", by="engine")
             msg = f"TM -> FULL SIZE (clip {TM_CLIP:,}, {TM_INV_MARKET:,} per market-side, {TM_CAP_COST:,}): free {self.free_cash():,.0f} >= BUFFER {self.buffer():,.0f} (Piero 16:10 §3)"
             self.event("TM", msg); self.night.line(msg)
+        h1_only = False
         if self.ring_window(now):
             self.tm_cov = dict(quoted=0, available=0, top=0, writes_left=0, writes_used=0, ring=True)
-            return {}                                       # (1c) a ring window: no new TM entries (resting bids go; the exits in track_tm keep running)
+            if not h1m:
+                return {}                                   # (1c) a ring window: no new TM entries (resting bids go; the exits in track_tm keep running)
+            h1_only = True                                  # C93c (Piero 16:30): the ring stops are lifted inside the H1 sleeve only (its cash is reserved apart from the catcher)
         stop = self.tm_entry_stop(now)
         if stop != getattr(self, "tm_stop_logged", None):
             if self.tm_stop_logged is not None or stop:
@@ -6621,12 +6638,11 @@ class Engine:
                        else "TM entries back after the ring window")
                 self.event("TM", msg); self.night.line(msg)
             self.tm_stop_logged = stop
-        h1_only = False
         if stop or self.tm_buffer_gate(now) or self.trading_inv_gate(now):
             self.tm_cov = dict(quoted=0, available=0, top=0, writes_left=0, writes_used=0, ring=stop, buffer_pause=not stop)
-            if stop or not h1m:
+            if not h1m:
                 return {}                                   # C87 / C89: no TM entries (resting bids go; exits keep running)
-            h1_only = True                                  # C93b: the 10k pause / inventory stop lifted inside the H1 sleeve only (the ring stops stay)
+            h1_only = True                                  # C93b / C93c: the 10k pause, the inventory stop and the ring stops lifted inside the H1 sleeve only
         sz = self.tm_sizes()
         glide = now >= time.mktime(time.strptime(TM_GLIDE_START, "%Y-%m-%d %H:%M:%S"))
         cap_cost = 0.0 if glide else self.tm_cap(now)       # Piero 22:15 (C82 item 2): base + max(0, free - BUFFER)
@@ -6681,11 +6697,17 @@ class Engine:
             if cur is not None and abs(cur["price"] - best) < 1e-9:
                 p = best                                    # we are the best bid: never improve on ourselves
             ask = self.own_ask(ex, side)
-            if ask is not None and p >= ask - 1e-9:
-                p = round(ask - TICK, 3)                    # I4: a tick under our own ask on this side
+            p0, own_block = p, ask is not None and p >= ask - 1e-9
+            if own_block:
+                p = round(ask - TICK, 3)                    # I4 / C93c item 2: a tick under our own ask on this side, never at or through it
             if p > fs - e_min + 1e-9 or p < best - 1e-9 or self.ri_edge_short(ex, p, fs) or not (MB_MIN_PX <= p <= MB_MAX_PX):
+                if ex in h1m and own_block:
+                    self.h1_skip_line(ex, side, now, f"H1 SKIP {self.name(ex)}: a sleeve bid {side.upper()} at {p0:.3f} would sit at / through our own ask at {ask:.3f}; "
+                                                      f"a tick below ({p:.3f}) is {'behind the touch' if p < best - 1e-9 else 'without edge'}: not quoted")
                 writes -= 1 if cur is not None else 0       # the pull is a cancel write
                 continue                                    # no edge at the touch (a resting bid whose edge is gone is pulled)
+            if ex in h1m and own_block:
+                self.h1_skip_line(ex, side, now, f"H1 sleeve bid {self.name(ex)} {side.upper()} sits a tick under our own ask at {ask:.3f}: {p:.3f} (not {p0:.3f})")
             sub = f"tm:{ex}:{side}"
             clip, inv_cap = (profile.get(ex) or (sz["clip"], sz["inv"], None))[:2]
             if ex in h1m:
@@ -8093,6 +8115,15 @@ class Engine:
     def h1_test_day(self, now):
         return time.strftime("%Y-%m-%d", time.localtime(now)) == H1_TEST["day"]
 
+    def h1_skip_line(self, ex, side, now, msg):
+        """C93c item 2: a self-trade skip / step-down inside the sleeve, logged once an hour per market-side."""
+        d = getattr(self, "h1_skip_logged", None)
+        if d is None:
+            d = self.h1_skip_logged = {}
+        if now - d.get((ex, side), 0) >= 3600:
+            d[(ex, side)] = now
+            self.event("H1", msg); self.night.line(msg)
+
     def h1_test_markets(self):
         return [str(x) for x in H1_SM_UNIVERSE[:int(H1_TEST["n_markets"])]]
 
@@ -8151,7 +8182,7 @@ class Engine:
                 with self.controls.lock:
                     st["opened"] = stamp(); self.controls.save()
                 msg = (f"H1 TEST OPEN ({H1_TEST['start']}-{H1_TEST['end']} PT): GTC touch-maker quotes (the side below fair) on {', '.join(self.name(e) for e in self.h1_test_markets())} inside the {H1_TEST['sleeve']:,.0f} sleeve "
-                       f"(clip {H1_TEST['clip']}, the TM 10k pause and the inventory stop lifted there; the spread maker stays exits-only; the ring stops 03:00-06:00 / 12:00-14:00 stay), exits per the TM rule GTC; stop {H1_TEST['stop_fair']:+,.0f} at fair; free cash {self.free_cash():,.0f}")
+                       f"(clip {H1_TEST['clip']}, the TM 10k pause, the inventory stop and the ring stops lifted there (C93c); the spread maker stays exits-only; no sleeve bid at or through our own ask), exits per the TM rule GTC; stop {H1_TEST['stop_fair']:+,.0f} at fair; free cash {self.free_cash():,.0f}")
                 self.event("CONTROL", msg); self.night.line(msg)
         elif hm >= H1_TEST["end"] and st.get("opened") and not st.get("closed"):
             with self.controls.lock:

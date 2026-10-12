@@ -5055,7 +5055,20 @@ class C93Tests(EngineCase):
         self.assertAlmostEqual(eng.h1_cost(), q[0]["qty"] * q[0]["price"], places=2)
         sm = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and eng.ledger.orders[o["id"]]["layer"] == "sm"]
         self.assertEqual(sm, [], "the spread maker stays exits-only")
+        # C93c item 1: the ring stops are lifted inside the sleeve only
+        f_engine.RING_WINDOWS = [("00:00", "23:59")]; f_engine.TM_ENTRY_STOPS = [("00:00", "23:59")]
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(len(tm()), 1, "ring window: the sleeve keeps quoting")
+        # C93c item 2: never at or through our own ask (a release ask YES at 0.46 = a resting buy NO at 0.54): a tick below is behind the touch -> skipped, logged
+        eng.open.append(dict(id="z9", ex=ex, side="no", action="buy", price=0.54, qty=300, status="open", filled=0))
+        eng.ledger.orders["z9"] = dict(layer="release", sub=f"sm:{ex}", ex=ex, side="no", action="buy", price=0.54, qty=300, status="open", bot=f"MKT {ex}", filled=0)
+        n0 = len(eng.events)
+        plan = eng.tm_plan(time.time(), a_config.CASH_RESERVE + 1_000, 0.0)
+        self.assertEqual(plan.get(ex, []), [], "a sleeve bid at 0.465 would sit through our own ask at 0.46: skipped")
+        self.assertTrue(any(e["text"].startswith("H1 SKIP") for e in eng.events[n0:]), [e["text"] for e in eng.events[n0:]])
+        eng.open[:] = [o for o in eng.open if o["id"] != "z9"]; eng.ledger.orders.pop("z9", None)
         eng.h1_test_active = lambda now_: False
+        f_engine.RING_WINDOWS = []; f_engine.TM_ENTRY_STOPS = []
         loop(eng, fake); loop(eng, fake)
         self.assertEqual(tm(), [], "outside the window: the pause holds")
 
