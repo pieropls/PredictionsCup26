@@ -4909,13 +4909,13 @@ class C90Tests(EngineCase):
         eng.controls.d["edge"] = {"H3": dict(state="full", since="x", hist=[])}   # every market on H3
         a = favs[0]; fs = eng.fair[a]
         sub = f"dump:{a}:yes:1"
-        eng.ledger.subbooks.setdefault(a, {})[sub] = 3000.0
-        eng.ledger.tranches[sub] = dict(ex=a, side="yes", kind="dump", state="open", ts=time.time() - 60, t="x", avg=round(fs - 0.05, 3))
-        fake.pos[a] = 3000; fake.avg_cost[a] = round(fs - 0.05, 3); eng.book.setdefault(a, {})["pos"] = 3000
         ask_a = bots.side_book(eng.px[a][0], eng.px[a][1], "yes")[1]
         FAIR[a] = round(min(0.99, ask_a + 0.06), 3); self.addCleanup(FAIR.pop, a, None)   # 6% return left at the touch: not converged
-        loop(eng, fake)
+        fake.pos[a] = 3000; fake.avg_cost[a] = round(FAIR[a] - 0.05, 3)
+        loop(eng, fake); loop(eng, fake)
         fs = eng.fair[a]
+        eng.ledger.subbooks.setdefault(a, {})[sub] = 3000.0
+        eng.ledger.tranches[sub] = dict(ex=a, side="yes", kind="dump", state="open", ts=time.time() - 60, t="x", avg=round(fs - 0.05, 3))
         eng.ledger.tranches[sub]["avg"] = round(fs - 0.05, 3); fake.avg_cost[a] = round(fs - 0.05, 3)
         eng.lots_cache = (None, {}); eng.rotation_on = False
         left = fs - ask_a
