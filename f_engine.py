@@ -71,7 +71,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      TM_BUFFER_RESUME, TM_PAUSE_FREE, D5_EXCLUDE_LAYERS, TM_ENTRY_STOPS, SM_REGIME_WIN_S, SM_REGIME_EVERY_S, SM_REGIME, SM_QUOTE_REGIMES, SM_LOSS_MARKET_DAY, SM_LOSS_24H,
                      SM_TUNE_AT, SM_TUNE_BOUNDS, SM_TUNE_MIN_GAIN, SM_TUNE_MIN_FILLS, RETIRED_LAYERS, DUMP_DEEP_OFF, DUMP_L0_CAP_RESTING, DUMP_THIN_SIDES,
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
-                     PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
+                     PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, CASH_FLOOR_RESUME, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
                      EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
@@ -477,6 +477,7 @@ class Engine:
             self.c93_migration(time.time())
             self.c93b_migration(time.time())
             self.c93c_migration(time.time())
+            self.c93e_migration(time.time())
         except Exception as err:
             print(f"C88 / C90 migration: {err!r}")
         try:
@@ -3712,6 +3713,23 @@ class Engine:
                f"(5) the whole-ledger dedup against SIG's fills runs on the first controller pass (before / after line follows). H4 stays as it is.")
         self.event("CONTROL", msg); self.night.line(msg)
 
+    def c93e_migration(self, now):
+        """Once (C93e, Piero 14:58 Oct 13): the cash_floor auto-resume at floor + 1,000; the H1 window reopened to 18:00; the shortfall per-sub cap."""
+        c = self.controls
+        if (c.d.get("c93e") or {}).get("done"):
+            return
+        with c.lock:
+            c.d["c93e"] = dict(done=stamp())
+            st = c.d.get("h1_test") or {}
+            if st.get("opened") and st.get("closed") and self.h1_test_day(now):
+                st["reopened"] = stamp(); st["closed_1500"] = st.pop("closed")
+            c.save()
+        msg = (f"C93e (Piero 14:58): (1) resumed by hand at 15:3x (the cash_floor pause from 12:11 after the manual NY-13 buy; the auto-resume wanted cash >= floor + 5,000). "
+               f"(2) a cash_floor / cash_short pause now lifts at cash >= floor + {CASH_FLOOR_RESUME:,} for 2 loops; the {CASH_RESERVE:,} floor and its pause are unchanged. "
+               f"(3) the H1 window is extended to {H1_TEST['end']} today (the 12:11-15:2x pause is not the sleeve's and is left out of resting time); the sleeve reserve and the touch-maker quotes resume; report at 18:30. "
+               f"Also in this release: the 03:15 shortfall sale's per-market cap is shared by the market's sub-books (Oklahoma sold 4,891 for a 2,505 shortfall).")
+        self.event("CONTROL", msg); self.night.line(msg)
+
     def c93c_migration(self, now):
         """Once (C93c, Piero 16:30 Oct 12): the ring stops lifted inside the H1 sleeve only; no self-trade; the report split by ring hours."""
         c = self.controls
@@ -4308,7 +4326,7 @@ class Engine:
             self.night.line(msg)
 
     def auto_resume(self, now):
-        """Every 5 min: lift an automatic pause whose condition is gone (cash >= floor + 5k for 2 loops; SIG writes >= 80%
+        """Every 5 min: lift an automatic pause whose condition is gone (cash >= floor + 1k for 2 loops; SIG writes >= 80%
         OK over the last 20; fills healthy). Also logs any pause > 10 min at the top of RUN_LOG (hourly status)."""
         c = self.controls
         ap = c.d.get("auto_pause") or {}
@@ -4316,7 +4334,7 @@ class Engine:
             return
         a = self.acct or {}
         cash = (a.get("totalAccountValue") or 0) - (a.get("totalHoldingsValue") or 0)
-        self.cash_ok_n = self.cash_ok_n + 1 if cash >= CASH_RESERVE + 5_000 else 0
+        self.cash_ok_n = self.cash_ok_n + 1 if cash >= CASH_RESERVE + CASH_FLOOR_RESUME else 0   # C93e (Piero 14:58): floor + 1,000 for 2 loops (was + 5,000)
         if ap.get("stuck") or now - (ap.get("t") or now) < 300:   # re-checked every loop (local data) from 5 min after the pause
             return
         kind = ap["kind"]
@@ -6967,6 +6985,8 @@ class Engine:
                         continue                            # one price per market per loop (the other lot waits for the next)
                     px_sale, why = px, reason
                     split[sub] = take
+                    if reason == "h1 shortfall":
+                        shortfall[ex] -= take               # C93e: the market's shortfall is shared by its sub-books (Oct 13 03:15: two dump lots each took the whole 2,505 -> 4,891 sold)
             if not split:
                 continue
             n = sum(split.values())

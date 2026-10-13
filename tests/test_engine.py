@@ -1462,11 +1462,11 @@ class FatFingerTests(EngineCase):
         self.assertTrue(eng.controls.paused)
         self.assertIn(eng.controls.d["auto_pause"]["kind"], ("cash_short", "cash_floor"), "C88: cash under the floor is a hard pause too")
         self.assertEqual(eng.controls.d.get("decisions"), [], "safety stops don't queue decisions")
-        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 6_000)
+        fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 1_500)   # C93e: floor + 1,000 is enough (was + 5,000)
         eng.controls.d["auto_pause"]["t"] -= 400         # 5 min after the pause
         for _ in range(3):
             loop(eng, fake)
-        self.assertFalse(eng.controls.paused, "cash >= floor + 5k for 2 loops: resumed by itself")
+        self.assertFalse(eng.controls.paused, "cash >= floor + 1k for 2 loops: resumed by itself (C93e, Piero 14:58 Oct 13)")
         self.assertTrue(any(e["kind"] == "PAUSE" and "AUTO-RESUME" in e["text"] for e in eng.events))
 
     def test_gates_hold_on_flag_or_blind_fills(self):
@@ -4987,10 +4987,10 @@ class C93Tests(EngineCase):
         fake, eng, favs = self.rig()
         day = a_config.H1_TEST["day"]
         at = lambda hh, mm: time.mktime(time.strptime(f"{day} {hh:02d}:{mm:02d}:00", "%Y-%m-%d %H:%M:%S"))
-        self.assertFalse(eng.h1_test_active(at(3, 50))); self.assertTrue(eng.h1_test_active(at(9, 0))); self.assertFalse(eng.h1_test_active(at(15, 0)))
+        self.assertFalse(eng.h1_test_active(at(3, 50))); self.assertTrue(eng.h1_test_active(at(9, 0))); self.assertFalse(eng.h1_test_active(at(18, 0)))
         self.assertEqual(eng.h1_sleeve_reserve(at(3, 30)), 0.0)
         self.assertAlmostEqual(eng.h1_sleeve_reserve(at(3, 50)), a_config.H1_TEST["sleeve"], places=1)
-        self.assertEqual(eng.h1_sleeve_reserve(at(15, 1)), 0.0)
+        self.assertEqual(eng.h1_sleeve_reserve(at(18, 1)), 0.0)
         eng.h1_test_pnl_fair = lambda now_: -160.0
         eng.h1_test_check(at(9, 0))
         self.assertTrue(eng.h1_test_stopped); self.assertFalse(eng.h1_test_active(at(9, 1)))
@@ -5003,11 +5003,21 @@ class C93Tests(EngineCase):
         loop(eng, fake); loop(eng, fake)
         eng.ledger.subbooks[a] = {f"dump:{a}:yes:1": 3000.0}; eng.ledger.subbooks[b] = {f"dump:{b}:yes:1": 3000.0}; eng.lots_cache = (None, {})
         eng.cash_hist = [a_config.CASH_RESERVE + 1_000]
+        eng.h1_shortfall_done = False                        # the loops above run on the real clock: on the test day between 03:15 and 03:45 they consume the one-shot
         plan = eng.h1_shortfall_plan(at(3, 16))
         self.assertIn(a, plan); self.assertGreaterEqual(plan[a], 10)
         self.assertLessEqual(sum(plan.values()) * 0.90, a_config.H1_TEST["sleeve"] + 1)
         self.assertTrue(eng.h1_shortfall_done)
         self.assertEqual(eng.h1_shortfall_plan(at(3, 20)), {}, "once")
+        # C93e: two sub-books on one market share the market's shortfall (Oct 13 03:15: 4,891 Oklahoma NO sold for a 2,505 shortfall)
+        eng.ledger.subbooks[a] = {f"dump:{a}:yes:1": 3000.0, f"dump:{a}:yes:2": 3000.0}; fake.pos[a] = 6000; eng.lots_cache = (None, {})
+        eng.ledger.tranches[f"dump:{a}:yes:2"] = dict(eng.ledger.tranches[f"dump:{a}:yes:1"])
+        loop(eng, fake); loop(eng, fake)
+        eng.h1_shortfall_done = False; eng.ledger.subbooks[a] = {f"dump:{a}:yes:1": 3000.0, f"dump:{a}:yes:2": 3000.0}; eng.lots_cache = (None, {})
+        eng.h1_shortfall_plan = lambda now_, _p=eng.h1_shortfall_plan: {a: 2500}
+        plan2 = eng.rotation_plan(a_config.CASH_RESERVE + 1_000, at(3, 16))
+        self.assertIn(a, plan2, ([e["text"][:120] for e in eng.events[-8:]], eng.ledger.subbooks[a], eng.book[a]["pos"], [(eng.ledger.orders.get(o["id"], {}).get("layer"), o["side"], o["price"], o["qty"]) for o in eng.open if o["ex"] == a]))
+        self.assertLessEqual(sum(plan2[a]["subs"].values()), 2500, plan2[a])
 
     def test_release_ask_uses_sig_average_when_the_lot_is_the_whole_position(self):
         """C93b (Piero 16:15 item 4): U.S. House D / CO-03 D / Kansas D asked at a tranche average that mixed both sides' entries."""

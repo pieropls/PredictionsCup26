@@ -26,6 +26,10 @@ import time
 import uuid
 from datetime import datetime, timedelta
 
+def qty_fmt(q):
+    return f"{int(q):,}"
+
+
 PRIORITY = {"cancel": 0, "position": 1, "trim": 1, "take": 2, "rebound": 3, "recycle": 3, "repair": 3, "unwind": 3,
             "set": 4, "mm": 5, "exit": 3, "touch": 5, "ladder": 6, "add": 1, "release": 3, "fatfinger": 7, "dump": 6, "dumpexit": 3, "longshot": 7, "longexit": 3, "scalp": 5, "scalpexit": 3, "touch": 5, "touchexit": 3, "wall": 6, "wallexit": 3, "sleeve": 6, "swing": 6, "swingsell": 3, "fm": 5, "fmexit": 3, "tm": 5, "tmexit": 3, "sm": 5, "smexit": 3}
 
@@ -265,6 +269,8 @@ class Executor:
             if qty < want:
                 self.trims[l] = self.trims.get(l, 0) + 1
                 self.trim_log = (self.trim_log + [(self.clock(), l, ex, want, qty)])[-200:]
+                self.log(f"  I2TRIM {l} {side} {action} {qty_fmt(want)} -> {qty_fmt(qty)} @ {price} on {ex}: position {pos:+,.0f}, reducing capacity left {cap[ex] + (want - qty if reduces(side, action, pos) else 0):,.0f} "
+                         f"(resting / in-flight reducing orders already cover the rest)")   # C93e: every trim named (the I2 hard pause fires on these)
             if qty >= self.min_qty:
                 out.append((b, s, l, (ex, side, action, price, int(qty))))
         return out

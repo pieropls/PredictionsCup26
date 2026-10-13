@@ -296,6 +296,7 @@ PM_STALE_S = 120                # Polymarket fair older than 2 min -> pause (res
 ENGINE_ERRORS_10M = 5           # >= 5 ERR events in 10 min -> pause (resume after 10 clean minutes)
 API_429_STORM_10M = 10          # >= 10 rate-limit answers in 10 min -> pause (resume under 3 in 10 min)
 I2_RESUME_S = 1800              # an I2 trim pauses; resume after 30 min without another
+CASH_FLOOR_RESUME = 1_000       # C93e (Piero 14:58 Oct 13): a cash_floor / cash_short pause lifts at cash >= floor + 1,000 for 2 loops (was + 5,000); the 5,000 floor and its pause are unchanged
 BOOK_SCAN_EVERY_S = 120         # the full scan of every book from the feed (gaps vs fair, with depth), zero REST reads
 RECYCLE_DEPTH_HOUR = 12         # daily snapshot (first loop after 12:00 PT) of resting bid depth >= 0.98 / 0.99 per contract (election night 5a)
 SCOREBOARD_EVERY_S = 300
@@ -325,7 +326,7 @@ HOLD_RET = 0.06                 # no seller touches a lot with >= 6% return left
 NOEDGE = dict(ret=0.06, low_fair=0.85, low_edge_c=0.03)   # item 2: a lot with < 6% return left at the sale price, or on a side with fair < 0.85 and < 3c of edge left -> one GTC ask at max(lot average + 0.5c, touch ask)
 GTC_TTL_S = 24 * 3600           # item 3: every seller and quote rests until re-pegged (no timer re-posts)
 REPEG_AWAY_TICKS, REPEG_AWAY_S = 1, 600   # item 3: re-peg only once the touch has moved >= 1 tick away for > 10 min; re-size only when the target changes > 25% (QTY_TOL)
-H1_TEST = dict(day="2026-10-13", start="04:00", end="15:00", reserve_from="03:45", shortfall_at="03:15", sleeve=5_000.0, n_markets=10, clip=600, layer="tm", stop_fair=-150.0, shortfall_max_cost=400.0)   # item 4; C93b (Piero 16:15): touch-maker quotes only on H5's ten   # H3 (arm A): a trading lot is sold only for a waiting entry with >= 3c more edge, sized to that entry's cost; converged lots (< 2% left) first
+H1_TEST = dict(day="2026-10-13", start="04:00", end="18:00", reserve_from="03:45", shortfall_at="03:15", sleeve=5_000.0, n_markets=10, clip=600, layer="tm", stop_fair=-150.0, shortfall_max_cost=400.0)   # item 4; C93b: touch-maker quotes only on H5's ten; C93e (Piero 14:58 Oct 13): window extended to 18:00 (the 12:11-15:2x cash_floor pause was not the sleeve's)   # H3 (arm A): a trading lot is sold only for a waiting entry with >= 3c more edge, sized to that entry's cost; converged lots (< 2% left) first
 H4 = dict(on=True, edge=0.04, per_race=5_000, cap=10_000, idle_free=10_000, waiting_edge=0.06)   # pair locks with idle cash: both NO at total cost <= 0.96 on races with no third candidate, <= 5k per race, <= 10k in all, only while free > the catcher's 10k reserve and no entry with >= 6% edge waits; held to settlement   # deleted (code in releases/archive/); their leftover lots: FM's offered at max(entry + 0.5c, touch), the scalper's moved to 'held'
 
 # turnover_plan §1 (C84): the spread maker (SM) — two-sided quoting at the touch on the bounciest markets, queue kept, refilled on fill
