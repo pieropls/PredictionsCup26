@@ -418,6 +418,7 @@ class Engine:
         self.trading_inv_stopped = None                     # C89: the 30k trading-inventory stop
         self.dedup_pending = False
         self.drift_since, self.h1_test_stopped, self.h1_shortfall_done, self.noedge_listed = {}, False, False, False   # C93
+        self.lotavg_logged = set()                          # C93d: one LOT AVG CHECK line per lot
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
@@ -3738,7 +3739,7 @@ class Engine:
                f"(3) the 15:59 I2 trim: the release ask Illinois Governor D YES 201 at 0.960 was posted in the loop in which the TM re-pegged its own exit for the same lot (NO 0.04 = YES 0.96, 201; the exit was in 'cancelling'); "
                f"the own-exit guard now counts an exit being re-pegged or planned this loop; the release ask was the one trimmed. "
                f"(4) a release ask takes SIG's own position average when the lot is the whole position (the tranche average had mixed both sides' entries): "
-               f"U.S. House D NO 502 (0.61 -> 0.12), CO-03 House race D YES 492 (0.545 -> 0.33), Kansas Senate D NO 1,355 (0.618 -> 0.598); their asks re-post at max(avg + 0.5c, touch) (POSTED lines follow).")
+               f"U.S. House D NO 502 (0.61 -> 0.12), CO-03 House race D YES 492 (0.545 -> 0.33); Kansas Senate D NO 1,355 keeps its lots' 0.618 (SIG's 0.598 is average-cost accounting after the TM's 1,000 at 0.57 were sold at 0.582; rule 0 holds the lots): asks at max(avg + 0.5c, touch) (POSTED lines follow).")
         self.event("CONTROL", msg); self.night.line(msg)
 
     def c92_migration(self, now):
@@ -6929,16 +6930,21 @@ class Engine:
                     continue                                # never a core lot, Piero's manual / pair / sleeve lots, or the RI reservoir
                 key = f"{ex}|{sub}"
                 sig_avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
-                if sig_avg and abs(v) >= 0.95 * abs(q) - 1e-9:
-                    avg = sig_avg                           # C93b (Piero 16:15 item 4): the lot is the whole SIG position: SIG's own average is the lot average (the tranche average had mixed both sides' entries)
+                whole = abs(v) >= 0.95 * abs(q) - 1e-9
+                lots = [l for l in self.lots(ex, side, sub) if l[0] > 0]
+                tot = sum(l[0] for l in lots)
+                if tot >= 0.95 * abs(v) - 1e-9:
+                    avg = sum(l[0] * l[1] for l in lots) / tot   # C93d: the ledger's own FIFO lots (what rule 0 enforces) are the lot average
+                elif sig_avg and whole:
+                    avg = sig_avg                           # C93b (Piero 16:15 item 4): no lot record and the lot is the whole SIG position: SIG's average (the tranche record had mixed both sides' entries)
                 else:
-                    avg = (self.ledger.tranches.get(sub) or {}).get("avg")
-                if not avg:
-                    lots = [l for l in self.lots(ex, side, sub) if l[0] > 0]
-                    tot = sum(l[0] for l in lots)
-                    avg = (sum(l[0] * l[1] for l in lots) / tot) if tot else sig_avg
+                    avg = (self.ledger.tranches.get(sub) or {}).get("avg") or sig_avg
                 if not avg:
                     continue
+                if whole and sig_avg and abs(float(avg) - sig_avg) > 0.02 and key not in self.lotavg_logged:
+                    self.lotavg_logged.add(key)
+                    self.event("RELEASE", f"LOT AVG CHECK {self.name(ex)} {side.upper()} {abs(v):,.0f} ({sub}): the ledger's lots average {float(avg):.3f}, SIG's position average {sig_avg:.3f} "
+                                          f"(SIG averages every buy and lets a sale reduce the quantity at that average; the lots are what rule 0 holds): the ask floors at {float(avg) + RULE0_MARGIN:.3f}")
                 floor_ = bots.tick_up(round(float(avg) + RULE0_MARGIN, 6))
                 if key in forced:
                     px, reason = max(ask, floor_), "core lock"
