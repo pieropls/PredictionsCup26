@@ -3753,18 +3753,28 @@ class Engine:
         return max(0.0, float(st.get("cash_freed") or 0.0) - self.rot_cost())
 
     def rot_sale_fill(self, f, px_s):
-        """A release fill on a rotation-sale market: the target shrinks, the cash pool grows. -> 'rotation ' tag or ''."""
+        """A release fill on a rotation-sale market: tagged; the target and the cash pool are recomputed from the ledger (rot_sync),
+        so a restart or a re-read never counts a fill twice (C94d: the 22:38 restart re-logged Delaware's fills and doubled the pool)."""
+        return "rotation " if str(f["ex"]) in (ROTATION.get("sells") or {}) else ""
+
+    def rot_sync(self):
+        """C94d: sold / cash freed / left-to-sell from the ledger's release fills on the sale markets since the rotation began."""
         st = self.rot_state()
-        left = st.get("sell_left") or {}
-        ex = str(f["ex"])
-        if ex not in left:
-            return ""
-        with self.controls.lock:
-            left[ex] = max(0, int(left[ex]) - int(f["qty"]))
-            st["cash_freed"] = round(float(st.get("cash_freed") or 0.0) + f["qty"] * px_s, 2)
-            st["sold"] = round(float(st.get("sold") or 0.0) + f["qty"], 0)
-            self.controls.d["rotation"] = st; self.controls.save()
-        return "rotation "
+        sells = ROTATION.get("sells") or {}
+        if not st or not sells:
+            return st
+        t0 = st.get("since") or "2026-10-13 21:33:00"
+        sold = collections.Counter(); freed = 0.0
+        for f in self.ledger.fills:
+            ex = str(f.get("ex"))
+            if ex in sells and f.get("layer") == "release" and f.get("action") == "buy" and str(f.get("t", "")) >= t0:
+                sold[ex] += f["qty"]; freed += f["qty"] * round(1 - f["price"], 3)
+        new_left = {ex: max(0, int(v) - int(sold.get(ex, 0))) for ex, v in sells.items()}
+        if new_left != st.get("sell_left") or abs(freed - float(st.get("cash_freed") or 0)) > 0.5:
+            with self.controls.lock:
+                st.update(sell_left=new_left, cash_freed=round(freed, 2), sold=float(sum(sold.values())))
+                self.controls.d["rotation"] = st; self.controls.save()
+        return st
 
     def rot_touch(self, ex, side):
         """(bid, ask, fair) on `side` for the rotation: the touch bid we would join, the ask, PM fair in side terms."""
@@ -3782,11 +3792,11 @@ class Engine:
         c = self.controls
         if not ROTATION.get("on") or c.paused or self.fills_blind or c.state("rot") == "off":
             return {}
-        st = self.rot_state()
+        st = self.rot_sync()
         if not st:
             return {}
         skipped = st.get("skipped") or {}
-        pool = self.rot_reserve()                           # freed cash not yet committed
+        pool = min(self.rot_reserve(), max(0.0, self.free_cash()))   # freed cash not yet committed, and never past the 5,000 floor (C94d)
         plan = {}
         def best_leg(tgt):
             """(ex, side, px, fair, bid) of the target's cheapest eligible leg, else None."""

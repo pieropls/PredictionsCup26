@@ -5110,10 +5110,14 @@ class C94Tests(EngineCase):
         plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
         self.assertIn(a, plan); self.assertEqual(sum(plan[a]["subs"].values()), 4000, "C94b: a core lot Piero named for the rotation is sold too")
         eng.core_set = set()
-        # a fill shrinks the target and feeds the pool
-        tag = eng.rot_sale_fill(dict(ex=a, qty=1500.0, price=0.095, side="no", action="buy", layer="release"), 0.905)
-        self.assertEqual(tag, "rotation "); self.assertEqual(eng.controls.d["rotation"]["sell_left"][a], 2500)
-        self.assertAlmostEqual(eng.controls.d["rotation"]["cash_freed"], 1500 * 0.905, places=1)
+        # a SIG fill of the ask shrinks the target and feeds the pool (recomputed from the ledger: idempotent across restarts, C94d)
+        eng.controls.d["rotation"]["since"] = "2026-10-13 00:00:00"
+        eng.ledger.fills.append(dict(ex=a, qty=1500.0, price=0.095, side="no", action="buy", layer="release", t="2026-10-13 12:00:00", order="zz1", realized=7.5))
+        self.assertEqual(eng.rot_sale_fill(dict(ex=a), 0.905), "rotation ")
+        st = eng.rot_sync()
+        self.assertEqual(st["sell_left"][a], 2500); self.assertAlmostEqual(st["cash_freed"], 1500 * 0.905, places=1)
+        eng.rot_sync()                                        # a second pass (a restart re-reading the same fill) changes nothing
+        self.assertEqual(eng.controls.d["rotation"]["sell_left"][a], 2500)
         self.assertAlmostEqual(eng.rot_reserve(), 1500 * 0.905, places=1, msg="freed cash is reserved for the rotation's bids")
 
     def test_rotation_bids_only_with_gap_and_pool_and_close_on_a_pm_move(self):
