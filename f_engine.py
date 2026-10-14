@@ -3788,10 +3788,8 @@ class Engine:
         skipped = st.get("skipped") or {}
         pool = self.rot_reserve()                           # freed cash not yet committed
         plan = {}
-        for tgt in ROTATION["buys"]:
-            key = tgt["key"]
-            if key in skipped:
-                continue
+        def best_leg(tgt):
+            """(ex, side, px, fair, bid) of the target's cheapest eligible leg, else None."""
             best = None
             for ex, side, cap_px in tgt["legs"]:
                 ex = str(ex)
@@ -3803,6 +3801,12 @@ class Engine:
                 px = bots.tick_down(round(min(bid, cap_px), 6))
                 if best is None or px < best[2] - 1e-9:
                     best = (ex, side, px, fs, bid)
+            return best
+        ranked = sorted(((b, best_leg(b)) for b in ROTATION["buys"] if b["key"] not in skipped), key=lambda x: -((x[1][3] - x[1][2]) if x[1] else -1))
+        for tgt, best in ranked:                            # C94c: the pool goes to the biggest gap first
+            key = tgt["key"]
+            if key in skipped:
+                continue
             if best is None:
                 continue
             ex, side, px, fs, bid = best
@@ -3825,6 +3829,7 @@ class Engine:
             qty = int(avail / px) if px > 0 else 0
             if qty < MIN_QTY:
                 continue
+            pool -= max(0.0, qty * px - resting)            # C94c: the pool is shared by the targets (C94 sized every bid to the whole pool)
             if posted is None:
                 self.rot_posted[key] = fs
                 msg = (f"ROT POSTED {tgt['name']}: bid {side.upper()} {qty:,} at {px:.3f} on {self.name(ex)} (touch {bid:.3f}, cap {dict((str(e), cp) for e, sd, cp in tgt['legs'])[ex]:.3f}, "

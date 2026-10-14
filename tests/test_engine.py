@@ -5130,6 +5130,13 @@ class C94Tests(EngineCase):
         plan = eng.rot_plan(time.time(), a_config.CASH_RESERVE + 5_000)
         self.assertIn(ex, plan); w = plan[ex][0]
         self.assertAlmostEqual(w["px"], 0.46, places=3, msg="at the touch (<= the 0.47 cap)"); self.assertEqual(w["qty"], int(1_000 / 0.46), "sized to the pool")
+        # C94c: two targets share one pool
+        ex2 = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and b.ex != ex and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
+        FAIR[ex2] = 0.52; self.addCleanup(FAIR.pop, ex2, None); fake.px[ex2] = eng.px[ex2] = (0.46, 0.47, 0.465)
+        f_engine.ROTATION = dict(a_config.ROTATION, on=True, sells={}, buys=[dict(key="t", name="T", legs=[(ex, "yes", 0.47)], cap=4_000.0), dict(key="u", name="U", legs=[(ex2, "yes", 0.47)], cap=4_000.0)])
+        plan2 = eng.rot_plan(time.time(), a_config.CASH_RESERVE + 5_000)
+        self.assertAlmostEqual(sum(w_["qty"] * w_["px"] for ws in plan2.values() for w_ in ws), 1_000, delta=0.47, msg="the two bids together never exceed the pool")
+        f_engine.ROTATION = dict(a_config.ROTATION, on=True, sells={}, buys=[dict(key="t", name="T", legs=[(ex, "yes", 0.47)], cap=4_000.0)])
         self.assertTrue(any(e["text"].startswith("ROT POSTED") for e in eng.events))
         fake.px[ex] = eng.px[ex] = (0.49, 0.50, 0.495)        # the touch is above the cap: the bid sits at the cap 0.47 (gap 5c)
         plan = eng.rot_plan(time.time(), a_config.CASH_RESERVE + 5_000)
