@@ -5106,6 +5106,10 @@ class C94Tests(EngineCase):
         self.assertIn(a, plan); self.assertEqual(plan[a]["why"], "rotation sale")
         self.assertAlmostEqual(plan[a]["px"], 0.905, places=3, msg="max(lot avg + 0.5c = 0.805, touch ask 0.905)")
         self.assertEqual(sum(plan[a]["subs"].values()), 4000, "the market's target, shared by its two sub-books")
+        eng.core_set = {(a, f"dump:{a}:yes:1"), (a, f"dump:{a}:yes:2")}
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertIn(a, plan); self.assertEqual(sum(plan[a]["subs"].values()), 4000, "C94b: a core lot Piero named for the rotation is sold too")
+        eng.core_set = set()
         # a fill shrinks the target and feeds the pool
         tag = eng.rot_sale_fill(dict(ex=a, qty=1500.0, price=0.095, side="no", action="buy", layer="release"), 0.905)
         self.assertEqual(tag, "rotation "); self.assertEqual(eng.controls.d["rotation"]["sell_left"][a], 2500)

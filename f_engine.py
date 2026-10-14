@@ -7151,8 +7151,9 @@ class Engine:
         plan, listing = {}, []
         for ex, b in self.book.items():
             q = b["pos"]
-            if not q or ex not in self.owner or self.owner[ex].kind != "market" or self.ex.is_frozen(ex) or ex in self.manual_ex or str(ex) in dash5.RI_EX or ex in self.reservoirs():
-                continue                                    # Piero's manual market (RI-GOV-D), RI Senate R (his reservoir) and any reservoir market stay out
+            if not q or ex not in self.owner or self.owner[ex].kind != "market" or self.ex.is_frozen(ex) or ex in self.manual_ex or str(ex) in dash5.RI_EX or (ex in self.reservoirs() and str(ex) not in rot_left):
+                continue                                    # Piero's manual market (RI-GOV-D), RI Senate R (his reservoir) and any reservoir market stay out (C94: unless he named it for the rotation; its reservoir subs still stay)
+            res_subs = self.reservoir_subs(ex) if ex in self.reservoirs() else set()
             side = "yes" if q > 0 else "no"
             bid, ask = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[:2]
             fs = self.side_fair(ex, side)
@@ -7160,8 +7161,8 @@ class Engine:
                 continue
             split, why, px_sale = {}, None, None
             for sub, v in self.ledger.subbooks.get(ex, {}).items():
-                if v * q <= 0 or sub.startswith(("manual", "pairset:", "sleeve:", "swing:")) or (str(ex), sub) in self.core_set:
-                    continue                                # never a core lot, Piero's manual / pair / sleeve lots, or the RI reservoir
+                if v * q <= 0 or sub.startswith(("manual", "pairset:", "sleeve:", "swing:")) or sub in res_subs or ((str(ex), sub) in self.core_set and str(ex) not in rot_left):
+                    continue                                # never a core lot (unless Piero named the market for the rotation, C94), his manual / pair / sleeve lots, or the RI reservoir
                 key = f"{ex}|{sub}"
                 sig_avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
                 whole = abs(v) >= 0.95 * abs(q) - 1e-9
@@ -7180,12 +7181,12 @@ class Engine:
                     self.event("RELEASE", f"LOT AVG CHECK {self.name(ex)} {side.upper()} {abs(v):,.0f} ({sub}): the ledger's lots average {float(avg):.3f}, SIG's position average {sig_avg:.3f} "
                                           f"(SIG averages every buy and lets a sale reduce the quantity at that average; the lots are what rule 0 holds): the ask floors at {float(avg) + RULE0_MARGIN:.3f}")
                 floor_ = bots.tick_up(round(float(avg) + RULE0_MARGIN, 6))
-                if key in forced:
+                if str(ex) in rot_left and not sub.startswith("rot:"):
+                    px, reason = max(ask, floor_), "rotation sale"   # C94 item 1: the favourites Piero named, whatever their return left or core status
+                elif key in forced:
                     px, reason = max(ask, floor_), "core lock"
                 elif ex in shortfall and bid is not None and bid >= floor_ - 1e-9:
                     px, reason = bid, "h1 shortfall"      # item 4: at the best bid, >= lot average + 0.5c
-                elif str(ex) in rot_left and not sub.startswith("rot:"):
-                    px, reason = max(ask, floor_), "rotation sale"   # C94 item 1: the favourites Piero named, whatever their return left
                 else:
                     px = max(ask, floor_)
                     ret = (fs - px) / px if px > 0 else 1.0
