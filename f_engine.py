@@ -73,7 +73,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, CASH_FLOOR_RESUME, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
-                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST,
+                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -140,7 +140,7 @@ def host_id():
 
 # ====================================================================================================== controls
 STARTUP_HOLD_S = 120          # optional reads (sampler, depth, fat-finger queues) wait 2 min after a start: every restart's burst gave a 429 (Oct 8)
-LAYERS = ["position", "recycler", "release", "mm", "scalp", "tm", "sm", "touch", "wall", "sleeve", "swing", "fm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
+LAYERS = ["position", "recycler", "release", "mm", "scalp", "tm", "sm", "rot", "touch", "wall", "sleeve", "swing", "fm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
 TMM_ENABLED = True              # afternoon D-C: the engine's MM is the turnover MM (False: classic MM v2, tests only)
 LAYER_STATES = ("off", "pilot", "full")
 
@@ -419,6 +419,7 @@ class Engine:
         self.dedup_pending = False
         self.drift_since, self.h1_test_stopped, self.h1_shortfall_done, self.noedge_listed = {}, False, False, False   # C93
         self.lotavg_logged = set()                          # C93d: one LOT AVG CHECK line per lot
+        self.rot_now, self.rot_view, self.rot_posted, self.rot_logged = {}, {}, {}, set()   # C94: the coin-flip rotation layer
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
@@ -478,6 +479,7 @@ class Engine:
             self.c93b_migration(time.time())
             self.c93c_migration(time.time())
             self.c93e_migration(time.time())
+            self.c94_migration(time.time())
         except Exception as err:
             print(f"C88 / C90 migration: {err!r}")
         try:
@@ -579,8 +581,8 @@ class Engine:
     MARKET_LAYERS = {"exit": "recycler", "recycle": "recycler", "take": "sniper", "mm": "mm",   # "touch" is the day-6 layer (the old MM touch quote is gone)
                      "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs",
                      "release": "release", "fatfinger": "fatfinger", "dump": "dump", "dumpexit": "dump",
-                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall", "sleeve": "sleeve", "swing": "swing", "swingsell": "swing", "fm": "fm", "fmexit": "fm", "tm": "tm", "tmexit": "tm", "sm": "sm", "smexit": "sm"}
-    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit", "touchexit", "wallexit", "tmexit", "fmexit", "swingsell", "smexit"}
+                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall", "sleeve": "sleeve", "swing": "swing", "swingsell": "swing", "fm": "fm", "fmexit": "fm", "tm": "tm", "tmexit": "tm", "rot": "rot", "rotexit": "rot", "sm": "sm", "smexit": "sm"}
+    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit", "touchexit", "wallexit", "tmexit", "fmexit", "swingsell", "smexit", "rotexit"}
 
     def gate(self, b, wants):
         """Layer flags (data/overrides.json): a want survives only if its layer is on and allowed on this market. Pause
@@ -760,8 +762,10 @@ class Engine:
                 for f_ in new_f:                            # C93 item 3: FILLED is logged from SIG's fills only (cash freed counts here, never at POSTED)
                     if f_.get("layer") == "release" and f_.get("action") == "buy":
                         px_s = round(1 - f_["price"], 3)
-                        msg = f"FILLED release {self.name(f_['ex'])} {('NO' if f_['side'] == 'yes' else 'YES')} {f_['qty']:,.0f} at {px_s:.3f}: cash freed {f_['qty'] * px_s:,.0f}, realized {(f_.get('realized') or 0):+,.0f}"
+                        tag = self.rot_sale_fill(f_, px_s)  # C94: a rotation sale's fill feeds the rotation's cash pool
+                        msg = f"FILLED {tag}release {self.name(f_['ex'])} {('NO' if f_['side'] == 'yes' else 'YES')} {f_['qty']:,.0f} at {px_s:.3f}: cash freed {f_['qty'] * px_s:,.0f}, realized {(f_.get('realized') or 0):+,.0f}"
                         self.event("RELEASE", msg); self.night.line(msg)
+                self.rot_fill_events(new_f)
                 self.sleeve_fill_events(new_f)
                 self.swing_fill_events(new_f)
                 self.rule0_fill_check(new_f)
@@ -882,6 +886,7 @@ class Engine:
             self.fm_now = self.fm_plan(now, cash)          # mm_plan §1: after L0 (the dump plan), before the scalper
             self.tm_now = self.tm_plan(now, cash, used)    # day 11 §2: the touch maker (its cap is reserved off the top like the FM's)
             self.sm_now = self.sm_plan(now, cash)          # turnover_plan §1: the spread maker
+            self.rot_now = self.rot_plan(now, cash)        # C94: the coin-flip rotation's bids (funded by its own sales only)
             self.scalp_now = self.scalp_plan(now, cash, used)
         except Exception as err:
             self.scalp_now = {}
@@ -952,7 +957,7 @@ class Engine:
                     if oid not in open_ids:
                         self.drift_since.pop(oid, None)
             for w in (wants if GTC_TTL_S else ()):          # C93 item 3: GTC — every seller, exit and TM / SM quote rests until re-pegged
-                if w.get("reduce") or w.get("layer") in ("tm", "sm", "release"):
+                if w.get("reduce") or w.get("layer") in ("tm", "sm", "release", "rot"):
                     w["ttl"] = GTC_TTL_S
             kept, cancels, places = bots.reconcile(wants, mine.get(b.name, []))
             cancels, places = self.repeg_grace(b, cancels, places, now)
@@ -1534,6 +1539,7 @@ class Engine:
                     touch=self.touch_now.get(b.ex) or [], touch_exits=self.touch_view.get(b.ex, []),
                     wall=self.wall_now.get(b.ex) or [], wall_exits=self.wall_view.get(b.ex, []), sleeve=self.sleeve_now.get(b.ex) or [], swing=self.swing_now.get(b.ex) or {}, fm=self.fm_now.get(b.ex) or [],
                     tm=self.tm_now.get(b.ex) or [], tm_exits=self.tm_view.get(b.ex, []), sm=self.sm_now.get(b.ex) or [],
+                    rot=self.rot_now.get(b.ex) or [], rot_exits=self.rot_view.get(b.ex, []),
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
                     room={sd: max(0.0, MARKET_MAX_POS - held[sd]) for sd in ("yes", "no")},
@@ -2852,7 +2858,7 @@ class Engine:
         # Day 9 §2-§3: the budget is k x free cash above the floor (minus Piero's walls); levels are allocated resting-first
         # (hysteresis: a resting level loses its slot only when the resting set alone no longer fits), L0 first within its
         # 8k cap (held + resting), then by expected edge = (fair - price) x reach / weight.
-        budget = max(0.0, self.entry_budget(cash) - self.wall_resting() - self.fm_reserve() - self.tm_reserve() - self.sm_reserve() - self.reservoir_resting() - self.h1_sleeve_reserve(now))   # C93 item 4: the H1 sleeve ahead of the catcher   # C84c: the reservoir's rebuys come first   # C70: Piero's walls, (C81b) the FM's cap and (C83) the TM's cap come off the top (weight 1.0)
+        budget = max(0.0, self.entry_budget(cash) - self.wall_resting() - self.fm_reserve() - self.tm_reserve() - self.sm_reserve() - self.reservoir_resting() - self.h1_sleeve_reserve(now) - self.rot_reserve())   # C93 item 4: the H1 sleeve ahead of the catcher; C94: the rotation's freed cash is its own   # C84c: the reservoir's rebuys come first   # C70: Piero's walls, (C81b) the FM's cap and (C83) the TM's cap come off the top (weight 1.0)
         out, cut, spent = self.allocate_levels(rows, budget, float(DUMP_L0_BUDGET) if DUMP_L0_CAP_RESTING else max(0.0, DUMP_L0_BUDGET - self.l0_held()))   # fix #1: the L0 rows themselves (resting + new) fit the cap
         self.entry_spent = round(spent)
         self.entry_left = max(0.0, budget - spent)
@@ -3637,6 +3643,8 @@ class Engine:
                 self.night.line(f"H3 ({h3.get('state')}) last 12 h — A (swap-only sales): bought {s3['A']['bought']:+,.0f}, given back {-s3['A']['given']:+,.0f}, net {s3['A']['net']:+,.0f}, "
                                 f"{s3['A']['sales']} sales / {s3['A']['entries']} entries, realized {s3['A']['realized']:+,.0f}; control (C89 seller): bought {s3['B']['bought']:+,.0f}, given back "
                                 f"{-s3['B']['given']:+,.0f}, net {s3['B']['net']:+,.0f}, {s3['B']['sales']} sales / {s3['B']['entries']} entries, realized {s3['B']['realized']:+,.0f}; verdict: {v3}")
+            if ROTATION.get("on") and (self.controls.d.get("rotation") or {}).get("since"):
+                self.night.line(self.rot_status(now))      # C94: the hourly rotation line
             if self.h1_test_day(now) and (self.controls.d.get("h1_test") or {}).get("opened"):
                 fl = self.h1_test_fills(now)
                 ent = [f for f in fl if f.get("layer") == "tm"]; ex_ = [f for f in fl if f.get("layer") == "tmexit"]
@@ -3711,6 +3719,213 @@ class Engine:
                f"(4) H1 DECISIVE TEST armed: {H1_TEST['day']} {H1_TEST['start']}-{H1_TEST['end']} PT on {', '.join(self.name(e) for e in self.h1_test_markets())}: a {H1_TEST['sleeve']:,.0f} sleeve ahead of the catcher from {H1_TEST['reserve_from']}, "
                f"shortfall sold at the best bid at {H1_TEST['shortfall_at']} (<= ~{H1_TEST['shortfall_max_cost']:,.0f} of settlement value), GTC quotes of {H1_TEST['clip']} with the TM pause and the SM 24-h stop lifted there, stop {H1_TEST['stop_fair']:+,.0f} at fair. "
                f"(5) the whole-ledger dedup against SIG's fills runs on the first controller pass (before / after line follows). H4 stays as it is.")
+        self.event("CONTROL", msg); self.night.line(msg)
+
+    # ------------------------------------------------------------------ C94: coin-flip rotation (Piero 20:30 Oct 13)
+    def rot_state(self):
+        return self.controls.d.get("rotation") or {}
+
+    def rot_subs(self, ex):
+        return {sub: q for sub, q in (self.ledger.subbooks.get(ex) or {}).items() if sub.startswith("rot:") and abs(q) >= 1}
+
+    def rot_cost(self, keys=None):
+        """Rotation inventory at cost plus its resting bids (by target key, or all)."""
+        legs = {(str(e), sd): b["key"] for b in ROTATION["buys"] for e, sd, _ in b["legs"]}
+        out = 0.0
+        for ex, books in self.ledger.subbooks.items():
+            for sub, q in books.items():
+                if sub.startswith("rot:") and abs(q) >= 1:
+                    side = "yes" if q > 0 else "no"
+                    if keys is None or legs.get((str(ex), side)) in keys:
+                        avg = (self.ledger.tranches.get(sub) or {}).get("avg") or self.sig_mark(ex, side) or 0.5
+                        out += abs(q) * float(avg)
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"]) or {}
+            if rec.get("layer") == "rot" and o["action"] == "buy" and (keys is None or legs.get((str(o["ex"]), o["side"])) in keys):
+                out += o["qty"] * o["price"]
+        return out
+
+    def rot_reserve(self):
+        """The rotation's freed cash not yet spent: reserved ahead of the catcher (C94: the buys are funded by the sales only)."""
+        st = self.rot_state()
+        if not ROTATION.get("on") or not st:
+            return 0.0
+        return max(0.0, float(st.get("cash_freed") or 0.0) - self.rot_cost())
+
+    def rot_sale_fill(self, f, px_s):
+        """A release fill on a rotation-sale market: the target shrinks, the cash pool grows. -> 'rotation ' tag or ''."""
+        st = self.rot_state()
+        left = st.get("sell_left") or {}
+        ex = str(f["ex"])
+        if ex not in left:
+            return ""
+        with self.controls.lock:
+            left[ex] = max(0, int(left[ex]) - int(f["qty"]))
+            st["cash_freed"] = round(float(st.get("cash_freed") or 0.0) + f["qty"] * px_s, 2)
+            st["sold"] = round(float(st.get("sold") or 0.0) + f["qty"], 0)
+            self.controls.d["rotation"] = st; self.controls.save()
+        return "rotation "
+
+    def rot_touch(self, ex, side):
+        """(bid, ask, fair) on `side` for the rotation: the touch bid we would join, the ask, PM fair in side terms."""
+        pxs = self.px.get(ex)
+        f = self.fair.get(ex)
+        if not pxs or pxs[0] is None or pxs[1] is None or f is None:
+            return None, None, None
+        bid, ask = bots.side_book(pxs[0], pxs[1], side)[:2]
+        return bid, ask, (f if side == "yes" else 1 - f)
+
+    def rot_plan(self, now, cash):
+        """C94 item 2: one GTC bid per target at min(touch bid, cap), only while the gap to PM fair >= 4c, sized to the target's
+        cap and to the cash the rotation's own sales have freed; a target is skipped for good when PM fair moves >= 2c against it
+        after posting. The Senate target takes the cheaper of 843 NO / 842 YES. -> {ex: [want-spec]}"""
+        c = self.controls
+        if not ROTATION.get("on") or c.paused or self.fills_blind or c.state("rot") == "off":
+            return {}
+        st = self.rot_state()
+        if not st:
+            return {}
+        skipped = st.get("skipped") or {}
+        pool = self.rot_reserve()                           # freed cash not yet committed
+        plan = {}
+        for tgt in ROTATION["buys"]:
+            key = tgt["key"]
+            if key in skipped:
+                continue
+            best = None
+            for ex, side, cap_px in tgt["legs"]:
+                ex = str(ex)
+                if ex not in self.owner or self.ex.is_frozen(ex) or ex in self.manual_ex:
+                    continue
+                bid, ask, fs = self.rot_touch(ex, side)
+                if bid is None or fs is None:
+                    continue
+                px = bots.tick_down(round(min(bid, cap_px), 6))
+                if best is None or px < best[2] - 1e-9:
+                    best = (ex, side, px, fs, bid)
+            if best is None:
+                continue
+            ex, side, px, fs, bid = best
+            posted = self.rot_posted.get(key)
+            if posted is not None and fs < posted - ROTATION["pm_skip_c"] + 1e-9:
+                with c.lock:
+                    skipped[key] = dict(t=stamp(), why=f"PM fair moved {(posted - fs) * 100:.1f}c against it after posting ({posted:.3f} -> {fs:.3f})")
+                    st["skipped"] = skipped; c.d["rotation"] = st; c.save()
+                msg = f"ROT SKIP {tgt['name']}: {skipped[key]['why']}; its bid is pulled and the target is closed"
+                self.event("ROT", msg); self.night.line(msg)
+                continue
+            gap = fs - px
+            if gap < ROTATION["gap_min"] - 1e-9 or not (MB_MIN_PX <= px <= MB_MAX_PX):
+                continue                                    # not enough gap at the price we could post: no bid (not a skip)
+            cost_key = self.rot_cost(keys={key})
+            room = float(tgt["cap"]) - cost_key
+            resting = sum(o["qty"] * o["price"] for o in self.open if o["ex"] == ex and o["side"] == side and o["action"] == "buy"
+                          and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "rot")
+            avail = min(room + resting, pool + resting)     # the resting bid's own notional is re-used, not double counted
+            qty = int(avail / px) if px > 0 else 0
+            if qty < MIN_QTY:
+                continue
+            if posted is None:
+                self.rot_posted[key] = fs
+                msg = (f"ROT POSTED {tgt['name']}: bid {side.upper()} {qty:,} at {px:.3f} on {self.name(ex)} (touch {bid:.3f}, cap {dict((str(e), cp) for e, sd, cp in tgt['legs'])[ex]:.3f}, "
+                       f"PM fair {fs:.3f}, gap {gap * 100:.1f}c); funded by the rotation's sales (pool {pool:,.0f}), cap {tgt['cap']:,.0f} at cost")
+                self.event("ROT", msg); self.night.line(msg)
+            plan.setdefault(ex, []).append(dict(side=side, px=px, qty=qty, sub=f"rot:{ex}:{side}", ttl=ROT_TTL_S, key=key))
+        self.track_rot(now)
+        return plan
+
+    def track_rot(self, now):
+        """C94 item 3: each rotation lot rests an ask at max(entry + 0.5c, PM fair - 1.5c) (GTC); it sells at the touch instead when
+        another target's gap is >= 3c bigger than what this lot has left (a swap)."""
+        self.rot_view = {}
+        gaps = {}
+        for tgt in ROTATION["buys"]:
+            if tgt["key"] in (self.rot_state().get("skipped") or {}):
+                continue
+            for ex, side, cap_px in tgt["legs"]:
+                bid, ask, fs = self.rot_touch(str(ex), side)
+                if bid is not None and fs is not None and self.rot_cost(keys={tgt["key"]}) < float(tgt["cap"]) - 1:
+                    gaps[tgt["key"]] = max(gaps.get(tgt["key"], -1), fs - bots.tick_down(round(min(bid, cap_px), 6)))
+        for ex, books in list(self.ledger.subbooks.items()):
+            for sub, q in list(books.items()):
+                if not sub.startswith("rot:") or abs(q) < MIN_QTY:
+                    continue
+                side = "yes" if q > 0 else "no"
+                tr = self.ledger.tranches.get(sub) or {}
+                avg = float(tr.get("avg") or 0) or float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
+                if not avg:
+                    continue
+                bid, ask, fs = self.rot_touch(ex, side)
+                if fs is None:
+                    continue
+                floor_ = bots.tick_up(round(avg + RULE0_MARGIN, 6))
+                px = max(floor_, bots.tick_up(round(fs - ROTATION["exit_fair_c"], 6)))
+                why = "fair - 1.5c"
+                left = fs - (ask if ask is not None else px)   # what this lot has left if sold at the touch
+                my_key = next((b["key"] for b in ROTATION["buys"] for e, sd, _ in b["legs"] if str(e) == str(ex) and sd == side), None)
+                better = [(k, g) for k, g in gaps.items() if k != my_key and g >= left + ROTATION["swap_gap_c"] - 1e-9]
+                if better and ask is not None and ask >= floor_ - 1e-9:
+                    px, why = max(ask, floor_), f"swap: {better[0][0]} has {better[0][1] * 100:.1f}c vs {left * 100:.1f}c left here"
+                    k_ = (ex, "swap")
+                    if k_ not in self.rot_logged:
+                        self.rot_logged.add(k_)
+                        msg = f"ROT SWAP {self.name(ex)} {side.upper()} {abs(q):,.0f}: sold at the touch {px:.3f} ({why})"
+                        self.event("ROT", msg); self.night.line(msg)
+                self.rot_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg, why=why))
+
+    def rot_fill_events(self, fills):
+        """Rotation fills: the lot's tranche (average entry), FILLED lines, round trips."""
+        c = self.controls
+        for f in fills:
+            if f.get("layer") not in ("rot", "rotexit"):
+                continue
+            ex = f["ex"]
+            sub = (self.ledger.orders.get(str(f.get("order") or "")) or {}).get("sub") or f"rot:{ex}:{f['side'] if f['layer'] == 'rot' else ('no' if f['side'] == 'yes' else 'yes')}"
+            q = float((self.ledger.subbooks.get(ex) or {}).get(sub, 0.0))
+            tr = self.ledger.tranches.get(sub)
+            if f["layer"] == "rot":
+                if tr is None or tr.get("state") != "open":
+                    tr = self.ledger.tranches[sub] = dict(ex=ex, side=f["side"], kind="rot", t=stamp(), ts=time.time(), state="open", avg=f["price"], qty=0.0)
+                qa = float(tr.get("qty") or 0.0)
+                tr["avg"] = round((float(tr.get("avg") or f["price"]) * qa + f["price"] * f["qty"]) / (qa + f["qty"]), 5) if qa + f["qty"] > 0 else f["price"]
+                tr["qty"] = qa + f["qty"]
+                fs = self.side_fair(ex, f["side"])
+                msg = f"FILLED rot {self.name(ex)} {f['side'].upper()} {f['qty']:,.0f} at {f['price']:.3f}" + ("" if fs is None else f" (PM fair {fs:.3f}, gap {(fs - f['price']) * 100:.1f}c)") + f"; lot {abs(q):,.0f} at {tr['avg']:.3f}"
+            else:
+                px_s = round(1 - f["price"], 3)
+                msg = f"FILLED rotexit {self.name(ex)} {('NO' if f['side'] == 'yes' else 'YES')} {f['qty']:,.0f} at {px_s:.3f}: cash back {f['qty'] * px_s:,.0f}, realized {(f.get('realized') or 0):+,.0f}; lot left {abs(q):,.0f}"
+                if tr is not None and abs(q) < MIN_QTY:
+                    tr.update(state="closed", closed_ts=time.time())
+                    msg += " (round trip done)"
+            self.event("ROT", msg); self.night.line(msg)
+
+    def rot_status(self, now):
+        st = self.rot_state()
+        left = st.get("sell_left") or {}
+        asks = [o for o in self.open if str(o["ex"]) in left and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "release"]
+        bids = [o for o in self.open if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "rot"]
+        exits = [o for o in self.open if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "rotexit"]
+        inv = {sub: q for ex, books in self.ledger.subbooks.items() for sub, q in books.items() if sub.startswith("rot:") and abs(q) >= 1}
+        return (f"ROT status: sales resting {len(asks)} asks / {sum(o['qty'] for o in asks):,.0f} shares (" + ", ".join(f"{self.name(o['ex'])} {o['qty']:,.0f} @ {1 - o['price']:.3f}" for o in asks) + f"), sold {st.get('sold') or 0:,.0f} shares, "
+                f"left to sell {sum(int(v) for v in left.values()):,}, cash freed {float(st.get('cash_freed') or 0):,.0f}; bids resting {len(bids)} (" + ", ".join(f"{self.name(o['ex'])} {o['side'].upper()} {o['qty']:,.0f} @ {o['price']:.3f}" for o in bids) + f"), "
+                f"bought {sum(abs(q) for q in inv.values()):,.0f} shares in {len(inv)} lots at cost {self.rot_cost() - sum(o['qty'] * o['price'] for o in bids):,.0f}, exits resting {len(exits)}, skipped {list((st.get('skipped') or {}).keys())}; "
+                f"pool unspent {self.rot_reserve():,.0f}; cash {((self.acct or {}).get('totalAccountValue') or 0) - ((self.acct or {}).get('totalHoldingsValue') or 0):,.0f}")
+
+    def c94_migration(self, now):
+        """Once (C94, Piero 20:30 Oct 13): the coin-flip rotation — four sales, five targets, exits, the hourly line."""
+        c = self.controls
+        if (c.d.get("c94") or {}).get("done"):
+            return
+        with c.lock:
+            c.d["c94"] = dict(done=stamp())
+            c.d["rotation"] = dict(since=stamp(), sell_left={k: int(v) for k, v in ROTATION["sells"].items()}, cash_freed=0.0, sold=0.0, skipped={})
+            c.d["layers"].setdefault("rot", dict(state="off", since=now, caps={}, killed=None))["state"] = "full"
+            c.save()
+        msg = (f"C94 (Piero 20:30): COIN-FLIP ROTATION. (1) SELL as GTC asks at max(lot avg + 0.5c, touch), place kept: " + ", ".join(f"{self.name(k)} {v:,}" for k, v in ROTATION["sells"].items()) +
+               f" (~29k; cash counted on SIG fills only). (2) BUY only from that cash, GTC bids at min(touch, cap) while the gap to PM fair >= {ROTATION['gap_min'] * 100:.0f}c, a target closed if PM moves >= {ROTATION['pm_skip_c'] * 100:.0f}c against it after posting: " +
+               "; ".join(f"{b['name']} <= {' / '.join(f'{cp:.3f}' for _, _, cp in b['legs'])} cap {b['cap']:,.0f}" for b in ROTATION["buys"]) +
+               f". (3) EXIT: an ask at max(entry + 0.5c, PM fair - {ROTATION['exit_fair_c'] * 100:.1f}c) per lot, a swap into a gap >= {ROTATION['swap_gap_c'] * 100:.0f}c bigger; rotation lots are exempt from the no-edge release above {ROTATION['release_exempt_ret']:.0%} left. "
+               f"Invariants unchanged: never below lot average + 0.5c, the 5,000 floor, I2 / I3, Piero's manual positions untouched (swing / pairset / manual sub-books are never sold).")
         self.event("CONTROL", msg); self.night.line(msg)
 
     def c93e_migration(self, now):
@@ -6902,7 +7117,7 @@ class Engine:
     ROTATION_SKIP = ("manual", "pairset:", "recycle:", "sleeve:", "wall:", "swing:", "fm:", "tm:", "sm:")   # Piero 22:15: never manual, wall, sleeve or pair-set lots; swing / fm / recycle / tm / sm have their own exits (the TM's and SM's already sit at the touch ask)
 
     ROTATION_SKIP = ("manual", "pairset:", "sleeve:", "wall:", "swing:")   # C89: Piero's position orders and pair sets only; every trading lot can be sold
-    OWN_EXIT_SUBS = ("dump:", "tm:", "sm:", "fm:", "touch:", "scalp:", "longshot:")   # subs whose layer rests its own exit while the lot is not held
+    OWN_EXIT_SUBS = ("dump:", "tm:", "sm:", "fm:", "touch:", "scalp:", "longshot:", "rot:")   # subs whose layer rests its own exit while the lot is not held
 
     def trading_cost(self):
         """C89: the TRADING book at cost — every engine lot that is not core (RI, walls, manual, pair sets apart)."""
@@ -6932,6 +7147,7 @@ class Engine:
             return {}
         forced = set(((self.controls.d.get("core") or {}).get("swap_out") or {}).keys())
         shortfall = self.h1_shortfall_plan(now)              # {ex: shares} at the bid, once, on the test day at 03:15
+        rot_left = {str(k): int(v) for k, v in (((self.controls.d.get("rotation") or {}).get("sell_left")) or {}).items() if int(v) >= MIN_QTY}   # C94: the coin-flip rotation's sales (Piero 20:30 Oct 13)
         plan, listing = {}, []
         for ex, b in self.book.items():
             q = b["pos"]
@@ -6968,9 +7184,13 @@ class Engine:
                     px, reason = max(ask, floor_), "core lock"
                 elif ex in shortfall and bid is not None and bid >= floor_ - 1e-9:
                     px, reason = bid, "h1 shortfall"      # item 4: at the best bid, >= lot average + 0.5c
+                elif str(ex) in rot_left and not sub.startswith("rot:"):
+                    px, reason = max(ask, floor_), "rotation sale"   # C94 item 1: the favourites Piero named, whatever their return left
                 else:
                     px = max(ask, floor_)
                     ret = (fs - px) / px if px > 0 else 1.0
+                    if sub.startswith("rot:") and ret >= ROTATION["release_exempt_ret"] - 1e-9:
+                        continue                            # C94 item 3: a rotation lot has its own exit; the no-edge release takes it only under 2% left
                     if ret < NOEDGE["ret"] - 1e-9 or (fs < NOEDGE["low_fair"] - 1e-9 and fs - px < NOEDGE["low_edge_c"] - 1e-9):
                         reason = "no-edge"
                     else:
@@ -6980,6 +7200,8 @@ class Engine:
                 take = self.rule0_allowed(ex, side, sub, px, int(abs(v)))
                 if reason == "h1 shortfall":
                     take = min(take, int(shortfall[ex]))
+                if reason == "rotation sale":
+                    take = min(take, int(rot_left[str(ex)]))
                 if take >= MIN_QTY:
                     if px_sale is not None and abs(px - px_sale) > 1e-9:
                         continue                            # one price per market per loop (the other lot waits for the next)
@@ -6987,6 +7209,8 @@ class Engine:
                     split[sub] = take
                     if reason == "h1 shortfall":
                         shortfall[ex] -= take               # C93e: the market's shortfall is shared by its sub-books (Oct 13 03:15: two dump lots each took the whole 2,505 -> 4,891 sold)
+                    if reason == "rotation sale":
+                        rot_left[str(ex)] -= take           # C94: the market's target is shared by its sub-books
             if not split:
                 continue
             n = sum(split.values())

@@ -31,7 +31,7 @@ def qty_fmt(q):
 
 
 PRIORITY = {"cancel": 0, "position": 1, "trim": 1, "take": 2, "rebound": 3, "recycle": 3, "repair": 3, "unwind": 3,
-            "set": 4, "mm": 5, "exit": 3, "touch": 5, "ladder": 6, "add": 1, "release": 3, "fatfinger": 7, "dump": 6, "dumpexit": 3, "longshot": 7, "longexit": 3, "scalp": 5, "scalpexit": 3, "touch": 5, "touchexit": 3, "wall": 6, "wallexit": 3, "sleeve": 6, "swing": 6, "swingsell": 3, "fm": 5, "fmexit": 3, "tm": 5, "tmexit": 3, "sm": 5, "smexit": 3}
+            "set": 4, "mm": 5, "exit": 3, "touch": 5, "ladder": 6, "add": 1, "release": 3, "fatfinger": 7, "dump": 6, "dumpexit": 3, "longshot": 7, "longexit": 3, "scalp": 5, "scalpexit": 3, "touch": 5, "touchexit": 3, "wall": 6, "wallexit": 3, "sleeve": 6, "swing": 6, "swingsell": 3, "fm": 5, "fmexit": 3, "tm": 5, "tmexit": 3, "sm": 5, "smexit": 3, "rot": 5, "rotexit": 3}
 
 
 def reduces(side, action, pos):

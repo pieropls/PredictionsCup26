@@ -458,7 +458,7 @@ READ_BUDGET = 95                # SIG reads per minute we allow ourselves (SIG's
 SPARE_KEEP = 20                 # optional reads (depth, tape, sampler, pairs, leaders) run while reads_last_min <= READ_BUDGET - SPARE_KEEP
 FILLS_READ_S, POSITIONS_READ_S = 60, 120
 SAMPLER_EVERY_S, SAMPLER_PER_LOOP, SAMPLER_DEPTH = 60, 6, 5   # book sampler: the SM universe + RI Senate R, depth at the touch +/- 2 ticks, every ~60 s each, data/intel/books/
-LIFECYCLE_LAYERS = ("sm", "smexit", "tm", "tmexit")            # order-lifecycle log (+ dump L0 levels): queue ahead at placement, time to fill / expiry, mid and fair at +1/5/30 min, data/intel/orders/
+LIFECYCLE_LAYERS = ("sm", "smexit", "tm", "tmexit", "rot", "rotexit")            # order-lifecycle log (+ dump L0 levels): queue ahead at placement, time to fill / expiry, mid and fair at +1/5/30 min, data/intel/orders/
 LIFECYCLE_MARKS_S = (60, 300, 1800)
 BACKOFF_429_S, BACKOFF_LOOP_S = 120, 20.0   # after a 429: 20 s loops for 2 min
 
@@ -478,3 +478,13 @@ DASHBOARD_URL_FILE = os.path.join(DATA, "dashboard_url.txt")   # the live dashbo
 STATE_EVERY_S = 60              # data/state.json and the static data/dashboard.html: rewritten at most this often
 HOST_ID_FILE = os.path.join(DATA, "host_id")
 NIGHT_LOG_FILE = os.path.join(os.path.dirname(DATA), "docs", "RUN_LOG.md")   # day 2: the run log (NIGHT_LOG.md = the night)
+
+# ---- C94 (Piero 20:30 Oct 13): COIN-FLIP ROTATION — ~29k out of slow favourites into the biggest coin-flip gaps
+ROTATION = dict(on=True, gap_min=0.04, pm_skip_c=0.02, exit_fair_c=0.015, swap_gap_c=0.03, release_exempt_ret=0.02,
+                sells={"1044": 9137, "1043": 9594, "946": 11136, "1075": 4000},   # Florida Senate R YES, Florida Senate D NO, Colorado Senate R NO, Delaware Senate R NO (4,000 of 18,130): GTC asks at max(lot avg + 0.5c, touch)
+                buys=[dict(key="senate", name="U.S. Senate D control", legs=[("843", "no", 0.560), ("842", "yes", 0.575)], cap=10_000.0),   # the cheaper leg
+                      dict(key="1067", name="Alaska Senate R NO", legs=[("1067", "no", 0.680)], cap=4_000.0),
+                      dict(key="1045", name="Kansas Senate D NO", legs=[("1045", "no", 0.580)], cap=5_000.0),             # beyond the 1,355 held
+                      dict(key="1020", name="MI-07 House R NO", legs=[("1020", "no", 0.570)], cap=4_000.0),
+                      dict(key="1011", name="FL-09 House R YES", legs=[("1011", "yes", 0.650)], cap=4_000.0)])
+ROT_TTL_S = 24 * 3600

@@ -218,7 +218,7 @@ class EngineCase(unittest.TestCase):
         f_engine.STARTUP_HOLD_S = 0                         # the rigs read from their first loop (the 2-min start-up hold is a live-only guard)
         for k, v in (("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
                      ("CORE_CAP_COST", 0.0), ("TRADING_HOLD_C", 99.0), ("CORE_LOCK_RET", -99.0), ("TRADING_INV_CAP", 1e12), ("TRADING_CASH_TARGET", 0.0),
-                     ("NOEDGE", dict(ret=-99.0, low_fair=0.0, low_edge_c=0.0)), ("REPEG_AWAY_S", 0.0), ("GTC_TTL_S", 0), ("SM_REPEG_TICKS", 2), ("TM_REPEG_TICKS", 2)):   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
+                     ("NOEDGE", dict(ret=-99.0, low_fair=0.0, low_edge_c=0.0)), ("REPEG_AWAY_S", 0.0), ("GTC_TTL_S", 0), ("SM_REPEG_TICKS", 2), ("TM_REPEG_TICKS", 2), ("ROTATION", dict(a_config.ROTATION, on=False, sells={}, buys=[]))):   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
             self.addCleanup(setattr, f_engine, k, getattr(f_engine, k, None))
             setattr(f_engine, k, v)                         # C87 gates (real clock, no tape in the rigs, rig cash under BUFFER): off unless C87Tests set them
         for k in ("PNL_READ_S", "ORDERS_READ_S", "FILLS_READ_S", "POSITIONS_READ_S"):   # day 4 §4 / Oct 8 read caching have their own tests; the rigs (no realtime feed) read fresh each loop
@@ -5081,6 +5081,80 @@ class C93Tests(EngineCase):
         f_engine.RING_WINDOWS = []; f_engine.TM_ENTRY_STOPS = []
         loop(eng, fake); loop(eng, fake)
         self.assertEqual(tm(), [], "outside the window: the pause holds")
+
+class C94Tests(EngineCase):
+    """Piero 20:30 Oct 13 (C94): the coin-flip rotation — named favourites sold as GTC asks at max(lot avg + 0.5c, touch) whatever
+    their return left (the market's target shared by its sub-books); bids at min(touch, cap) only while the gap to PM fair >= 4c and
+    only from the cash those sales freed; a target closed when PM moves >= 2c against it; exits at max(entry + 0.5c, fair - 1.5c);
+    rotation lots exempt from the no-edge release above 2% left."""
+
+    def rig(self):
+        fake, eng, favs = C93Tests.rig(self)
+        return fake, eng, favs
+
+    def test_rotation_sale_sells_the_named_favourite_across_its_subs_up_to_the_target(self):
+        fake, eng, favs = self.rig()
+        a = favs[0]
+        C93Tests.lot(self, eng, fake, a, f"dump:{a}:yes:1", 3000, 0.80, (0.90, 0.905, 0.9025), 0.99)   # 9% left: HELD by C93
+        loop(eng, fake); loop(eng, fake)
+        eng.ledger.subbooks[a] = {f"dump:{a}:yes:1": 3000.0, f"dump:{a}:yes:2": 3000.0}; eng.ledger.tranches[f"dump:{a}:yes:2"] = dict(eng.ledger.tranches[f"dump:{a}:yes:1"])
+        fake.pos[a] = 6000; eng.lots_cache = (None, {})
+        self.assertNotIn(a, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time()), "a favourite is held")
+        f_engine.ROTATION = dict(a_config.ROTATION, on=True, sells={a: 4000}, buys=[])
+        eng.controls.d["rotation"] = dict(since="x", sell_left={a: 4000}, cash_freed=0.0, sold=0.0, skipped={})
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertIn(a, plan); self.assertEqual(plan[a]["why"], "rotation sale")
+        self.assertAlmostEqual(plan[a]["px"], 0.905, places=3, msg="max(lot avg + 0.5c = 0.805, touch ask 0.905)")
+        self.assertEqual(sum(plan[a]["subs"].values()), 4000, "the market's target, shared by its two sub-books")
+        # a fill shrinks the target and feeds the pool
+        tag = eng.rot_sale_fill(dict(ex=a, qty=1500.0, price=0.095, side="no", action="buy", layer="release"), 0.905)
+        self.assertEqual(tag, "rotation "); self.assertEqual(eng.controls.d["rotation"]["sell_left"][a], 2500)
+        self.assertAlmostEqual(eng.controls.d["rotation"]["cash_freed"], 1500 * 0.905, places=1)
+        self.assertAlmostEqual(eng.rot_reserve(), 1500 * 0.905, places=1, msg="freed cash is reserved for the rotation's bids")
+
+    def test_rotation_bids_only_with_gap_and_pool_and_close_on_a_pm_move(self):
+        fake, eng, favs = self.rig()
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
+        FAIR[ex] = 0.52; self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = eng.px[ex] = (0.46, 0.47, 0.465)
+        f_engine.ROTATION = dict(a_config.ROTATION, on=True, sells={}, buys=[dict(key="t", name="T", legs=[(ex, "yes", 0.47)], cap=4_000.0)])
+        eng.controls.d["layers"].setdefault("rot", dict(state="off", caps={}, killed=None))["state"] = "full"
+        eng.controls.d["rotation"] = dict(since="x", sell_left={}, cash_freed=0.0, sold=0.0, skipped={})
+        loop(eng, fake)
+        self.assertEqual(eng.rot_plan(time.time(), a_config.CASH_RESERVE + 5_000), {}, "no cash freed yet: no bid")
+        eng.controls.d["rotation"]["cash_freed"] = 1_000.0
+        plan = eng.rot_plan(time.time(), a_config.CASH_RESERVE + 5_000)
+        self.assertIn(ex, plan); w = plan[ex][0]
+        self.assertAlmostEqual(w["px"], 0.46, places=3, msg="at the touch (<= the 0.47 cap)"); self.assertEqual(w["qty"], int(1_000 / 0.46), "sized to the pool")
+        self.assertTrue(any(e["text"].startswith("ROT POSTED") for e in eng.events))
+        fake.px[ex] = eng.px[ex] = (0.49, 0.50, 0.495)        # the touch is above the cap: the bid sits at the cap 0.47 (gap 5c)
+        plan = eng.rot_plan(time.time(), a_config.CASH_RESERVE + 5_000)
+        self.assertAlmostEqual(plan[ex][0]["px"], 0.47, places=3, msg="never above the cap")
+        FAIR[ex] = 0.505; loop(eng, fake)                      # fair down 1.5c (under the 2c skip): the gap at the cap is 3.5c -> no bid, not a skip
+        self.assertEqual(eng.rot_plan(time.time(), a_config.CASH_RESERVE + 5_000), {})
+        self.assertNotIn("t", eng.controls.d["rotation"]["skipped"])
+        fake.px[ex] = eng.px[ex] = (0.46, 0.47, 0.465); FAIR[ex] = 0.495   # PM fair moved 2.5c against us after posting: closed
+        loop(eng, fake)
+        self.assertEqual(eng.rot_plan(time.time(), a_config.CASH_RESERVE + 5_000), {})
+        self.assertIn("t", eng.controls.d["rotation"]["skipped"]); self.assertTrue(any(e["text"].startswith("ROT SKIP") for e in eng.events))
+
+    def test_rotation_exit_at_max_entry_half_cent_fair_less_1_5c_and_release_exemption(self):
+        fake, eng, favs = self.rig()
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
+        FAIR[ex] = 0.52; self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = eng.px[ex] = (0.46, 0.47, 0.465); fake.pos[ex] = 2000; fake.avg_cost[ex] = 0.46
+        f_engine.ROTATION = dict(a_config.ROTATION, on=True, sells={}, buys=[dict(key="t", name="T", legs=[(ex, "yes", 0.47)], cap=4_000.0)])
+        eng.controls.d["rotation"] = dict(since="x", sell_left={}, cash_freed=0.0, sold=0.0, skipped={})
+        loop(eng, fake)
+        eng.ledger.subbooks[ex] = {f"rot:{ex}:yes": 2000.0}; eng.ledger.tranches[f"rot:{ex}:yes"] = dict(ex=ex, side="yes", kind="rot", state="open", ts=time.time(), t="x", avg=0.46, qty=2000.0)
+        eng.lots_cache = (None, {})
+        eng.track_rot(time.time())
+        v = eng.rot_view.get(ex, [])
+        self.assertEqual(len(v), 1); self.assertAlmostEqual(v[0]["px"], 0.505, places=3, msg="max(0.465, fair 0.52 - 1.5c)")
+        self.assertNotIn(ex, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time()), "a rotation lot with 10% left is not released")
+        FAIR[ex] = 0.475; loop(eng, fake); eng.lots_cache = (None, {}); eng.ledger.subbooks[ex] = {f"rot:{ex}:yes": 2000.0}
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertIn(ex, plan, "under 2% left (fair 0.475 vs the 0.47 ask): the no-edge release takes it")
 
 class Dash5Tests(EngineCase):
     """Dashboard v5 (docs/dashboard_v5.md): §0 P&L by SIG day (00:00 UTC; realized at SIG's average cost; realized + open = the day
