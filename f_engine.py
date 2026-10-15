@@ -3745,12 +3745,23 @@ class Engine:
                 out += o["qty"] * o["price"]
         return out
 
-    def rot_reserve(self):
-        """The rotation's freed cash not yet spent: reserved ahead of the catcher (C94: the buys are funded by the sales only)."""
+    def rot_pool(self):
+        """C94e (Piero 16:25 Oct 15): the pool reads SIG's actual cash. -> (pool, freed_left, cash_room):
+        freed_left = cash freed by the rotation's sales - its inventory at cost - its resting bids;
+        cash_room  = SIG cash (the low of the recent reads) - the 5,000 floor - the 1,000 resume margin - its resting bids
+                     (SIG does not hold cash for a resting bid, so a resting bid is spent cash in waiting);
+        pool = min of the two (negative: the resting bids are larger than the cash allows)."""
         st = self.rot_state()
         if not ROTATION.get("on") or not st:
-            return 0.0
-        return max(0.0, float(st.get("cash_freed") or 0.0) - self.rot_cost())
+            return 0.0, 0.0, 0.0
+        resting = sum(o["qty"] * o["price"] for o in self.open if o["action"] == "buy" and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "rot")
+        freed_left = float(st.get("cash_freed") or 0.0) - self.rot_cost()           # rot_cost counts inventory and resting bids
+        cash_room = self.free_cash() - CASH_FLOOR_RESUME - resting
+        return min(freed_left, cash_room), freed_left, cash_room
+
+    def rot_reserve(self):
+        """The rotation's unspent pool (reserved ahead of the catcher), never more than SIG's cash allows (C94e)."""
+        return max(0.0, self.rot_pool()[0])
 
     def rot_sale_fill(self, f, px_s):
         """A release fill on a rotation-sale market: tagged; the target and the cash pool are recomputed from the ledger (rot_sync),
@@ -3796,7 +3807,7 @@ class Engine:
         if not st:
             return {}
         skipped = st.get("skipped") or {}
-        pool = min(self.rot_reserve(), max(0.0, self.free_cash()))   # freed cash not yet committed, and never past the 5,000 floor (C94d)
+        pool = self.rot_pool()[0]                           # C94e: freed and not yet spent, capped by SIG cash - 6,000 net of resting bids (signed)
         plan = {}
         def best_leg(tgt):
             """(ex, side, px, fair, bid) of the target's cheapest eligible leg, else None."""
@@ -3835,6 +3846,15 @@ class Engine:
             room = float(tgt["cap"]) - cost_key
             resting = sum(o["qty"] * o["price"] for o in self.open if o["ex"] == ex and o["side"] == side and o["action"] == "buy"
                           and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "rot")
+            if resting > 0 and pool + resting < 0.75 * resting - 1e-6:
+                k_ = (key, "pull", round(pool))
+                if k_ not in self.rot_logged:
+                    self.rot_logged.add(k_)
+                    msg = (f"ROT PULL {tgt['name']}: the resting bid ({resting:,.0f}) is larger than the cash allows (pool {pool:+,.0f}: SIG cash - 6,000 net of resting bids); "
+                           f"pulled now, re-posted at the smaller size next loop (C94e: a re-peg never keeps an old size)")
+                    self.event("ROT", msg); self.night.line(msg)
+                pool += resting                              # its notional is released by the pull
+                continue
             avail = min(room + resting, pool + resting)     # the resting bid's own notional is re-used, not double counted
             qty = int(avail / px) if px > 0 else 0
             if qty < MIN_QTY:
@@ -3924,7 +3944,8 @@ class Engine:
         return (f"ROT status: sales resting {len(asks)} asks / {sum(o['qty'] for o in asks):,.0f} shares (" + ", ".join(f"{self.name(o['ex'])} {o['qty']:,.0f} @ {1 - o['price']:.3f}" for o in asks) + f"), sold {st.get('sold') or 0:,.0f} shares, "
                 f"left to sell {sum(int(v) for v in left.values()):,}, cash freed {float(st.get('cash_freed') or 0):,.0f}; bids resting {len(bids)} (" + ", ".join(f"{self.name(o['ex'])} {o['side'].upper()} {o['qty']:,.0f} @ {o['price']:.3f}" for o in bids) + f"), "
                 f"bought {sum(abs(q) for q in inv.values()):,.0f} shares in {len(inv)} lots at cost {self.rot_cost() - sum(o['qty'] * o['price'] for o in bids):,.0f}, exits resting {len(exits)}, skipped {list((st.get('skipped') or {}).keys())}; "
-                f"pool unspent {self.rot_reserve():,.0f}; cash {((self.acct or {}).get('totalAccountValue') or 0) - ((self.acct or {}).get('totalHoldingsValue') or 0):,.0f}")
+                f"pool {max(0.0, self.rot_pool()[0]):,.0f} (sales freed - rotation cost {self.rot_pool()[1]:,.0f}; SIG cash - 6,000 - resting bids {self.rot_pool()[2]:,.0f}); "
+                f"cash {((self.acct or {}).get('totalAccountValue') or 0) - ((self.acct or {}).get('totalHoldingsValue') or 0):,.0f}")
 
     def c94_migration(self, now):
         """Once (C94, Piero 20:30 Oct 13): the coin-flip rotation — four sales, five targets, exits, the hourly line."""

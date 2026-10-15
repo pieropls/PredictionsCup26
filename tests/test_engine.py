@@ -5153,6 +5153,32 @@ class C94Tests(EngineCase):
         self.assertEqual(eng.rot_plan(time.time(), a_config.CASH_RESERVE + 5_000), {})
         self.assertIn("t", eng.controls.d["rotation"]["skipped"]); self.assertTrue(any(e["text"].startswith("ROT SKIP") for e in eng.events))
 
+    def test_rotation_pool_reads_sig_cash_and_pulls_an_oversized_resting_bid(self):
+        """C94e (Piero 16:25 Oct 15): 'pool unspent 7,456' with cash 3,714 — the pool now reads SIG's cash; a re-peg never keeps an old size."""
+        fake, eng, favs = self.rig()
+        ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
+        FAIR[ex] = 0.52; self.addCleanup(FAIR.pop, ex, None)
+        fake.px[ex] = eng.px[ex] = (0.46, 0.47, 0.465)
+        f_engine.ROTATION = dict(a_config.ROTATION, on=True, sells={}, buys=[dict(key="t", name="T", legs=[(ex, "yes", 0.47)], cap=10_000.0)])
+        eng.controls.d["layers"].setdefault("rot", dict(state="off", caps={}, killed=None))["state"] = "full"
+        eng.controls.d["rotation"] = dict(since="x", sell_left={}, cash_freed=5_000.0, sold=0.0, skipped={})
+        loop(eng, fake)
+        eng.cash_hist = [a_config.CASH_RESERVE + 3_000]                  # SIG cash 8,000: room 8,000 - 5,000 - 1,000 = 2,000
+        pool, freed_left, cash_room = eng.rot_pool()
+        self.assertAlmostEqual(freed_left, 5_000, places=0); self.assertAlmostEqual(cash_room, 2_000, places=0); self.assertAlmostEqual(pool, 2_000, places=0)
+        plan = eng.rot_plan(time.time(), a_config.CASH_RESERVE + 3_000)
+        self.assertLessEqual(plan[ex][0]["qty"] * plan[ex][0]["px"], 2_000 + 1, "never more than SIG cash - 6,000, whatever the sales freed")
+        self.assertIn("SIG cash - 6,000", eng.rot_status(time.time()))
+        # a resting bid sized when cash was higher, then cash falls: pulled at once (not re-pegged at its old size)
+        eng.open.append(dict(id="r1", ex=ex, side="yes", action="buy", price=0.46, qty=4000.0, status="open", filled=0))
+        eng.ledger.orders["r1"] = dict(layer="rot", sub=f"rot:{ex}:yes", ex=ex, side="yes", action="buy", price=0.46, qty=4000.0, status="open", bot=f"MKT {ex}", filled=0)
+        eng.cash_hist = [a_config.CASH_RESERVE + 1_200]                  # room 200 - the 1,840 resting = -1,640
+        self.assertLess(eng.rot_pool()[2], 0); self.assertEqual(eng.rot_reserve(), 0.0, "a negative pool reserves nothing")
+        plan = eng.rot_plan(time.time(), a_config.CASH_RESERVE + 1_200)
+        self.assertNotIn(ex, plan, "the oversized resting bid is pulled")
+        self.assertTrue(any(e["text"].startswith("ROT PULL") for e in eng.events))
+        eng.open[:] = [o for o in eng.open if o["id"] != "r1"]; eng.ledger.orders.pop("r1", None)
+
     def test_rotation_exit_at_max_entry_half_cent_fair_less_1_5c_and_release_exemption(self):
         fake, eng, favs = self.rig()
         ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)
