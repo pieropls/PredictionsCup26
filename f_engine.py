@@ -73,7 +73,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, CASH_FLOOR_RESUME, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
-                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S,
+                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -480,6 +480,7 @@ class Engine:
             self.c93c_migration(time.time())
             self.c93e_migration(time.time())
             self.c94_migration(time.time())
+            self.c95_migration(time.time())
         except Exception as err:
             print(f"C88 / C90 migration: {err!r}")
         try:
@@ -797,7 +798,11 @@ class Engine:
             self.cash_short_check(raw, catch_open, now)
         except Exception as err:
             self.event("ERR", f"cash-short check: {err!r}")
-        self.cash_hist = (getattr(self, "cash_hist", []) + [raw])[-3:]
+        self.cash_raw_hist = (getattr(self, "cash_raw_hist", []) + [raw])[-3:]
+        mr = self.manual_reserve_left()                     # C95 (Piero 15:05 Oct 16): the engine never spends below floor + the manual reserve
+        self.engine_cash = min(self.cash_raw_hist) - mr
+        claim = self.rot_claim()                            # C95: the rotation's own cash (its sales) is not the other layers'
+        self.cash_hist = [x - mr - claim for x in self.cash_raw_hist]
         cash = min(self.cash_hist)                          # one glitchy read can't open the gates (06:12: +10.7k for a loop)
         self.update_mids(now)
         try:
@@ -2858,7 +2863,7 @@ class Engine:
         # Day 9 §2-§3: the budget is k x free cash above the floor (minus Piero's walls); levels are allocated resting-first
         # (hysteresis: a resting level loses its slot only when the resting set alone no longer fits), L0 first within its
         # 8k cap (held + resting), then by expected edge = (fair - price) x reach / weight.
-        budget = max(0.0, self.entry_budget(cash) - self.wall_resting() - self.fm_reserve() - self.tm_reserve() - self.sm_reserve() - self.reservoir_resting() - self.h1_sleeve_reserve(now) - self.rot_reserve())   # C93 item 4: the H1 sleeve ahead of the catcher; C94: the rotation's freed cash is its own   # C84c: the reservoir's rebuys come first   # C70: Piero's walls, (C81b) the FM's cap and (C83) the TM's cap come off the top (weight 1.0)
+        budget = max(0.0, self.entry_budget(cash) - self.wall_resting() - self.fm_reserve() - self.tm_reserve() - self.sm_reserve() - self.reservoir_resting() - self.h1_sleeve_reserve(now))   # C93 item 4: the H1 sleeve ahead of the catcher; C95: the rotation's cash and the manual reserve are already off `cash`   # C84c: the reservoir's rebuys come first   # C70: Piero's walls, (C81b) the FM's cap and (C83) the TM's cap come off the top (weight 1.0)
         out, cut, spent = self.allocate_levels(rows, budget, float(DUMP_L0_BUDGET) if DUMP_L0_CAP_RESTING else max(0.0, DUMP_L0_BUDGET - self.l0_held()))   # fix #1: the L0 rows themselves (resting + new) fit the cap
         self.entry_spent = round(spent)
         self.entry_left = max(0.0, budget - spent)
@@ -3586,6 +3591,7 @@ class Engine:
             verdict = "win" if win else "lose" if lose else "tie"
         try:
             self.h1_test_check(now)
+            self.rot_report(now)                            # C95 item 6: the rotation report at 18:00 and 08:00
         except Exception as err:
             self.event("ERR", f"H1 test: {err!r}")
         if getattr(self, "dedup_pending", False) and getattr(self, "position_names", None) is not None:
@@ -3722,73 +3728,165 @@ class Engine:
         self.event("CONTROL", msg); self.night.line(msg)
 
     # ------------------------------------------------------------------ C94: coin-flip rotation (Piero 20:30 Oct 13)
+    # ------------------------------------------------------------------ C95: coin-flip rotation at full size + the manual reserve (Piero 15:05 Oct 16)
     def rot_state(self):
         return self.controls.d.get("rotation") or {}
 
-    def rot_subs(self, ex):
-        return {sub: q for sub, q in (self.ledger.subbooks.get(ex) or {}).items() if sub.startswith("rot:") and abs(q) >= 1}
+    @staticmethod
+    def fill_dq(f):
+        """Change in net YES shares from one ledger fill."""
+        q = float(f["qty"])
+        if f.get("action") == "sell":
+            return -q if f.get("side") == "yes" else q
+        return q if f.get("side") == "yes" else -q
 
-    def rot_cost(self, keys=None):
-        """Rotation inventory at cost plus its resting bids (by target key, or all)."""
-        legs = {(str(e), sd): b["key"] for b in ROTATION["buys"] for e, sd, _ in b["legs"]}
-        out = 0.0
+    def manual_spent(self):
+        """C95 item 1: net cash Piero's own fills (orders the engine did not place: no layer) took since the reserve was set; a sale
+        that frees cash counts back. Positions are walked back from now so each fill is split into its reducing and adding part."""
+        cfg = self.controls.d.get("manual_reserve") or {}
+        since = cfg.get("since")
+        if not since:
+            return 0.0
+        key = (len(self.ledger.fills), since)
+        if getattr(self, "_manual_key", None) == key:
+            return self._manual_spent
+        later = sorted((f for f in self.ledger.fills if str(f.get("t", "")) >= since), key=lambda f: f["t"])
+        pos = {str(ex): float(b.get("pos") or 0) for ex, b in self.book.items()}
+        for f in reversed(later):
+            pos[str(f["ex"])] = pos.get(str(f["ex"]), 0.0) - self.fill_dq(f)
+        spent = 0.0
+        for f in later:
+            ex = str(f["ex"]); p0 = pos.get(ex, 0.0); d = self.fill_dq(f); q = float(f["qty"]); p = float(f["price"])
+            if not (f.get("layer") or ""):
+                red = min(q, abs(p0)) if (p0 > 0 > d) or (p0 < 0 < d) else 0.0
+                add = q - red
+                cash = (red * p - add * (1 - p)) if f.get("action") == "sell" else (red * (1 - p) - add * p)
+                spent -= cash
+            pos[ex] = p0 + d
+        self._manual_key, self._manual_spent = key, spent
+        return spent
+
+    def manual_reserve_left(self):
+        """C95 item 1: what is left of Piero's manual reserve (his sales refill it up to the amount)."""
+        amt = float((self.controls.d.get("manual_reserve") or {}).get("amount") or 0.0)
+        if amt <= 0:
+            return 0.0
+        return max(0.0, min(amt, amt - self.manual_spent()))
+
+    def engine_cash_now(self):
+        if getattr(self, "engine_cash", None) is not None:
+            return self.engine_cash
+        a = self.acct or {}
+        return ((a.get("totalAccountValue") or 0) - (a.get("totalHoldingsValue") or 0)) - self.manual_reserve_left()
+
+    def rot_lots(self):
+        """{sub: (ex, side, shares, avg entry)} of the rotation's inventory."""
+        out = {}
         for ex, books in self.ledger.subbooks.items():
             for sub, q in books.items():
                 if sub.startswith("rot:") and abs(q) >= 1:
                     side = "yes" if q > 0 else "no"
-                    if keys is None or legs.get((str(ex), side)) in keys:
-                        avg = (self.ledger.tranches.get(sub) or {}).get("avg") or self.sig_mark(ex, side) or 0.5
-                        out += abs(q) * float(avg)
-        for o in self.open:
-            rec = self.ledger.orders.get(o["id"]) or {}
-            if rec.get("layer") == "rot" and o["action"] == "buy" and (keys is None or legs.get((str(o["ex"]), o["side"])) in keys):
+                    avg = float((self.ledger.tranches.get(sub) or {}).get("avg") or 0) or float(self.sig_mark(ex, side) or 0.5)
+                    out[sub] = (str(ex), side, abs(q), avg)
+        return out
+
+    def rot_bids(self):
+        return [o for o in self.open if o["action"] == "buy" and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "rot"]
+
+    def rot_race(self, ex):
+        ex = str(ex)
+        if ex in (ROTATION.get("senate_exs") or ()):
+            return "U.S. Senate control"
+        return (self.meta.get(ex) or {}).get("race") or ex
+
+    def rot_expo(self, ex, side):
+        """(race, exposure): in a two-candidate D/R race (and Senate control, 842 D / 843 R) a buy's exposure is the party it wins with
+        (D YES = R NO: the same exposure in the cheaper book); elsewhere the contract and side."""
+        ex = str(ex)
+        race = self.rot_race(ex)
+        senate = ROTATION.get("senate_exs") or ()
+        party = ("D" if ex == senate[0] else "R") if ex in senate else str((self.meta.get(ex) or {}).get("party") or "")
+        two = ex in senate or sorted(str(m.get("party") or "") for m in self.meta.values() if m.get("race") == race) == ["D", "R"]
+        if two and party in ("D", "R"):
+            return race, (party if side == "yes" else ("R" if party == "D" else "D"))
+        return race, f"{ex}:{side}"
+
+    def rot_cost(self, race=None):
+        """Rotation inventory at cost plus its resting bids (one race, or all)."""
+        out = 0.0
+        for sub, (ex, side, q, avg) in self.rot_lots().items():
+            if race is None or self.rot_race(ex) == race:
+                out += q * avg
+        for o in self.rot_bids():
+            if race is None or self.rot_race(o["ex"]) == race:
                 out += o["qty"] * o["price"]
         return out
 
-    def rot_pool(self):
-        """C94e (Piero 16:25 Oct 15): the pool reads SIG's actual cash. -> (pool, freed_left, cash_room):
-        freed_left = cash freed by the rotation's sales - its inventory at cost - its resting bids;
-        cash_room  = SIG cash (the low of the recent reads) - the 5,000 floor - the 1,000 resume margin - its resting bids
-                     (SIG does not hold cash for a resting bid, so a resting bid is spent cash in waiting);
-        pool = min of the two (negative: the resting bids are larger than the cash allows)."""
+    def rot_flows(self):
+        """C95: the rotation's cash since it began, from the ledger — the sales (every reducing fill on a sale market, up to its
+        target: the release asks and the lots' own exits alike), its exits and its buys. Recomputed, so a restart never counts twice."""
         st = self.rot_state()
-        if not ROTATION.get("on") or not st:
+        sells = {str(k): int(v) for k, v in (ROTATION.get("sells") or {}).items()}
+        key = (len(self.ledger.fills), st.get("since"))
+        if getattr(self, "_rot_flows_key", None) == key:
+            return self._rot_flows
+        t0 = st.get("since") or "9999"
+        sold = collections.Counter(); cash_m = collections.Counter()
+        freed = exits = buys = rs = rx = 0.0
+        for f in self.ledger.fills:
+            if str(f.get("t", "")) < t0:
+                continue
+            ex, lay = str(f.get("ex")), f.get("layer")
+            if lay == "rot":
+                buys += f["qty"] * f["price"]
+            elif lay == "rotexit":
+                exits += f["qty"] * (1 - f["price"]); rx += f.get("realized") or 0.0
+            elif ex in sells and lay in self.REDUCING and f.get("action") == "buy" and sold[ex] < sells[ex]:
+                q = min(float(f["qty"]), sells[ex] - sold[ex])
+                sold[ex] += q; cash_m[ex] += q * (1 - f["price"]); freed += q * (1 - f["price"])
+                rs += (f.get("realized") or 0.0) * q / float(f["qty"])
+        out = dict(sold=dict(sold), cash=dict(cash_m), freed=freed, exits=exits, buys=buys, realized_sales=rs, realized_exits=rx, net=freed + exits - buys)
+        self._rot_flows_key, self._rot_flows = key, out
+        return out
+
+    def rot_pool(self):
+        """C95 (and C94e): -> (pool, rotation cash left, engine room): the rotation's net cash (sales + exits - buys) minus its resting
+        bids, never more than the engine's free cash (SIG cash - the 5,000 floor - the manual reserve left) minus its resting bids."""
+        if not ROTATION.get("on") or not self.rot_state():
             return 0.0, 0.0, 0.0
-        resting = sum(o["qty"] * o["price"] for o in self.open if o["action"] == "buy" and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "rot")
-        freed_left = float(st.get("cash_freed") or 0.0) - self.rot_cost()           # rot_cost counts inventory and resting bids
-        cash_room = self.free_cash() - CASH_FLOOR_RESUME - resting
-        return min(freed_left, cash_room), freed_left, cash_room
+        resting = sum(o["qty"] * o["price"] for o in self.rot_bids())
+        left = self.rot_flows()["net"] - resting
+        room = (self.engine_cash_now() - CASH_RESERVE) - resting
+        return min(left, room), left, room
+
+    def rot_claim(self):
+        """The rotation's claim on the engine's cash (unspent + resting bids): taken off what every other layer sees."""
+        if not ROTATION.get("on") or not self.rot_state():
+            return 0.0
+        return max(0.0, min(self.rot_flows()["net"], self.engine_cash_now() - CASH_RESERVE))
 
     def rot_reserve(self):
-        """The rotation's unspent pool (reserved ahead of the catcher), never more than SIG's cash allows (C94e)."""
         return max(0.0, self.rot_pool()[0])
 
     def rot_sale_fill(self, f, px_s):
-        """A release fill on a rotation-sale market: tagged; the target and the cash pool are recomputed from the ledger (rot_sync),
-        so a restart or a re-read never counts a fill twice (C94d: the 22:38 restart re-logged Delaware's fills and doubled the pool)."""
         return "rotation " if str(f["ex"]) in (ROTATION.get("sells") or {}) else ""
 
     def rot_sync(self):
-        """C94d: sold / cash freed / left-to-sell from the ledger's release fills on the sale markets since the rotation began."""
+        """Left-to-sell per sale market from the ledger (rot_flows); saved when it changes."""
         st = self.rot_state()
         sells = ROTATION.get("sells") or {}
         if not st or not sells:
             return st
-        t0 = st.get("since") or "2026-10-13 21:33:00"
-        sold = collections.Counter(); freed = 0.0
-        for f in self.ledger.fills:
-            ex = str(f.get("ex"))
-            if ex in sells and f.get("layer") == "release" and f.get("action") == "buy" and str(f.get("t", "")) >= t0:
-                sold[ex] += f["qty"]; freed += f["qty"] * round(1 - f["price"], 3)
-        new_left = {ex: max(0, int(v) - int(sold.get(ex, 0))) for ex, v in sells.items()}
-        if new_left != st.get("sell_left") or abs(freed - float(st.get("cash_freed") or 0)) > 0.5:
+        fl = self.rot_flows()
+        new_left = {str(ex): max(0, int(v) - int(fl["sold"].get(str(ex), 0))) for ex, v in sells.items()}
+        if new_left != st.get("sell_left") or abs(fl["freed"] - float(st.get("cash_freed") or 0)) > 0.5:
             with self.controls.lock:
-                st.update(sell_left=new_left, cash_freed=round(freed, 2), sold=float(sum(sold.values())))
+                st.update(sell_left=new_left, cash_freed=round(fl["freed"], 2), sold=float(sum(fl["sold"].values())))
                 self.controls.d["rotation"] = st; self.controls.save()
         return st
 
     def rot_touch(self, ex, side):
-        """(bid, ask, fair) on `side` for the rotation: the touch bid we would join, the ask, PM fair in side terms."""
+        """(bid, ask, fair) on `side`: the touch bid we would join, the ask, PM fair in side terms."""
         pxs = self.px.get(ex)
         f = self.fair.get(ex)
         if not pxs or pxs[0] is None or pxs[1] is None or f is None:
@@ -3796,123 +3894,174 @@ class Engine:
         bid, ask = bots.side_book(pxs[0], pxs[1], side)[:2]
         return bid, ask, (f if side == "yes" else 1 - f)
 
+    def rot_vol48(self, now):
+        """{ex: shares printed in the last 48 h} from the tape files (re-read every 30 min)."""
+        c = getattr(self, "_vol48", None)
+        if c and now - c[0] < 1800:
+            return c[1]
+        vol, cut = collections.Counter(), now - 2 * 86400
+        for d in range(3):
+            fn = os.path.join(DATA, "intel", "trades", time.strftime("%Y-%m-%d", time.localtime(now - 86400 * d)) + ".jsonl")
+            try:
+                with open(fn) as fh:
+                    for line in fh:
+                        try:
+                            r = json.loads(line)
+                        except ValueError:
+                            continue
+                        if (r.get("ts") or 0) >= cut:
+                            vol[str(r.get("ex"))] += float(r.get("q") or 0)
+            except OSError:
+                continue
+        self._vol48 = (now, dict(vol))
+        return self._vol48[1]
+
+    def rot_skips(self, now):
+        sk = self.rot_state().get("skipped") or {}
+        return {k for k, v in sk.items() if isinstance(v, (int, float)) and v > now}
+
+    def rot_candidates(self, now):
+        """C95 item 3: every coin-flip side (fair 0.25-0.75) with a gap to PM fair >= 3c at the touch bid and >= 100k shares printed in
+        48 h; per race one exposure (the race's held exposure if it has one), the best gap % in the cheaper book; sorted >= 4c first,
+        then the >= 3c extension, each by gap %."""
+        vol = self.rot_vol48(now)
+        skipped = self.rot_skips(now)
+        rows = []
+        for ex, b in self.owner.items():
+            ex = str(ex)
+            if b.kind != "market" or ex in self.manual_ex or ex in dash5.RI_EX or self.ex.is_frozen(ex) or ex in self.reservoirs():
+                continue
+            if vol.get(ex, 0.0) < ROTATION["min_vol48"]:
+                continue
+            for side in ("yes", "no"):
+                if f"{ex}:{side}" in skipped:
+                    continue
+                bid, ask, fs = self.rot_touch(ex, side)
+                if bid is None or fs is None or not (ROTATION["fair_lo"] <= fs <= ROTATION["fair_hi"]) or not (MB_MIN_PX <= bid <= MB_MAX_PX):
+                    continue
+                gap = fs - bid
+                if gap < ROTATION["gap_ext"] - 1e-9:
+                    continue
+                race, expo = self.rot_expo(ex, side)
+                rows.append(dict(ex=ex, side=side, px=bid, fs=fs, gap=gap, pct=gap / bid, race=race, expo=expo,
+                                 tier=0 if gap >= ROTATION["gap_min"] - 1e-9 else 1, vol=vol.get(ex, 0.0)))
+        held = {}
+        for sub, (ex, side, q, avg) in self.rot_lots().items():
+            held[self.rot_race(ex)] = self.rot_expo(ex, side)[1]
+        for o in self.rot_bids():
+            held.setdefault(self.rot_race(o["ex"]), self.rot_expo(o["ex"], o["side"])[1])
+        best = {}
+        for r in rows:
+            if r["race"] in held and held[r["race"]] != r["expo"]:
+                continue                                    # one exposure per race
+            k = r["race"]
+            if k not in best or (r["tier"], -r["pct"]) < (best[k]["tier"], -best[k]["pct"]):
+                best[k] = r
+        self.rot_cands = sorted(best.values(), key=lambda r: (r["tier"], -r["pct"]))
+        return self.rot_cands
+
+    def rot_caps(self):
+        """(race cost {race: cost}, total cost) of inventory at cost + resting bids."""
+        rc = collections.defaultdict(float)
+        for sub, (ex, side, q, avg) in self.rot_lots().items():
+            rc[self.rot_race(ex)] += q * avg
+        for o in self.rot_bids():
+            rc[self.rot_race(o["ex"])] += o["qty"] * o["price"]
+        return rc, sum(rc.values())
+
+    def rot_cap(self, race):
+        return float(ROTATION["senate_cap"] if race == "U.S. Senate control" else ROTATION["race_cap"])
+
     def rot_plan(self, now, cash):
-        """C94 item 2: one GTC bid per target at min(touch bid, cap), only while the gap to PM fair >= 4c, sized to the target's
-        cap and to the cash the rotation's own sales have freed; a target is skipped for good when PM fair moves >= 2c against it
-        after posting. The Senate target takes the cheaper of 843 NO / 842 YES. -> {ex: [want-spec]}"""
+        """C95 items 3-4: resting bids keep their size and place (never pulled because the pool shrank; pulled only when the gap at
+        their price falls under 3c or PM fair moved >= 2c against them); a re-peg (touch moved up, after the 10-min grace) carries
+        only what the pool funds; new bids go to the candidates in order, each for what the pool funds at that moment (>= 500 shares),
+        within 8k per race (12k Senate control) and 65k in all; the >= 3c tier only once the >= 4c one is full. -> {ex: [want-spec]}"""
         c = self.controls
         if not ROTATION.get("on") or self.fills_blind:
             return {}
-        self.track_rot(now)                                 # C94f: the exits keep running in a pause (C94 refreshed them only when new risk was on: a restart while paused pulled them)
+        cands = self.rot_candidates(now)
+        self.track_rot(now)                                 # the exits keep running in a pause (C94f)
         if c.paused or c.state("rot") == "off":
             return {}
         st = self.rot_sync()
         if not st:
             return {}
-        skipped = st.get("skipped") or {}
-        pool = self.rot_pool()[0]                           # C94e: freed and not yet spent, capped by SIG cash - 6,000 net of resting bids (signed)
-        plan = {}
-        def best_leg(tgt):
-            """(ex, side, px, fair, bid) of the target's cheapest eligible leg, else None."""
-            best = None
-            for ex, side, cap_px in tgt["legs"]:
-                ex = str(ex)
-                if ex not in self.owner or self.ex.is_frozen(ex) or ex in self.manual_ex:
-                    continue
-                bid, ask, fs = self.rot_touch(ex, side)
-                if bid is None or fs is None:
-                    continue
-                px = bots.tick_down(round(min(bid, cap_px), 6))
-                if best is None or px < best[2] - 1e-9:
-                    best = (ex, side, px, fs, bid)
-            return best
-        ranked = sorted(((b, best_leg(b)) for b in ROTATION["buys"] if b["key"] not in skipped), key=lambda x: -((x[1][3] - x[1][2]) if x[1] else -1))
-        for tgt, best in ranked:                            # C94c: the pool goes to the biggest gap first
-            key = tgt["key"]
-            if key in skipped:
+        pool = self.rot_pool()[0]
+        rc, total = self.rot_caps()
+        clip = int(ROTATION["min_clip"])
+        skips = self.rot_skips(now)
+        plan, races = {}, set()
+        for o in self.rot_bids():
+            ex, side = str(o["ex"]), o["side"]
+            k = f"{ex}:{side}"
+            bid, ask, fs = self.rot_touch(ex, side)
+            if bid is None or fs is None or k in skips:
                 continue
-            if best is None:
-                continue
-            ex, side, px, fs, bid = best
-            posted = self.rot_posted.get(key)
+            posted = self.rot_posted.get(k)
             if posted is not None and fs < posted - ROTATION["pm_skip_c"] + 1e-9:
                 with c.lock:
-                    skipped[key] = dict(t=stamp(), why=f"PM fair moved {(posted - fs) * 100:.1f}c against it after posting ({posted:.3f} -> {fs:.3f})")
-                    st["skipped"] = skipped; c.d["rotation"] = st; c.save()
-                msg = f"ROT SKIP {tgt['name']}: {skipped[key]['why']}; its bid is pulled and the target is closed"
+                    st.setdefault("skipped", {})[k] = now + ROTATION["pm_skip_s"]; c.d["rotation"] = st; c.save()
+                self.rot_posted.pop(k, None)
+                msg = f"ROT SKIP {self.name(ex)} {side.upper()}: PM fair moved {(posted - fs) * 100:.1f}c against the bid after posting ({posted:.3f} -> {fs:.3f}); pulled, no bid for 24 h"
                 self.event("ROT", msg); self.night.line(msg)
                 continue
-            gap = fs - px
-            if gap < ROTATION["gap_min"] - 1e-9 or not (MB_MIN_PX <= px <= MB_MAX_PX):
-                continue                                    # not enough gap at the price we could post: no bid (not a skip)
-            cost_key = self.rot_cost(keys={key})
-            room = float(tgt["cap"]) - cost_key
-            resting = sum(o["qty"] * o["price"] for o in self.open if o["ex"] == ex and o["side"] == side and o["action"] == "buy"
-                          and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "rot")
-            if resting > 0 and pool + resting < 0.75 * resting - 1e-6:
-                k_ = (key, "pull", round(pool))
-                if k_ not in self.rot_logged:
-                    self.rot_logged.add(k_)
-                    msg = (f"ROT PULL {tgt['name']}: the resting bid ({resting:,.0f}) is larger than the cash allows (pool {pool:+,.0f}: SIG cash - 6,000 net of resting bids); "
-                           f"pulled now, re-posted at the smaller size next loop (C94e: a re-peg never keeps an old size)")
-                    self.event("ROT", msg); self.night.line(msg)
-                pool += resting                              # its notional is released by the pull
+            if fs - o["price"] < ROTATION["keep_gap"] - 1e-9:
+                continue                                    # the gap at its price closed under 3c: pulled (no edge)
+            px, qty = o["price"], int(o["qty"])
+            if bid > o["price"] + 1e-9 and fs - bid >= ROTATION["keep_gap"] - 1e-9:
+                q2 = int(min(o["qty"], (pool + o["qty"] * o["price"]) / bid))   # the re-peg carries only what the pool funds now
+                if q2 >= clip:
+                    pool -= q2 * bid - o["qty"] * o["price"]
+                    px, qty = bid, q2
+            plan.setdefault(ex, []).append(dict(side=side, px=px, qty=qty, sub=f"rot:{ex}:{side}", ttl=ROT_TTL_S))
+            races.add(self.rot_race(ex))
+        for cd in cands:
+            race = cd["race"]
+            if race in races or f"{cd['ex']}:{cd['side']}" in skips:
                 continue
-            avail = min(room + resting, pool + resting)     # the resting bid's own notional is re-used, not double counted
-            qty = int(avail / px) if px > 0 else 0
-            if qty < MIN_QTY:
-                continue
-            pool -= max(0.0, qty * px - resting)            # C94c: the pool is shared by the targets (C94 sized every bid to the whole pool)
-            if posted is None:
-                self.rot_posted[key] = fs
-                msg = (f"ROT POSTED {tgt['name']}: bid {side.upper()} {qty:,} at {px:.3f} on {self.name(ex)} (touch {bid:.3f}, cap {dict((str(e), cp) for e, sd, cp in tgt['legs'])[ex]:.3f}, "
-                       f"PM fair {fs:.3f}, gap {gap * 100:.1f}c); funded by the rotation's sales (pool {pool:,.0f}), cap {tgt['cap']:,.0f} at cost")
-                self.event("ROT", msg); self.night.line(msg)
-            plan.setdefault(ex, []).append(dict(side=side, px=px, qty=qty, sub=f"rot:{ex}:{side}", ttl=ROT_TTL_S, key=key))
+            room = min(self.rot_cap(race) - rc[race], float(ROTATION["total_cap"]) - total)
+            if room < clip * cd["px"]:
+                continue                                    # this race (or the whole book) is full
+            if pool < clip * cd["px"]:
+                break                                       # post only what the pool funds; the next candidates (and the 3c tier) wait
+            qty = int(min(room, pool) / cd["px"])
+            pool -= qty * cd["px"]; rc[race] += qty * cd["px"]; total += qty * cd["px"]; races.add(race)
+            k = f"{cd['ex']}:{cd['side']}"
+            self.rot_posted[k] = cd["fs"]
+            msg = (f"ROT POSTED {self.name(cd['ex'])} {cd['side'].upper()}: bid {qty:,} at {cd['px']:.3f} (touch), PM fair {cd['fs']:.3f}, gap {cd['gap'] * 100:.1f}c "
+                   f"({cd['pct']:.1%}{'' if cd['tier'] == 0 else ', the >= 3c tier'}), 48-h volume {cd['vol']:,.0f}; race {race} {rc[race]:,.0f} of {self.rot_cap(race):,.0f}, book {total:,.0f} of {ROTATION['total_cap']:,.0f}; pool left {pool:,.0f}")
+            self.event("ROT", msg); self.night.line(msg)
+            plan.setdefault(cd["ex"], []).append(dict(side=cd["side"], px=cd["px"], qty=qty, sub=f"rot:{cd['ex']}:{cd['side']}", ttl=ROT_TTL_S))
         return plan
 
     def track_rot(self, now):
-        """C94 item 3: each rotation lot rests an ask at max(entry + 0.5c, PM fair - 1.5c) (GTC); it sells at the touch instead when
-        another target's gap is >= 3c bigger than what this lot has left (a swap)."""
+        """C95 item 5: each rotation lot rests an ask at max(entry + 0.5c, PM fair - 1.5c) (GTC); it sells at the touch instead (a swap)
+        when another race's candidate, with room under its cap, has a gap >= 3c bigger than what this lot has left."""
         self.rot_view = {}
-        gaps = {}
-        for tgt in ROTATION["buys"]:
-            if tgt["key"] in (self.rot_state().get("skipped") or {}):
+        rc, total = self.rot_caps()
+        cands = [cd for cd in (getattr(self, "rot_cands", None) or []) if self.rot_cap(cd["race"]) - rc[cd["race"]] >= ROTATION["min_clip"] * cd["px"]]
+        for sub, (ex, side, q, avg) in self.rot_lots().items():
+            if q < MIN_QTY:
                 continue
-            for ex, side, cap_px in tgt["legs"]:
-                bid, ask, fs = self.rot_touch(str(ex), side)
-                if bid is not None and fs is not None and self.rot_cost(keys={tgt["key"]}) < float(tgt["cap"]) - 1:
-                    gaps[tgt["key"]] = max(gaps.get(tgt["key"], -1), fs - bots.tick_down(round(min(bid, cap_px), 6)))
-        for ex, books in list(self.ledger.subbooks.items()):
-            for sub, q in list(books.items()):
-                if not sub.startswith("rot:") or abs(q) < MIN_QTY:
-                    continue
-                side = "yes" if q > 0 else "no"
-                tr = self.ledger.tranches.get(sub) or {}
-                avg = float(tr.get("avg") or 0) or float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
-                if not avg:
-                    continue
-                bid, ask, fs = self.rot_touch(ex, side)
-                if fs is None:
-                    continue
-                floor_ = bots.tick_up(round(avg + RULE0_MARGIN, 6))
-                px = max(floor_, bots.tick_up(round(fs - ROTATION["exit_fair_c"], 6)))
-                why = "fair - 1.5c"
-                left = fs - (ask if ask is not None else px)   # what this lot has left if sold at the touch
-                my_key = next((b["key"] for b in ROTATION["buys"] for e, sd, _ in b["legs"] if str(e) == str(ex) and sd == side), None)
-                better = [(k, g) for k, g in gaps.items() if k != my_key and g >= left + ROTATION["swap_gap_c"] - 1e-9]
-                if better and ask is not None and ask >= floor_ - 1e-9:
-                    px, why = max(ask, floor_), f"swap: {better[0][0]} has {better[0][1] * 100:.1f}c vs {left * 100:.1f}c left here"
-                    k_ = (ex, "swap")
-                    if k_ not in self.rot_logged:
-                        self.rot_logged.add(k_)
-                        msg = f"ROT SWAP {self.name(ex)} {side.upper()} {abs(q):,.0f}: sold at the touch {px:.3f} ({why})"
-                        self.event("ROT", msg); self.night.line(msg)
-                self.rot_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg, why=why))
+            bid, ask, fs = self.rot_touch(ex, side)
+            if fs is None:
+                continue
+            floor_ = bots.tick_up(round(avg + RULE0_MARGIN, 6))
+            px, why = max(floor_, bots.tick_up(round(fs - ROTATION["exit_fair_c"], 6))), "fair - 1.5c"
+            left = fs - (ask if ask is not None else px)
+            better = [cd for cd in cands if cd["race"] != self.rot_race(ex) and cd["gap"] >= left + ROTATION["swap_gap_c"] - 1e-9]
+            if better and ask is not None and ask >= floor_ - 1e-9:
+                px, why = max(ask, floor_), f"swap: {self.name(better[0]['ex'])} {better[0]['side'].upper()} has {better[0]['gap'] * 100:.1f}c vs {left * 100:.1f}c left here"
+                k_ = (ex, "swap", better[0]["ex"])
+                if k_ not in self.rot_logged:
+                    self.rot_logged.add(k_)
+                    msg = f"ROT SWAP {self.name(ex)} {side.upper()} {q:,.0f}: ask at the touch {px:.3f} ({why})"
+                    self.event("ROT", msg); self.night.line(msg)
+            self.rot_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg, why=why))
 
     def rot_fill_events(self, fills):
-        """Rotation fills: the lot's tranche (average entry), FILLED lines, round trips."""
-        c = self.controls
+        """Rotation fills: the lot's tranche (average entry and the fair at entry), FILLED lines, round trips."""
         for f in fills:
             if f.get("layer") not in ("rot", "rotexit"):
                 continue
@@ -3921,12 +4070,14 @@ class Engine:
             q = float((self.ledger.subbooks.get(ex) or {}).get(sub, 0.0))
             tr = self.ledger.tranches.get(sub)
             if f["layer"] == "rot":
+                fs = self.side_fair(ex, f["side"])
                 if tr is None or tr.get("state") != "open":
-                    tr = self.ledger.tranches[sub] = dict(ex=ex, side=f["side"], kind="rot", t=stamp(), ts=time.time(), state="open", avg=f["price"], qty=0.0)
+                    tr = self.ledger.tranches[sub] = dict(ex=ex, side=f["side"], kind="rot", t=stamp(), ts=time.time(), state="open", avg=f["price"], qty=0.0, fair0=fs)
                 qa = float(tr.get("qty") or 0.0)
                 tr["avg"] = round((float(tr.get("avg") or f["price"]) * qa + f["price"] * f["qty"]) / (qa + f["qty"]), 5) if qa + f["qty"] > 0 else f["price"]
+                if fs is not None:
+                    tr["fair0"] = round((float(tr.get("fair0") or fs) * qa + fs * f["qty"]) / (qa + f["qty"]), 5) if qa + f["qty"] > 0 else fs
                 tr["qty"] = qa + f["qty"]
-                fs = self.side_fair(ex, f["side"])
                 msg = f"FILLED rot {self.name(ex)} {f['side'].upper()} {f['qty']:,.0f} at {f['price']:.3f}" + ("" if fs is None else f" (PM fair {fs:.3f}, gap {(fs - f['price']) * 100:.1f}c)") + f"; lot {abs(q):,.0f} at {tr['avg']:.3f}"
             else:
                 px_s = round(1 - f["price"], 3)
@@ -3936,18 +4087,109 @@ class Engine:
                     msg += " (round trip done)"
             self.event("ROT", msg); self.night.line(msg)
 
+    def rot_lot_rows(self):
+        """[(name, side, shares, entry, mark (SIG mid), fair, gap closed, P&L on the board, P&L at fair)] of the rotation lots."""
+        out = []
+        for sub, (ex, side, q, avg) in self.rot_lots().items():
+            pxs = self.px.get(ex); fs = self.side_fair(ex, side)
+            if not pxs or pxs[0] is None or pxs[1] is None or fs is None:
+                continue
+            mid = (pxs[0] + pxs[1]) / 2; mark = mid if side == "yes" else 1 - mid
+            f0 = float((self.ledger.tranches.get(sub) or {}).get("fair0") or fs)
+            g0, g1 = f0 - avg, fs - mark
+            closed = (1 - g1 / g0) if g0 > 0.001 else None
+            out.append((self.name(ex), side, q, avg, mark, fs, closed, q * (mark - avg), q * (fs - avg)))
+        return out
+
     def rot_status(self, now):
+        st = self.rot_state(); fl = self.rot_flows()
+        sells = ROTATION.get("sells") or {}
+        asks = [o for o in self.open if str(o["ex"]) in sells and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "release"]
+        bids = self.rot_bids()
+        rows = self.rot_lot_rows()
+        pool, left, room = self.rot_pool()
+        a = self.acct or {}
+        return (f"ROT status: funding sold {sum(fl['sold'].values()):,.0f} of {sum(int(v) for v in sells.values()):,} shares (cash {fl['freed']:,.0f}), "
+                f"asks resting {len(asks)} / {sum(o['qty'] for o in asks):,.0f} shares; bids resting {len(bids)} (" +
+                ", ".join(f"{self.name(o['ex'])} {o['side'].upper()} {o['qty']:,.0f} @ {o['price']:.3f}" for o in bids) + f"); lots {len(rows)} / {sum(r[2] for r in rows):,.0f} shares at cost "
+                f"{sum(r[2] * r[3] for r in rows):,.0f}, open {sum(r[7] for r in rows):+,.0f} on the board / {sum(r[8] for r in rows):+,.0f} at fair; realized exits {fl['realized_exits']:+,.0f}; "
+                f"pool {max(0.0, pool):,.0f} (rotation cash left {left:,.0f}; engine free cash - resting bids {room:,.0f}); cash {((a.get('totalAccountValue') or 0) - (a.get('totalHoldingsValue') or 0)):,.0f}, "
+                f"manual reserve left {self.manual_reserve_left():,.0f}")
+
+    def rank_vs_100(self):
+        """(our rank, total, our P&L, #100's P&L) from the last leaderboard read (data/leaders.csv / leaders_meta.json)."""
+        try:
+            meta = read_json(os.path.join(DATA, "leaders_meta.json"), {}) or {}
+            with open(os.path.join(DATA, "leaders.csv")) as fh:
+                lines = fh.readlines()[-80:]
+            rows = list(csv.reader(lines))
+            last_t = max(r[0] for r in rows if r and r[0] != "time")
+            cur = [r for r in rows if r and r[0] == last_t]
+            ours = next((float(r[4]) for r in cur if r[-1] == "1"), None)
+            r100 = next((float(r[4]) for r in cur if r[1] == "100"), None)
+            return meta.get("my_rank"), meta.get("total"), ours, r100
+        except Exception:
+            return None, None, None, None
+
+    def rot_report(self, now):
+        """C95 item 6: at 18:00 and 08:00 PT once a day — funding asks filled, the rotation lots (entry / mark / fair / gap closed),
+        realized, open P&L on the board and at fair, cash, manual reserve left, rank vs #100."""
+        if not ROTATION.get("on") or not self.rot_state():
+            return
+        hm = time.strftime("%H:%M", time.localtime(now)); day = time.strftime("%Y-%m-%d", time.localtime(now))
+        slot = "08:00" if "08:00" <= hm < "08:30" else "18:00" if "18:00" <= hm < "18:30" else None
+        if slot is None:
+            return
         st = self.rot_state()
-        left = st.get("sell_left") or {}
-        asks = [o for o in self.open if str(o["ex"]) in left and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "release"]
-        bids = [o for o in self.open if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "rot"]
-        exits = [o for o in self.open if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "rotexit"]
-        inv = {sub: q for ex, books in self.ledger.subbooks.items() for sub, q in books.items() if sub.startswith("rot:") and abs(q) >= 1}
-        return (f"ROT status: sales resting {len(asks)} asks / {sum(o['qty'] for o in asks):,.0f} shares (" + ", ".join(f"{self.name(o['ex'])} {o['qty']:,.0f} @ {1 - o['price']:.3f}" for o in asks) + f"), sold {st.get('sold') or 0:,.0f} shares, "
-                f"left to sell {sum(int(v) for v in left.values()):,}, cash freed {float(st.get('cash_freed') or 0):,.0f}; bids resting {len(bids)} (" + ", ".join(f"{self.name(o['ex'])} {o['side'].upper()} {o['qty']:,.0f} @ {o['price']:.3f}" for o in bids) + f"), "
-                f"bought {sum(abs(q) for q in inv.values()):,.0f} shares in {len(inv)} lots at cost {self.rot_cost() - sum(o['qty'] * o['price'] for o in bids):,.0f}, exits resting {len(exits)}, skipped {list((st.get('skipped') or {}).keys())}; "
-                f"pool {max(0.0, self.rot_pool()[0]):,.0f} (sales freed - rotation cost {self.rot_pool()[1]:,.0f}; SIG cash - 6,000 - resting bids {self.rot_pool()[2]:,.0f}); "
-                f"cash {((self.acct or {}).get('totalAccountValue') or 0) - ((self.acct or {}).get('totalHoldingsValue') or 0):,.0f}")
+        if (st.get("reports") or {}).get(slot) == day:
+            return
+        with self.controls.lock:
+            st.setdefault("reports", {})[slot] = day; self.controls.d["rotation"] = st; self.controls.save()
+        msg = self.rot_report_text(now, slot)
+        self.event("ROT", msg); self.night.line(msg)
+
+    def rot_report_text(self, now, slot="now"):
+        fl = self.rot_flows(); sells = ROTATION.get("sells") or {}
+        rows = self.rot_lot_rows()
+        rank, total, ours, r100 = self.rank_vs_100()
+        a = self.acct or {}
+        cash = (a.get("totalAccountValue") or 0) - (a.get("totalHoldingsValue") or 0)
+        fund = "; ".join(f"{self.name(ex)} {int(fl['sold'].get(str(ex), 0)):,}/{int(v):,}" for ex, v in sells.items())
+        lots = "; ".join(f"{n} {sd.upper()} {q:,.0f} @ {e:.3f} / {m:.3f} / {f_:.3f}" + ("" if c_ is None else f" ({c_:.0%} closed)") + f" {pb:+,.0f} / {pf:+,.0f}" for n, sd, q, e, m, f_, c_, pb, pf in rows)
+        rk = "rank n/a" if rank is None else (f"rank {rank} of {total}" + ("" if ours is None or r100 is None else f", P&L {ours:+,.0f} vs #100 {r100:+,.0f} ({ours - r100:+,.0f})"))
+        return (f"ROT REPORT {slot} (Piero 15:05 Oct 16 item 6): FUNDING sold {sum(fl['sold'].values()):,.0f} of {sum(int(v) for v in sells.values()):,} shares, cash {fl['freed']:,.0f} "
+                f"(realized {fl['realized_sales']:+,.0f} vs lot avg) — {fund}. LOTS {len(rows)} (entry / mark / fair, gap closed, board / fair): {lots or 'none'}. "
+                f"OPEN {sum(r[7] for r in rows):+,.0f} on the board / {sum(r[8] for r in rows):+,.0f} at fair; REALIZED exits {fl['realized_exits']:+,.0f}; buys {fl['buys']:,.0f}, exits {fl['exits']:,.0f}. "
+                f"CASH {cash:,.0f}, manual reserve left {self.manual_reserve_left():,.0f}, engine free {self.engine_cash_now() - CASH_RESERVE:,.0f}, pool {self.rot_reserve():,.0f}. {rk}.")
+
+    def c95_migration(self, now):
+        """Once (C95, Piero 15:05 Oct 16): the manual reserve, the rotation's new phase (sales, universe, caps), RI Governor R's
+        reservoir retired (it is sold in full)."""
+        c = self.controls
+        if (c.d.get("c95") or {}).get("done"):
+            return
+        with c.lock:
+            c.d["c95"] = dict(done=stamp())
+            c.d["manual_reserve"] = dict(amount=float(MANUAL_RESERVE), since=stamp())
+            c.d["rotation_c94"] = c.d.get("rotation")
+            c.d["rotation"] = dict(since=stamp(), sell_left={str(k): int(v) for k, v in ROTATION["sells"].items()}, cash_freed=0.0, sold=0.0, skipped={}, reports={})
+            res = c.d.get("reservoirs") or {}
+            for ex in ROTATION.get("sell_all_subs") or ():
+                if ex in res:
+                    c.d.setdefault("reservoirs_retired", {})[ex] = dict(res.pop(ex), retired=stamp(), why="Piero 15:05 Oct 16: sold in full for the rotation (no rebuy)")
+            c.d["layers"].setdefault("rot", dict(state="off", since=now, caps={}, killed=None))["state"] = "full"
+            c.save()
+        msg = (f"C95 (Piero 15:05 Oct 16): (1) MANUAL RESERVE {MANUAL_RESERVE:,.0f}: the engine never spends below the {CASH_RESERVE:,} floor + the reserve left "
+               f"(engine free cash = cash - {CASH_RESERVE + MANUAL_RESERVE:,.0f}); Piero's own fills (orders the engine did not place) draw from it and pause nothing above the floor; "
+               f"shown on the dashboard Overview. (2) FUND: GTC asks at max(lot avg + 0.5c, touch), place kept, cash counted on SIG fills only: " +
+               ", ".join(f"{self.name(k)} {v:,}" for k, v in ROTATION["sells"].items()) +
+               "; KEEP Rhode Island Senate R NO, Delaware's reservoir / swing half and every lot below lot avg + 0.5c; Rhode Island Governor R's reservoir retired (no rebuy). "
+               f"Every dollar the sales free goes to the rotation (its cash is off the other layers'). (3) BUY: every coin-flip side (fair 0.25-0.75) with a gap >= 4c at the touch and >= 100k shares in 48 h, "
+               f"biggest gap % first, one exposure per race in the cheaper book; caps at cost 8k per race, 12k Senate control (842 YES / 843 NO), 65k in all; the >= 3c tier once the 4c one is full. "
+               f"(4) NO BID CHURN: a bid only for what the pool funds (>= 500 shares); a resting bid is never pulled because the pool shrank; GTC, place kept. "
+               f"(5) EXIT at max(entry + 0.5c, PM fair - 1.5c); swap when another gap is >= 3c bigger; exempt from the no-edge release above 2% left. "
+               f"(6) REPORT at 18:00 and 08:00. Invariants unchanged.")
+        self.event("CONTROL", "C95 (Piero 15:05 Oct 16): manual reserve + the coin-flip rotation at full size (the full text is in RUN_LOG)"); self.night.line(msg)
 
     def c94_migration(self, now):
         """Once (C94, Piero 20:30 Oct 13): the coin-flip rotation — four sales, five targets, exits, the hourly line."""
@@ -7189,9 +7431,10 @@ class Engine:
         plan, listing = {}, []
         for ex, b in self.book.items():
             q = b["pos"]
-            if not q or ex not in self.owner or self.owner[ex].kind != "market" or self.ex.is_frozen(ex) or ex in self.manual_ex or str(ex) in dash5.RI_EX or (ex in self.reservoirs() and str(ex) not in rot_left):
+            if not q or ex not in self.owner or self.owner[ex].kind != "market" or self.ex.is_frozen(ex) or ex in self.manual_ex or (str(ex) in dash5.RI_EX and str(ex) not in rot_left) or (ex in self.reservoirs() and str(ex) not in rot_left):
                 continue                                    # Piero's manual market (RI-GOV-D), RI Senate R (his reservoir) and any reservoir market stay out (C94: unless he named it for the rotation; its reservoir subs still stay)
             res_subs = self.reservoir_subs(ex) if ex in self.reservoirs() else set()
+            allow_all = str(ex) in rot_left and str(ex) in (ROTATION.get("sell_all_subs") or ())   # C95: Piero named the whole holding (swing sub included)
             side = "yes" if q > 0 else "no"
             bid, ask = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[:2]
             fs = self.side_fair(ex, side)
@@ -7199,7 +7442,7 @@ class Engine:
                 continue
             split, why, px_sale = {}, None, None
             for sub, v in self.ledger.subbooks.get(ex, {}).items():
-                if v * q <= 0 or sub.startswith(("manual", "pairset:", "sleeve:", "swing:")) or sub in res_subs or ((str(ex), sub) in self.core_set and str(ex) not in rot_left):
+                if v * q <= 0 or sub.startswith(("manual", "pairset:")) or (not allow_all and (sub.startswith(("sleeve:", "swing:")) or sub in res_subs)) or ((str(ex), sub) in self.core_set and str(ex) not in rot_left):
                     continue                                # never a core lot (unless Piero named the market for the rotation, C94), his manual / pair / sleeve lots, or the RI reservoir
                 key = f"{ex}|{sub}"
                 sig_avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)

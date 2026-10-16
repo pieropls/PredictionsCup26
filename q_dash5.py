@@ -1297,6 +1297,8 @@ def build(eng, api, v4=None):
             account_series=series if isinstance(series, list) else [],
             rank=cached("rank", 60, lambda: ranking(board_pnl, fair_pnl)),
             port=dict(invested=round(invested, 2), available=round(cash, 2), above_floor=round(cash - FLOOR, 2), account=round(account, 2),
+                      manual_reserve=round(float(((getattr(eng, 'controls', None) and eng.controls.d.get('manual_reserve')) or {}).get('amount') or 0), 2),   # C95
+                      manual_reserve_left=round(eng.manual_reserve_left(), 2) if hasattr(eng, 'manual_reserve_left') else None,
                       slices=[row(p) for p in top], other=[row(p) for p in rest], other_value=round(sum(p["value"] for p in rest) + (val_gap if abs(val_gap) > 1 else 0), 2),
                       val_gap=val_gap,
                       by_strategy=[dict(key=k, name=name_of(k), value=round(v, 2)) for k, v in sorted(by_strat.items(), key=lambda kv: -kv[1]) if v >= 1]),

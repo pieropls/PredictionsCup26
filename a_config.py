@@ -479,12 +479,23 @@ STATE_EVERY_S = 60              # data/state.json and the static data/dashboard.
 HOST_ID_FILE = os.path.join(DATA, "host_id")
 NIGHT_LOG_FILE = os.path.join(os.path.dirname(DATA), "docs", "RUN_LOG.md")   # day 2: the run log (NIGHT_LOG.md = the night)
 
-# ---- C94 (Piero 20:30 Oct 13): COIN-FLIP ROTATION — ~29k out of slow favourites into the biggest coin-flip gaps
-ROTATION = dict(on=True, gap_min=0.04, pm_skip_c=0.02, exit_fair_c=0.015, swap_gap_c=0.03, release_exempt_ret=0.02,
-                sells={"1044": 9137, "1043": 9594, "946": 11136, "1075": 4000},   # Florida Senate R YES, Florida Senate D NO, Colorado Senate R NO, Delaware Senate R NO (4,000 of 18,130): GTC asks at max(lot avg + 0.5c, touch)
-                buys=[dict(key="senate", name="U.S. Senate D control", legs=[("843", "no", 0.560), ("842", "yes", 0.575)], cap=10_000.0),   # the cheaper leg
-                      dict(key="1067", name="Alaska Senate R NO", legs=[("1067", "no", 0.680)], cap=4_000.0),
-                      dict(key="1045", name="Kansas Senate D NO", legs=[("1045", "no", 0.580)], cap=5_000.0),             # beyond the 1,355 held
-                      dict(key="1020", name="MI-07 House R NO", legs=[("1020", "no", 0.570)], cap=4_000.0),
-                      dict(key="1011", name="FL-09 House R YES", legs=[("1011", "yes", 0.650)], cap=4_000.0)])
+# ---- C95 (Piero 15:05 Oct 16; replaces C94's lists): the COIN-FLIP ROTATION at full size (~55-60k) + a MANUAL RESERVE
+MANUAL_RESERVE = 10_000.0       # the engine never spends cash below the 5,000 floor + this; Piero's own fills draw from it
+ROTATION = dict(on=True, gap_min=0.04, gap_ext=0.03, keep_gap=0.03, pm_skip_c=0.02, pm_skip_s=24 * 3600, exit_fair_c=0.015, swap_gap_c=0.03,
+                release_exempt_ret=0.02, fair_lo=0.25, fair_hi=0.75, min_vol48=100_000.0, min_clip=500,
+                race_cap=8_000.0, senate_cap=12_000.0, total_cap=65_000.0, senate_exs=("842", "843"),
+                # FUND: GTC asks at max(lot avg + 0.5c, touch), place kept, cash counted on SIG fills only
+                sells={"1072": 16265,   # Oklahoma Senate D NO (all)
+                       "1074": 8468,    # Rhode Island Governor R NO (all, swing sub included; its reservoir retired)
+                       "1075": 9100,    # Delaware Senate R NO (half: the dump lots; the reservoir / swing half is kept)
+                       "1051": 3632,    # Tennessee Senate D NO
+                       "967": 3032,     # North Carolina Senate R NO
+                       "1043": 3063,    # Florida Senate D NO
+                       "975": 1976,     # Oklahoma Senate R YES
+                       "963": 1603,     # Montana Senate D NO
+                       "1061": 1496,    # New Hampshire Governor D NO
+                       "1052": 1167,    # Tennessee Senate R YES
+                       "965": 776},     # Montana Senate I NO
+                sell_all_subs=("1074",),
+                buys=[])                # C95: the buy list is the live coin-flip universe (rot_candidates), not a fixed list
 ROT_TTL_S = 24 * 3600

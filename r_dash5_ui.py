@@ -218,7 +218,7 @@ function ov_port() {
     <div class="g2 port5"><div><div style="display:flex;flex-wrap:wrap;gap:16px 24px;margin-bottom:10px"><div><div class="lab5">Invested</div><div class="big5" style="font-size:30px">${k1(p.invested)}</div><div class="sub5">${pct(p.invested / (p.account || 1), 0)} of the account</div></div>
     <div><div class="lab5">Core</div><div class="big5" style="font-size:30px">${k1(obj(B.core).cost)}</div><div class="sub5">of ${k1(obj(B.core).cap)} at cost · ${k1(obj(B.core).fair)} at fair</div></div>
     <div><div class="lab5">Trading</div><div class="big5" style="font-size:30px">${k1(obj(B.trading).cost)}</div><div class="sub5">at cost · ${k1(obj(B.trading).value)} at marks</div></div>
-    <div><div class="lab5">Available</div><div class="big5" style="font-size:30px">${k1(p.available)}</div><div class="sub5">${k1(p.above_floor)} above the 5k floor</div></div></div>${svg}</div><div>${t}</div></div>`;
+    <div><div class="lab5">Available</div><div class="big5" style="font-size:30px">${k1(p.available)}</div><div class="sub5">${k1(p.above_floor)} above the 5k floor</div>${p.manual_reserve ? `<div class="sub5">manual reserve left <b>${k1(p.manual_reserve_left)}</b> of ${k1(p.manual_reserve)}</div>` : ""}</div></div>${svg}</div><div>${t}</div></div>`;
 }
 
 // ------------------------------------------------------------------------------------------- Live
