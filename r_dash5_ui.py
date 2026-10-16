@@ -93,7 +93,8 @@ ui.v5 = Object.assign({basis: "board", pv: "market", oexp: false, hlx: null, mkq
 function hdr5() {
   const h = V("v5hdr"), st = h.status || "trading", cls = st === "trading" ? "green" : st === "paused" ? "red" : "amber";
   const lab = st === "trading" ? "Trading" : st === "paused" ? "Paused" : "Degraded";
-  return `<span class="dot5 ${cls}"></span><b>${lab}</b>${h.reason ? " · " + esc(h.reason) : ""}, last loop ${h.loop_age == null ? "–" : h.loop_age + " s"}`;
+  const rb = st === "paused" ? ` <button class="btn5 pri" data-c5="resume" style="margin-left:8px;padding:2px 10px">Resume now</button>` : "";   // C95c: resume from any tab
+  return `<span class="dot5 ${cls}"></span><b>${lab}</b>${h.reason ? " · " + esc(h.reason) : ""}, last loop ${h.loop_age == null ? "–" : h.loop_age + " s"}${rb}`;
 }
 
 // ------------------------------------------------------------------------------------------- Overview
@@ -436,7 +437,7 @@ function confirm5() {
 function c5text(btn) {
   const a = V("v5ad"), act = btn.dataset.c5;
   if (act === "pause") return "Pause new risk: every strategy stops placing entries and their resting entry bids are cancelled; exits keep resting.";
-  if (act === "resume") return "Resume trading: the strategies place entries again under their caps.";
+  if (act === "resume") return "Resume trading: the strategies place entries again under their caps. A safety pause whose cause is still present (cash under 5,000, a new I2 trim in the last minute, API errors) pauses again by itself.";
   if (act === "rollback") return `Roll back to ${btn.dataset.rel}: the Mac pushes that release to the server on its next mirror pull and restarts the engine (about 30 s without trading).`;
   const c = arr(a.controls).find(x => x.key === btn.dataset.key) || {}, st = btn.dataset.st, nm = {off: "Off", pilot: "Pilot", full: "Live"}[st];
   if (st === "off") return `${c.name} goes Off: its ${c.entries || 0} entry orders are cancelled, its ${c.exits || 0} exits keep resting.`;

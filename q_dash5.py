@@ -805,7 +805,18 @@ def status_of(eng, rl_10m, loop_age):
     """(state, reason): paused (red) / degraded (amber) / trading (green)."""
     c = eng.controls
     if c.paused or getattr(eng, "fills_blind", None):
-        return "paused", "new risk paused" if c.paused else "fills blind"
+        if not c.paused:
+            return "paused", "fills blind"
+        ap = c.d.get("auto_pause") or {}
+        why = str(ap.get("reason") or "by hand")                # C95c: the reason and when it lifts by itself
+        eta = ""
+        if ap.get("kind") == "i2_breach" and getattr(eng, "trim_t", None):
+            eta = " · resumes by itself at " + time.strftime("%H:%M", time.localtime(eng.trim_t + getattr(eng, "I2_RESUME_S", 1800)))
+        elif ap.get("kind") in ("cash_floor", "cash_short"):
+            eta = " · resumes by itself at cash >= 6,000"
+        elif ap.get("kind"):
+            eta = " · resumes by itself when the condition clears"
+        return "paused", f"new risk paused ({why[:90]}){eta}"
     why = []
     if rl_10m:
         why.append(f"{rl_10m} rate-limit error{'s' if rl_10m > 1 else ''} in 10 min")

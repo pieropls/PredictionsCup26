@@ -5188,6 +5188,29 @@ class C94Tests(EngineCase):
         self.assertNotIn(b, plan)
         eng.open[:] = [o for o in eng.open if o["id"] != "rb1"]; eng.ledger.orders.pop("rb1", None)
 
+    def test_c95c_piero_manual_fill_goes_to_the_manual_book_and_is_never_sold(self):
+        """C95c (Oct 16 15:27): Piero bought 25,000 SC-01 D YES by hand; the audit booked it as inventory and the no-edge release sold
+        8,356 at 0.305 ahead of his own exit. His fill now moves the shares to 'manual'; fresh inventory is left alone 10 min."""
+        fake, eng, favs = self.rig()
+        a = favs[0]
+        C93Tests.lot(self, eng, fake, a, f"dump:{a}:yes:1", 1, 0.80, (0.30, 0.305, 0.3025), 0.31)   # fair 0.31: a no-edge market
+        eng.ledger.subbooks[a] = {"inventory": 25_000.0}; fake.pos[a] = 25_000; fake.avg_cost[a] = 0.30
+        eng.controls.d["c95c"] = dict(since="2026-01-01 00:00:00")
+        eng.inv_new_t[a] = time.time()
+        eng.lots_cache = (None, {})
+        self.assertNotIn(a, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time()), "fresh inventory: no seller for 10 min")
+        eng.ledger.fills.append(dict(t="2026-10-16 15:27:01", ex=a, side="yes", action=None, price=0.30, qty=25_000.0, layer="", bot=f"MKT {a}", order="foreignSC", realized=0.0, before_engine=False))
+        eng.manual_book(time.time())
+        self.assertEqual(eng.ledger.subbooks[a].get("manual"), 25_000.0); self.assertAlmostEqual(eng.ledger.subbooks[a].get("inventory", 0.0), 0.0)
+        eng.manual_book(time.time())
+        self.assertEqual(eng.ledger.subbooks[a].get("manual"), 25_000.0, "booked once")
+        eng.inv_new_t[a] = 0.0; eng.lots_cache = (None, {})
+        self.assertNotIn(a, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time()), "the manual book is never offered")
+        eng.ledger.fills.append(dict(t="2026-10-16 15:27:19", ex=a, side="no", action=None, price=0.675, qty=16_644.0, layer="", bot=f"MKT {a}", order="foreignSC2", realized=0.0, before_engine=False))
+        eng.manual_book(time.time())
+        self.assertEqual(eng.ledger.subbooks[a].get("manual"), 25_000.0 - 16_644.0, "his own sale reduces his manual book")
+        eng.ledger.fills = [f for f in eng.ledger.fills if f.get("order") not in ("foreignSC", "foreignSC2")]
+
     def test_rotation_exit_at_max_entry_half_cent_fair_less_1_5c_and_release_exemption(self):
         fake, eng, favs = self.rig()
         ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)

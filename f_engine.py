@@ -420,6 +420,7 @@ class Engine:
         self.drift_since, self.h1_test_stopped, self.h1_shortfall_done, self.noedge_listed = {}, False, False, False   # C93
         self.lotavg_logged = set()                          # C93d: one LOT AVG CHECK line per lot
         self.rot_now, self.rot_view, self.rot_posted, self.rot_logged = {}, {}, {}, set()   # C94: the coin-flip rotation layer
+        self.inv_new_t = {}                                 # C95c: ex -> when the audit last booked unexplained inventory
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
@@ -481,6 +482,11 @@ class Engine:
             self.c93e_migration(time.time())
             self.c94_migration(time.time())
             self.c95_migration(time.time())
+            if not (self.controls.d.get("c95c") or {}).get("since"):
+                with self.controls.lock:
+                    self.controls.d["c95c"] = dict(since=stamp()); self.controls.save()
+                self.night.line("C95c: Piero's own fills go to the 'manual' sub-book from now on (never sold by the engine); new unexplained inventory is left alone 10 min; "
+                                "the dashboard header shows a paused banner with its reason and a Resume now button")
         except Exception as err:
             print(f"C88 / C90 migration: {err!r}")
         try:
@@ -781,7 +787,14 @@ class Engine:
         except Exception as err:
             self.event("ERR", f"fat-finger events: {err!r}")
         self.ledger.init_subbooks(pos, self.manual_ex)
-        self.ledger.audit_subbooks(pos, log=lambda s: self.event("AUDIT", s.strip()[6:].strip()), skip=self.audit_skip(pos, now))
+        fixed_ = self.ledger.audit_subbooks(pos, log=lambda s: self.event("AUDIT", s.strip()[6:].strip()), skip=self.audit_skip(pos, now))
+        for ex_, diff_ in fixed_ or ():
+            if abs(diff_) >= 1:
+                self.inv_new_t[str(ex_)] = now               # C95c: new unexplained inventory (maybe Piero's trade, its fill not read yet): no seller for 10 min
+        try:
+            self.manual_book(now)                           # C95c: Piero's own fills -> the 'manual' sub-book (never sold by the engine)
+        except Exception as err:
+            self.event("ERR", f"manual book: {err!r}")
         self.ex.update(pos, self.open, as_of=now)
         if self.ex.frozen or self.journal.unknown():
             n = self.ex.resolve_unknown(self.open, got.get("fills", []), on_adopt=self.adopted)
@@ -3765,6 +3778,39 @@ class Engine:
             pos[ex] = p0 + d
         self._manual_key, self._manual_spent = key, spent
         return spent
+
+    def manual_book(self, now):
+        """C95c (Piero 15:27 Oct 16: the no-edge release sold 8,356 of his 25,000 SC-01 D YES bought by hand): a fill of an order the
+        engine did not place moves its shares into the 'manual' sub-book, which no engine seller touches; a manual sale reduces it.
+        A manual fill that reduces an engine holding (manual book empty, engine inventory on the other side) stays with the engine's
+        books. Each fill is booked once (flag on the fill), from C95c on."""
+        since = (self.controls.d.get("c95c") or {}).get("since")
+        if not since:
+            return
+        moved = []
+        with self.ledger.lock:
+            for f in self.ledger.fills[-400:]:
+                if f.get("manual_booked") or (f.get("layer") or "") or str(f.get("t", "")) < since:
+                    continue
+                f["manual_booked"] = True
+                ex = str(f["ex"]); d = self.fill_dq(f)
+                books = self.ledger.subbooks.setdefault(ex, {})
+                man, inv = float(books.get("manual", 0.0)), float(books.get("inventory", 0.0))
+                if man * d < 0:
+                    mv = max(d, -man) if man > 0 else min(d, -man)   # closing his own: at most what the manual book holds
+                elif man == 0 and inv * d < 0:
+                    mv = 0.0                                 # he reduced an engine holding: the engine's books carry it
+                else:
+                    mv = d                                   # he opened / added: his shares
+                if abs(mv) >= 1:
+                    books["manual"] = man + mv
+                    books["inventory"] = inv - mv
+                    if abs(books["manual"]) < 1:
+                        books.pop("manual", None)
+                    moved.append((ex, mv))
+        for ex, mv in moved:
+            msg = f"MANUAL {self.name(ex)}: Piero's own fill {mv:+,.0f} YES booked to the manual sub-book (manual {float(self.ledger.subbooks.get(ex, {}).get('manual', 0)):+,.0f}); no engine seller touches it"
+            self.event("AUDIT", msg); self.night.line(msg)
 
     def manual_reserve_left(self):
         """C95 item 1: what is left of Piero's manual reserve (his sales refill it up to the amount)."""
@@ -7448,7 +7494,10 @@ class Engine:
                     t_ = self.ledger.tranches.get(kv[0]) or {}
                     return float(t_.get("avg") or ((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
                 subs_iter.sort(key=_avg)
+            fresh_inv = now - self.inv_new_t.get(str(ex), 0.0) < 600   # C95c: maybe Piero's own trade, its fill record still coming
             for sub, v in subs_iter:
+                if sub == "inventory" and fresh_inv:
+                    continue
                 if v * q <= 0 or sub.startswith(("manual", "pairset:")) or (not allow_all and (sub.startswith(("sleeve:", "swing:")) or sub in res_subs)) or ((str(ex), sub) in self.core_set and str(ex) not in rot_left):
                     continue                                # never a core lot (unless Piero named the market for the rotation, C94), his manual / pair / sleeve lots, or the RI reservoir
                 key = f"{ex}|{sub}"
