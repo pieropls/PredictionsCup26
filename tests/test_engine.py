@@ -5187,6 +5187,10 @@ class C94Tests(EngineCase):
         self.assertEqual([(w["px"], w["qty"]) for w in plan.get(c3, [])], [(0.49, 2040)], "never pulled because the pool shrank")
         self.assertNotIn(b, plan)
         eng.open[:] = [o for o in eng.open if o["id"] != "rb1"]; eng.ledger.orders.pop("rb1", None)
+        # C95f: a market where we hold the other side is no candidate (the buy would net against our lot under its floor)
+        eng.book[c3] = dict(eng.book.get(c3) or {}, pos=-500.0)
+        self.assertNotIn(c3, [x["ex"] for x in eng.rot_candidates(time.time())])
+        eng.book[c3] = dict(eng.book.get(c3) or {}, pos=0.0)
 
     def test_c95c_piero_manual_fill_goes_to_the_manual_book_and_is_never_sold(self):
         """C95c (Oct 16 15:27): Piero bought 25,000 SC-01 D YES by hand; the audit booked it as inventory and the no-edge release sold

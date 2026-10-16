@@ -422,6 +422,7 @@ class Engine:
         self.rot_now, self.rot_view, self.rot_posted, self.rot_logged = {}, {}, {}, set()   # C94: the coin-flip rotation layer
         self.inv_new_t = {}                                 # C95c: ex -> when the audit last booked unexplained inventory
         self.fit_log = {}                                   # C95d: (ex, layer) -> last 'exit not sent' line
+        self.rot_post_log = {}                              # C95f: (ex:side, 'posted') -> last ROT POSTED line
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
@@ -4013,9 +4014,12 @@ class Engine:
                 continue
             if vol.get(ex, 0.0) < ROTATION["min_vol48"]:
                 continue
+            pos_ = float((self.book.get(ex) or {}).get("pos") or 0)
             for side in ("yes", "no"):
                 if f"{ex}:{side}" in skipped:
                     continue
+                if (side == "yes" and pos_ <= -1) or (side == "no" and pos_ >= 1):
+                    continue                                # C95f: we hold the other side here; a buy would net against it (sell it under its floor) — Iowa D NO vs our 500 YES
                 bid, ask, fs = self.rot_touch(ex, side)
                 if bid is None or fs is None or not (ROTATION["fair_lo"] <= fs <= ROTATION["fair_hi"]) or not (MB_MIN_PX <= bid <= MB_MAX_PX):
                     continue
@@ -4109,9 +4113,13 @@ class Engine:
             pool -= qty * cd["px"]; rc[race] += qty * cd["px"]; total += qty * cd["px"]; races.add(race)
             k = f"{cd['ex']}:{cd['side']}"
             self.rot_posted[k] = cd["fs"]
+            k_log = (k, "posted")
+            quiet = time.time() - self.rot_post_log.get(k_log, 0) < 600   # C95f: one POSTED line per bid per 10 min
+            self.rot_post_log[k_log] = self.rot_post_log.get(k_log, 0) if quiet else time.time()
             msg = (f"ROT POSTED {self.name(cd['ex'])} {cd['side'].upper()}: bid {qty:,} at {cd['px']:.3f} (touch), PM fair {cd['fs']:.3f}, gap {cd['gap'] * 100:.1f}c "
                    f"({cd['pct']:.1%}{'' if cd['tier'] == 0 else ', the >= 3c tier'}), 48-h volume {cd['vol']:,.0f}; race {race} {rc[race]:,.0f} of {self.rot_cap(race):,.0f}, book {total:,.0f} of {ROTATION['total_cap']:,.0f}; pool left {pool:,.0f}")
-            self.event("ROT", msg); self.night.line(msg)
+            if not quiet:
+                self.event("ROT", msg); self.night.line(msg)
             plan.setdefault(cd["ex"], []).append(dict(side=cd["side"], px=cd["px"], qty=qty, sub=f"rot:{cd['ex']}:{cd['side']}", ttl=ROT_TTL_S))
         return plan
 
