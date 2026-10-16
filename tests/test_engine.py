@@ -5232,6 +5232,22 @@ class C94Tests(EngineCase):
         self.assertEqual(sum(eng.ex.trims.values()), n0, "no executor trim")
         eng.ex.book = []
 
+    def test_c95d_dashboard_resume_clears_the_lock_and_old_trims(self):
+        """C95d (Piero 15:5x: 'resume now button doesn't work'): a hand resume of a locked I2 pause holds; only a new trim pauses again."""
+        fake, eng, favs = self.rig()
+        loop(eng, fake)
+        eng.ex.trims["recycle"] = eng.ex.trims.get("recycle", 0) + 67
+        for _ in range(3):
+            eng.auto_pause("i2_breach", "I2 trim (orders cut to fit the position): 68 in all", time.time())
+        self.assertTrue(eng.controls.paused); self.assertTrue(eng.controls.d["auto_pause"].get("stuck"))
+        msg = f_engine.EngineControls(eng).apply("resume", {})
+        self.assertIn("resumed", msg)
+        loop(eng, fake); loop(eng, fake)
+        self.assertFalse(eng.controls.paused, "old trims do not undo Piero's resume")
+        eng.ex.trims["recycle"] += 1                          # a NEW trim after the click: the safety pause still works
+        loop(eng, fake)
+        self.assertTrue(eng.controls.paused)
+
     def test_rotation_exit_at_max_entry_half_cent_fair_less_1_5c_and_release_exemption(self):
         fake, eng, favs = self.rig()
         ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)

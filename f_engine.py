@@ -10069,9 +10069,10 @@ class EngineControls:
             return "new risk paused (exits, rebounds, unwinds and repairs keep running)"
         if action == "resume":
             with c.lock:
-                c.d["auto_pause"] = dict(history=(c.d.get("auto_pause") or {}).get("history", {}))
+                c.d["auto_pause"] = dict(history={})         # C95d: Piero's resume clears the 3x-in-2-h lock
                 c.save()
             self.eng.cash_short = None
+            self.eng.trims_seen, self.eng.trim_t = sum(self.eng.ex.trims.values()), None   # C95d: only a trim AFTER the click can pause again
             c.set_paused(False, "dashboard", by="dashboard")
             return "new risk resumed"
         if action == "pull_quotes":
@@ -10286,7 +10287,13 @@ def main():
         eng.start_realtime()
     dash = None
     try:
-        app = dashboard.create_app(lambda: eng.last_state, EngineControls(eng), market_detail=eng.market_detail)
+        tok = None                                          # C95d: reuse the token across restarts, so an open page reconnects by itself
+        try:
+            m_ = re.search(r"[?&]t=([A-Za-z0-9_\-]{16,})", open(DASHBOARD_URL_FILE).read())
+            tok = m_.group(1) if m_ else None
+        except OSError:
+            pass
+        app = dashboard.create_app(lambda: eng.last_state, EngineControls(eng), market_detail=eng.market_detail, token=tok)
         dash = dashboard.serve_in_thread(app)
         if dash.started:
             write_atomic(DASHBOARD_URL_FILE, dash.url + "\n")
