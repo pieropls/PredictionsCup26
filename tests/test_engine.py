@@ -5211,6 +5211,27 @@ class C94Tests(EngineCase):
         self.assertEqual(eng.ledger.subbooks[a].get("manual"), 25_000.0 - 16_644.0, "his own sale reduces his manual book")
         eng.ledger.fills = [f for f in eng.ledger.fills if f.get("order") not in ("foreignSC", "foreignSC2")]
 
+    def test_c95d_exits_fit_the_position_at_planning_so_the_executor_never_trims(self):
+        """C95d: two of our own exits claiming the same shares (a resting funding ask + the recycler) — the second is dropped at
+        planning, not trimmed by the executor (an executor trim is an I2 hard pause)."""
+        fake, eng, favs = self.rig()
+        a = favs[0]
+        bot = eng.owner[a]
+        eng.book[a] = dict(eng.book.get(a) or {}, pos=1046.0)
+        eng.ex.pos[a] = 1046.0
+        eng.ex.book = [dict(id="ra", ex=a, side="no", action="buy", price=0.135, qty=1046.0)]
+        places = [dict(side="no", action="buy", px=0.03, qty=120, layer="recycle", sub="inventory", reduce=True),
+                  dict(side="yes", action="buy", px=0.50, qty=300, layer="dump", sub="x")]
+        n0 = sum(eng.ex.trims.values())
+        out = eng.fit_reducing(bot, places)
+        self.assertEqual([w["layer"] for w in out], ["dump"], "the recycler's 120 is dropped; an entry is untouched")
+        self.assertTrue(any(e["kind"] == "I2" and "not sent" in e["text"] for e in eng.events))
+        eng.ex.book = [dict(id="ra", ex=a, side="no", action="buy", price=0.135, qty=900.0)]
+        out = eng.fit_reducing(bot, places)
+        self.assertEqual([(w["layer"], w["qty"]) for w in out if w["layer"] == "recycle"], [("recycle", 120)], "room for it: sent whole")
+        self.assertEqual(sum(eng.ex.trims.values()), n0, "no executor trim")
+        eng.ex.book = []
+
     def test_rotation_exit_at_max_entry_half_cent_fair_less_1_5c_and_release_exemption(self):
         fake, eng, favs = self.rig()
         ex = next(b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and eng.fair.get(b.ex) is not None and 0.3 <= eng.fair[b.ex] <= 0.7)

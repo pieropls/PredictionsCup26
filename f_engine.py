@@ -421,6 +421,7 @@ class Engine:
         self.lotavg_logged = set()                          # C93d: one LOT AVG CHECK line per lot
         self.rot_now, self.rot_view, self.rot_posted, self.rot_logged = {}, {}, {}, set()   # C94: the coin-flip rotation layer
         self.inv_new_t = {}                                 # C95c: ex -> when the audit last booked unexplained inventory
+        self.fit_log = {}                                   # C95d: (ex, layer) -> last 'exit not sent' line
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
@@ -980,6 +981,7 @@ class Engine:
             kept, cancels, places = bots.reconcile(wants, mine.get(b.name, []))
             cancels, places = self.repeg_grace(b, cancels, places, now)
             places = self.no_self_cross(b, places, cancels)
+            places = self.fit_reducing(b, places)           # C95d: exits sized to the position's room at planning, so the executor never trims (= no I2 pause)
             if b.kind == "market":
                 places = self.admit(b, places, used, cash)
             if b.kind == "position":                                # foreign sells (placed by hand) share the holding
@@ -3779,6 +3781,38 @@ class Engine:
         self._manual_key, self._manual_spent = key, spent
         return spent
 
+    def fit_reducing(self, b, places):
+        """C95d (15:44 Oct 16: the recycler's 120 Tennessee Senate R YES vs the funding asks already covering the position, cut by the
+        executor every loop -> I2 pause x3 -> stuck): every reducing placement is cut, at planning and in executor priority, to what the
+        position still allows after our resting / in-flight / queued exits and any foreign ones; a cut to under 10 is dropped (logged
+        once per market and layer per 10 min). I2 itself is unchanged — the executor still trims anything that slips through."""
+        ex = b.ex
+        pos = float((self.book.get(ex) or {}).get("pos") or 0)
+        if not places or not pos:
+            return places
+        if not any(jx.reduces(w["side"], w.get("action", "buy"), pos) for w in places):
+            return places
+        try:
+            cap = float(self.ex._reducing_capacity(ex))
+            cap -= sum(p["qty"] for p in self.ex.pending() if p.get("state") == "queued" and p["ex"] == ex and jx.reduces(p["side"], p["action"], pos))
+        except Exception:
+            return places
+        out = []
+        for w in sorted(places, key=lambda w: jx.PRIORITY.get(w.get("layer"), 9)):
+            if jx.reduces(w["side"], w.get("action", "buy"), pos):
+                q = int(max(0.0, min(float(w["qty"]), cap)))
+                if q < MIN_QTY:
+                    k_ = (ex, w.get("layer"))
+                    if time.time() - self.fit_log.get(k_, 0) > 600:
+                        self.fit_log[k_] = time.time()
+                        self.event("I2", f"{self.name(ex)}: {w.get('layer')} exit {w['side'].upper()} {int(w['qty']):,} not sent: our resting exits already cover the position ({pos:+,.0f}); room {max(0.0, cap):,.0f}")
+                    continue
+                if q < w["qty"]:
+                    w = dict(w, qty=q, qmax=min(int(w.get("qmax") or q), q))
+                cap -= q
+            out.append(w)
+        return out
+
     def manual_book(self, now):
         """C95c (Piero 15:27 Oct 16: the no-edge release sold 8,356 of his 25,000 SC-01 D YES bought by hand): a fill of an order the
         engine did not place moves its shares into the 'manual' sub-book, which no engine seller touches; a manual sale reduces it.
@@ -6466,6 +6500,14 @@ class Engine:
                        + f"; rebuys {' / '.join(str(p) for p, _ in r['rebuy'])}; out now {self.reservoir_out(r):,.0f}")
                 self.event("SWING", msg); self.night.line(msg)
         retired = c.d.get("reservoirs_retired") or {}
+        if any(ex in rs for ex in retired):                 # C95d: a retired reservoir that an older release re-added is removed again
+            with c.lock:
+                for ex in list(rs):
+                    if ex in retired:
+                        rs.pop(ex, None)
+                        self.night.line(f"RESERVOIR {self.name(ex)} removed again (retired {retired[ex].get('retired', '')}: {retired[ex].get('why', '')}); no rebuy")
+                c.d["reservoirs"] = rs
+                c.save()
         if rs and all(ex in rs or ex in retired for ex in RESERVOIRS):
             return
         for ex, base in RESERVOIRS.items():
