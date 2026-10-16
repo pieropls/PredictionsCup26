@@ -3801,7 +3801,10 @@ class Engine:
         cap and to the cash the rotation's own sales have freed; a target is skipped for good when PM fair moves >= 2c against it
         after posting. The Senate target takes the cheaper of 843 NO / 842 YES. -> {ex: [want-spec]}"""
         c = self.controls
-        if not ROTATION.get("on") or c.paused or self.fills_blind or c.state("rot") == "off":
+        if not ROTATION.get("on") or self.fills_blind:
+            return {}
+        self.track_rot(now)                                 # C94f: the exits keep running in a pause (C94 refreshed them only when new risk was on: a restart while paused pulled them)
+        if c.paused or c.state("rot") == "off":
             return {}
         st = self.rot_sync()
         if not st:
@@ -3866,7 +3869,6 @@ class Engine:
                        f"PM fair {fs:.3f}, gap {gap * 100:.1f}c); funded by the rotation's sales (pool {pool:,.0f}), cap {tgt['cap']:,.0f} at cost")
                 self.event("ROT", msg); self.night.line(msg)
             plan.setdefault(ex, []).append(dict(side=side, px=px, qty=qty, sub=f"rot:{ex}:{side}", ttl=ROT_TTL_S, key=key))
-        self.track_rot(now)
         return plan
 
     def track_rot(self, now):

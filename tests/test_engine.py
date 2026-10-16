@@ -5192,6 +5192,10 @@ class C94Tests(EngineCase):
         eng.track_rot(time.time())
         v = eng.rot_view.get(ex, [])
         self.assertEqual(len(v), 1); self.assertAlmostEqual(v[0]["px"], 0.505, places=3, msg="max(0.465, fair 0.52 - 1.5c)")
+        eng.rot_view = {}; eng.controls.d["paused"] = True                 # C94f: a restart while paused (rot_view empty) still rests the exits
+        self.assertEqual(eng.rot_plan(time.time(), a_config.CASH_RESERVE), {}, "no new bids in a pause")
+        self.assertEqual(len(eng.rot_view.get(ex, [])), 1, "the exit is still planned in a pause")
+        eng.controls.d["paused"] = False
         self.assertNotIn(ex, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time()), "a rotation lot with 10% left is not released")
         FAIR[ex] = 0.475; loop(eng, fake); eng.lots_cache = (None, {}); eng.ledger.subbooks[ex] = {f"rot:{ex}:yes": 2000.0}
         plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
