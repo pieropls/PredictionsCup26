@@ -5106,6 +5106,11 @@ class C94Tests(EngineCase):
         self.assertIn(a, plan); self.assertEqual(plan[a]["why"], "rotation sale")
         self.assertAlmostEqual(plan[a]["px"], 0.905, places=3, msg="max(lot avg + 0.5c = 0.805, touch ask 0.905)")
         self.assertEqual(sum(plan[a]["subs"].values()), 4000, "the market's target, shared by its two sub-books")
+        # C95b: a lot whose floor is above the touch never starves the touch-priced lots of the same market
+        eng.ledger.tranches[f"dump:{a}:yes:1"] = dict(eng.ledger.tranches[f"dump:{a}:yes:1"], avg=0.95)
+        plan_b = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertIn(f"dump:{a}:yes:2", plan_b[a]["subs"], "the touch-priced lot goes first"); self.assertAlmostEqual(plan_b[a]["px"], 0.905, places=3)
+        eng.ledger.tranches[f"dump:{a}:yes:1"] = dict(eng.ledger.tranches[f"dump:{a}:yes:1"], avg=0.80)
         eng.core_set = {(a, f"dump:{a}:yes:1"), (a, f"dump:{a}:yes:2")}
         plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
         self.assertIn(a, plan); self.assertEqual(sum(plan[a]["subs"].values()), 4000, "C94b: a core lot Piero named for the rotation is sold too")

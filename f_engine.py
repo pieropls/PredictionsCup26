@@ -6419,10 +6419,11 @@ class Engine:
                        + (f"; held: {', '.join(x.split(':')[-1] for x in r.get('hold_subs') or [])}" if r.get("hold_subs") else "")
                        + f"; rebuys {' / '.join(str(p) for p, _ in r['rebuy'])}; out now {self.reservoir_out(r):,.0f}")
                 self.event("SWING", msg); self.night.line(msg)
-        if rs and all(ex in rs for ex in RESERVOIRS):
+        retired = c.d.get("reservoirs_retired") or {}
+        if rs and all(ex in rs or ex in retired for ex in RESERVOIRS):
             return
         for ex, base in RESERVOIRS.items():
-            if ex in rs:
+            if ex in rs or ex in retired:                   # C95b: a reservoir Piero sold in full stays retired (no rebuy)
                 continue
             r = json.loads(json.dumps(base)); r["mode"] = "trade"; r["fair0"] = self.fair.get(ex); r["since"] = stamp()
             r["stats"] = dict(sold_sh=0.0, bought_sh=0.0, realized=0.0, cycles=0, sold_val=0.0, bought_val=0.0, legs=[])
@@ -7441,7 +7442,13 @@ class Engine:
             if ask is None or fs is None:
                 continue
             split, why, px_sale = {}, None, None
-            for sub, v in self.ledger.subbooks.get(ex, {}).items():
+            subs_iter = list(self.ledger.subbooks.get(ex, {}).items())
+            if str(ex) in rot_left:                         # C95b: a funding sale lists its lots lowest floor first, so the one-price-per-loop rule never starves the touch-priced lots
+                def _avg(kv):
+                    t_ = self.ledger.tranches.get(kv[0]) or {}
+                    return float(t_.get("avg") or ((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
+                subs_iter.sort(key=_avg)
+            for sub, v in subs_iter:
                 if v * q <= 0 or sub.startswith(("manual", "pairset:")) or (not allow_all and (sub.startswith(("sleeve:", "swing:")) or sub in res_subs)) or ((str(ex), sub) in self.core_set and str(ex) not in rot_left):
                     continue                                # never a core lot (unless Piero named the market for the rotation, C94), his manual / pair / sleeve lots, or the RI reservoir
                 key = f"{ex}|{sub}"
