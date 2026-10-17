@@ -218,7 +218,7 @@ class EngineCase(unittest.TestCase):
         f_engine.STARTUP_HOLD_S = 0                         # the rigs read from their first loop (the 2-min start-up hold is a live-only guard)
         for k, v in (("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
                      ("CORE_CAP_COST", 0.0), ("TRADING_HOLD_C", 99.0), ("CORE_LOCK_RET", -99.0), ("TRADING_INV_CAP", 1e12), ("TRADING_CASH_TARGET", 0.0),
-                     ("NOEDGE", dict(ret=-99.0, low_fair=0.0, low_edge_c=0.0)), ("REPEG_AWAY_S", 0.0), ("GTC_TTL_S", 0), ("SM_REPEG_TICKS", 2), ("TM_REPEG_TICKS", 2), ("ROTATION", dict(a_config.ROTATION, on=False, sells={}, buys=[])), ("MANUAL_RESERVE", 0.0), ("FMM", dict(a_config.FMM, on=False))):   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
+                     ("NOEDGE", dict(ret=-99.0, low_fair=0.0, low_edge_c=0.0)), ("REPEG_AWAY_S", 0.0), ("GTC_TTL_S", 0), ("SM_REPEG_TICKS", 2), ("TM_REPEG_TICKS", 2), ("ROTATION", dict(a_config.ROTATION, on=False, sells={}, buys=[])), ("MANUAL_RESERVE", 0.0), ("FMM", dict(a_config.FMM, on=False)), ("DASH_EVERY_S", 0)):   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
             self.addCleanup(setattr, f_engine, k, getattr(f_engine, k, None))
             setattr(f_engine, k, v)                         # C87 gates (real clock, no tape in the rigs, rig cash under BUFFER): off unless C87Tests set them
         for k in ("PNL_READ_S", "ORDERS_READ_S", "FILLS_READ_S", "POSITIONS_READ_S"):   # day 4 §4 / Oct 8 read caching have their own tests; the rigs (no realtime feed) read fresh each loop
@@ -6108,6 +6108,144 @@ class FMMTests(EngineCase):
         eng.run_pairs(time.time(), 0.0, 0.0)
         drain(eng)
         self.assertFalse([x for x in eng.ledger.baskets if x.get("fmm") and x["race"] == pb.race], "lock cost 0.995 > 0.990: nothing")
+
+
+class Piero2115Tests(EngineCase):
+    """Piero 21:15 Oct 16: locks only from cash FMM isn't using (<= 30% of free in new locks), stuck FMM lots hedged first; FMM's RI Senate
+    cap 15k outside the RI cap; the dashboard payload once a minute; the L0 fast-path duplicate bids; the SM refill key."""
+
+    def test_new_locks_take_at_most_30_percent_of_free_and_only_what_the_ladders_do_not_need(self):
+        fake, eng, mk = FMMTests.rig(self)
+        a, b = mk[:2]
+        FMMTests.live(self, eng)
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 10_000.0
+        self.assertAlmostEqual(eng.fmm_lock_room(), 3_000.0, places=0, msg="no ladders resting: 30% of 10,000 free")
+        for oid, ex, px, q in (("880001", a, 0.85, 4000), ("880002", b, 0.85, 4000)):   # two race ladders of 3,400 each rest
+            eng.open.append(dict(id=oid, ex=ex, side="yes", action="buy", price=px, qty=float(q), status="open", filled=0))
+            eng.ledger.orders[oid] = dict(id=oid, layer="fmm", sub=f"fmm:{ex}:yes:{px:.3f}", ex=ex, side="yes", action="buy", price=px, qty=float(q), status="open", bot=f"MKT {ex}", filled=0)
+        C94Tests.c95_market(self, eng, fake, a, 0.90, (0.85, 0.86, 0.855), race="RA"); C94Tests.c95_market(self, eng, fake, b, 0.90, (0.85, 0.86, 0.855), race="RB")
+        self.assertAlmostEqual(eng.fmm_lock_room(), 3_000.0, places=0, msg="min(free - the two largest ladders = 3,200, 30% of free = 3,000)")
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 9_000.0
+        self.assertAlmostEqual(eng.fmm_lock_room(), 9_000.0 - 6_800.0, places=0, msg="free less the two largest ladders (2,200) when that is under 30% (2,700)")
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 6_500.0
+        self.assertEqual(eng.fmm_lock_room(), 0.0, "the ladders need it all: no new lock")
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 40_000.0
+        eng.ledger.baskets.append(dict(id="fl1", t="x", ts=time.time(), race="RZ", side="no", qty=5000, margin=0.012, legs=2, orders=[], repaired=False, state="held", h4=True, fmm=True))
+        self.assertAlmostEqual(eng.fmm_lock_room(), 0.30 * (40_000.0 + 4_940.0) - 4_940.0, places=0, msg="30% of free before the locks, less what the locks already hold")
+
+    def test_a_stuck_no_lot_is_hedged_before_any_new_bid(self):
+        fake, eng, mk = FMMTests.rig(self)
+        d, r, c = mk[:3]
+        C94Tests.c95_market(self, eng, fake, d, 0.20, (0.19, 0.20, 0.195), race="TX")    # D NO 0.80-0.81 (fair 0.80): not eligible
+        C94Tests.c95_market(self, eng, fake, r, 0.80, (0.75, 0.76, 0.755), race="TX")
+        eng.meta[d]["party"], eng.meta[r]["party"] = "D", "R"
+        C94Tests.c95_market(self, eng, fake, c, 0.95, (0.80, 0.81, 0.805), race="RY")   # another race wants new bids
+        FMMTests.live(self, eng)
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 600.0                    # free 600: room for the hedge only
+        sub = f"fmm:{d}:no:0.780"                                                      # a D NO lot (the favourite R side's exposure) held 3 h
+        eng.ledger.subbooks.setdefault(d, {})[sub] = -1000.0
+        eng.ledger.tranches[sub] = dict(ex=d, side="no", kind="fmm", state="open", ts=time.time() - 3 * 3600, t="x", avg=0.78, qty=1000.0)
+        eng.book.setdefault(r, dict(pos=0, row={}))["pos"] = 0
+        tg = eng.fmm_targets(time.time(), paper=False)
+        h = [t for t in tg if t[5] == "fmmhedge"]
+        self.assertTrue(h, "the stuck lot gets its hedge")
+        self.assertEqual((h[0][1], h[0][2]), (r, "no"), "on the other book's NO")
+        self.assertLessEqual(0.78 + h[0][3], 0.990 + 1e-9, "the pair costs <= 0.990")
+        self.assertEqual(tg[0][5], "fmmhedge", "before any new bid")
+        self.assertLessEqual(sum(t[3] * t[4] for t in tg), 3 * 600.0 + 1, "hedge + new bids inside K x free: the new bids get what the hedge leaves")
+
+    def test_fmm_ri_senate_cap_15k_and_fmm_lots_outside_the_ri_cap(self):
+        fake, eng, mk = FMMTests.rig(self)
+        self.assertEqual(eng.fmm_race_cap(a_config.RI_SENATE_RACE), 15_000.0)
+        self.assertEqual(eng.fmm_race_cap("Texas Governor"), 5_000.0)
+        a = mk[0]
+        C94Tests.c95_market(self, eng, fake, a, 0.98, (0.84, 0.845, 0.8425), race=a_config.RI_SENATE_RACE)
+        FMMTests.live(self, eng)
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 40_000.0
+        tg = eng.fmm_targets(time.time(), paper=False)
+        rest = sum(t[3] * t[4] for t in tg if t[1] == a)
+        self.assertGreater(rest, 5_000.0, "more than the 5k other races get")
+        self.assertLessEqual(rest, 15_000.0 + 1)
+        before = eng.ri_held_cost()
+        eng.ledger.subbooks.setdefault(a, {})[f"fmm:{a}:yes:0.840"] = 5000.0
+        eng.ledger.tranches[f"fmm:{a}:yes:0.840"] = dict(ex=a, side="yes", kind="fmm", state="open", ts=time.time(), t="x", avg=0.84, qty=5000.0)
+        self.assertAlmostEqual(eng.ri_held_cost(), before, places=2, msg="FMM's RI lots are outside the RI cap")
+
+    def test_the_dashboard_payload_is_built_once_a_minute(self):
+        fake, eng, mk = FMMTests.rig(self)
+        f_engine.DASH_EVERY_S = 60
+        eng.dash_t = 0.0
+        loop(eng, fake)
+        s0 = eng.last_state
+        self.assertIsNotNone(s0)
+        loop(eng, fake); loop(eng, fake)
+        self.assertIs(eng.last_state, s0, "not rebuilt inside the minute")
+        eng.dash_t -= 61
+        loop(eng, fake)
+        self.assertIsNot(eng.last_state, s0, "rebuilt after a minute")
+
+    def test_l0_fast_path_re_bids_once_per_orders_read_not_once_per_partial_fill(self):
+        fake, eng, ex = FastPathTests.rig(self)
+        f = eng.fair[ex]
+        fake.px[ex] = eng.px[ex] = (round(f - 0.08, 3), round(f - 0.075, 3), f - 0.08)
+        seed_ref(eng, ex, mid=f - 0.08)
+        loop(eng, fake); loop(eng, fake)
+        l0 = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and str(eng.ledger.orders[o["id"]].get("sub", "")).endswith(":L0")]
+        self.assertEqual(len(l0), 1, l0)
+        fake.px[ex] = (round(f - 0.09, 3), round(f - 0.085, 3), f - 0.09)
+        third = int(l0[0]["qty"] // 3)
+        for i in range(3):                                   # Florida Senate D, Oct 15 23:55: three partial fills of one order
+            fake.fill(l0[0]["id"], third)
+            eng.rt_event("fills", set(), time.time())
+            eng.fast_step(time.time())
+        mine = [o for o in fake.open_orders() if o["ex"] == ex and o["id"] in eng.ledger.orders and str(eng.ledger.orders[o["id"]].get("sub", "")).endswith(":L0") and o["id"] != l0[0]["id"]]
+        self.assertEqual(len(mine), 1, f"one re-bid, not one per partial fill: {mine}")
+        self.assertGreaterEqual(eng.fast_stats["l0_dup"], 1)
+
+    def test_each_fmm_fill_is_booked_once_when_the_loop_re_hands_an_orders_earlier_fills(self):
+        fake, eng, mk = FMMTests.rig(self)
+        d, r = mk[:2]
+        C94Tests.c95_market(self, eng, fake, d, 0.20, (0.19, 0.20, 0.195), race="TX"); C94Tests.c95_market(self, eng, fake, r, 0.80, (0.75, 0.76, 0.755), race="TX")
+        eng.meta[d]["party"], eng.meta[r]["party"] = "D", "R"
+        FMMTests.live(self, eng)
+        lot = f"fmm:{d}:no:0.780"
+        eng.ledger.subbooks.setdefault(d, {})[lot] = -1000.0
+        eng.ledger.tranches[lot] = dict(ex=d, side="no", kind="fmm", state="open", ts=time.time(), t="x", avg=0.78, qty=1000.0)
+        hsub = f"fmmlock:TX:{d}:0.780"
+        eng.ledger.subbooks.setdefault(r, {})[hsub] = -600.0
+        eng.ledger.orders["660001"] = dict(id="660001", layer="fmmhedge", sub=hsub, ex=r, side="no", action="buy", price=0.21, qty=600.0, status="done", bot=f"MKT {r}", filled=600)
+        eng.ledger.orders["660002"] = dict(id="660002", layer="fmmexit", sub=lot, ex=d, side="yes", action="buy", price=0.21, qty=100.0, status="done", bot=f"MKT {d}", filled=100)
+        hedge = dict(key="h1", t="2026-10-17 10:30:00", ex=r, side="no", action="buy", layer="fmmhedge", price=0.21, qty=600.0, order="660001", realized=0.0)
+        ex1 = dict(key="x1", t="2026-10-17 10:31:00", ex=d, side="yes", action="buy", layer="fmmexit", price=0.21, qty=100.0, order="660002", realized=0.5)
+        eng.fmm_fill_events([hedge, ex1])
+        eng.fmm_fill_events([hedge, ex1, dict(ex1, key="x2", qty=50.0, realized=0.25)])   # the order filled again: its earlier fills come back
+        lv = eng.controls.d["fmm"]["live"]
+        self.assertAlmostEqual(lv["realized"], 0.75, places=6, msg="each exit fill's realized counted once")
+        self.assertEqual(lv["fills"], 3)
+        self.assertAlmostEqual(lv["locks_sh"], 600.0, places=6, msg="the hedge locked once")
+        self.assertAlmostEqual(eng.ledger.subbooks[d].get(f"fmmlock:TX", 0.0), -600.0, places=6, msg="600 of the lot moved into the lock, once")
+
+    def test_fmm_alone_gets_8000_of_the_reserve_in_paper_and_live(self):
+        fake, eng, mk = FMMTests.rig(self)
+        eng.controls.d["manual_reserve"] = dict(amount=10_000.0, since="2026-10-17 00:00:00")
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 1_000.0          # the engine's free cash after the full 10k reserve
+        f_engine.FMM = dict(a_config.FMM, on=True, paper_from="2099-01-01 00:00:00")
+        self.assertAlmostEqual(eng.fmm_free(), 1_000.0, places=0, msg="FMM off: nothing released")
+        f_engine.FMM = dict(a_config.FMM, on=True, ring=(), paper_from="2000-01-01 00:00:00", live_at="2099-01-01 00:00:00")
+        self.assertAlmostEqual(eng.fmm_free(), 9_000.0, places=0, msg="paper simulates live: the reserve counts as 2,000 for FMM")
+        FMMTests.live(self, eng)
+        self.assertAlmostEqual(eng.fmm_free(), 9_000.0, places=0)
+        self.assertAlmostEqual(eng.engine_bid_room(), 1_000.0, places=0, msg="the other layers (the rotation's guard) keep the full reserve")
+
+    def test_an_sm_fast_refill_reconciles_against_its_sm_sub_books(self):
+        fake, eng, ex = FastPathTests.rig(self)
+        eng.fast_orders[(ex, "sm")] = time.time() - 30
+        eng.open.append(dict(id="770001", ex=ex, side="yes", action="buy", price=0.5, qty=100.0, status="open", filled=0))
+        eng.ledger.orders["770001"] = dict(id="770001", layer="sm", sub=f"sm:{ex}:yes", ex=ex, side="yes", action="buy", price=0.5, qty=100.0, status="open", bot=f"MKT {ex}", filled=0, ts=time.time() - 30)
+        n0 = eng.fast_stats["mismatch"]
+        eng.fast_reconcile(time.time())
+        self.assertEqual(eng.fast_stats["mismatch"], n0, "the SM refill rests under its sm:<ex> sub-book: no mismatch")
+        self.assertFalse(eng.fast_slow.get(ex, 0) > time.time())
 
 
 if __name__ == "__main__":

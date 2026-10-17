@@ -476,6 +476,7 @@ LOCK_FILE = os.path.join(DATA, "engine.lock")
 OVERRIDES_FILE = os.path.join(DATA, "overrides.json")     # layer flags and controls (survive restarts)
 DASHBOARD_URL_FILE = os.path.join(DATA, "dashboard_url.txt")   # the live dashboard's URL with its access token
 STATE_EVERY_S = 60              # data/state.json and the static data/dashboard.html: rewritten at most this often
+DASH_EVERY_S = 60               # Piero 21:15 item 3: the dashboard payload (write_state / dash_state) is built once a minute, not every loop (docs/latency.md: ~4.5 s of the ~6 s)
 HOST_ID_FILE = os.path.join(DATA, "host_id")
 NIGHT_LOG_FILE = os.path.join(os.path.dirname(DATA), "docs", "RUN_LOG.md")   # day 2: the run log (NIGHT_LOG.md = the night)
 
@@ -503,6 +504,8 @@ ROT_TTL_S = 24 * 3600
 
 # ---- FMM (fmm_spec Oct 16 18:20 + Piero 18:30 item 4): favourite-side market maker + two-book NO+NO locks
 FMM = dict(on=True, fav_min=0.75, edge=0.02, levels=(0, 1, 2, 3), level_step=0.01, min_clip=500, min_new=100, race_cap=5_000.0,
+           race_caps={"Rhode Island Senate": 15_000.0},     # Piero 21:15 item 2: RI Senate's inventory clears daily (25 round trips/day in the replay)
+           lock_free_share=0.30, hedge_after_s=7_200,        # Piero 21:15 item 1: new locks <= 30% of engine free cash, from cash FMM's ladders don't need; stuck lots (>= 2 h) hedged first
            k_live=3.0, k_step=5.0, k5_ok=True, inv_cap_live=15_000.0, inv_cap_step=30_000.0, cap_tol=250.0,
            exit_c=0.005, exit_ring_c=0.01, ring=(("07:00", "08:00"), ("12:00", "15:00"), ("19:30", "21:00")),
            refill_s=60.0, take_ttl_s=120, fast_writes=5, lock_cost=0.990, lock_cap_sh=10_000, hedge=True,
