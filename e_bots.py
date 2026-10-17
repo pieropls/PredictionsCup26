@@ -426,6 +426,13 @@ class MarketBot:
             q = abs(subs.get(x["sub"], 0))
             if q >= MIN_QTY:
                 reduce_buy(x["side"], x["px"], int(q), "rotexit", x["sub"], 86400, band=0.0, a2=False)
+        # FMM (fmm_spec): favourite-side bids at the touch and below (GTC), hedge bids on the other book's NO, exits at fill + 1c / + 2c
+        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], QTY_TOL, x.get("layer") or "fmm", sub=x["sub"], ttl=x.get("ttl") or 86400)
+                for x in (s.get("fmm") or [])]
+        for x in s.get("fmm_exits") or []:
+            q = abs(subs.get(x["sub"], 0))
+            if q >= MIN_QTY:
+                reduce_buy(x["side"], x["px"], int(q), "fmmexit", x["sub"], 86400, band=0.0, a2=False)
         for x in s.get("sm") or []:                          # turnover_plan §1: the spread maker's two quotes at the touch (the reducing side is an exit under rule 0)
             if x.get("reduce"):
                 reduce_buy(x["held"], x["sell_px"], int(x["qty"]), "smexit", x["sub"], x["ttl"], band=0.0, a2=False)

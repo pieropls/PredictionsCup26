@@ -37,6 +37,8 @@ REGISTRY = [
     dict(key="sm", name="Spread maker", group5="Market making", gated=True, layers=["sm", "smexit"], subs=["sm:"], control=["sm"],
          rules="Quotes both sides at the touch on the bounciest markets, keeps its queue place, refills on fill; regime-gated (new quotes only in BOUNCE markets). "
                "Polymarket fair sets the skew: the cheap side may run to the cap, the rich side holds one clip."),
+    dict(key="fmm", name="Favourite MM", group5="Market making", layers=["fmm", "fmmtake", "fmmexit", "fmmhedge"], subs=["fmm:", "fmmlock:"], control=["fmm"],
+         rules="Favourite side (fair >= 0.75) at touch to -3c, <= fair - 2c; exits best ask >= fill + 0.5c; NO+NO locks <= 0.990 held."),
     # Sweep catching
     dict(key="catcher", name="Catcher", group5="Sweep catching", layers=["dump", "dumpexit"], subs=["dump:"], control=["dump"],
          rules="Rests bids under the SIG touch on favourites and catches sweeps far below Polymarket fair (L0 at the touch, L1-L3 deeper); aged catch lots stay its own. "
@@ -1087,6 +1089,8 @@ def strategy_cards(eng, totals, snap, pos_rows, rep=None):
                 return round(float(eng.sm_sizes()["cap"]))
             if key == "fm":
                 return 5_000
+            if key == "fmm":
+                return round(eng.fmm_inv_cap())
             if key == "ri":
                 return round(11_900 * 0.84)
         except Exception:
@@ -1101,6 +1105,13 @@ def strategy_cards(eng, totals, snap, pos_rows, rep=None):
                 states = [c.state(l) for l in b.get("control") or []]
                 if k == "rotation":
                     st, reason = ("Live", "free cash under BUFFER: asks at the touch") if getattr(eng, "rotation_on", False) else ("Live", "idle: free cash above BUFFER + 5k")
+                elif k == "fmm":                            # fmm_spec §4: paper / live / stopped and the hourly line, from engine state (no API reads)
+                    try:
+                        m_ = eng.fmm_mode(now)
+                        st = {"paper": "Paper", "live": "Live", "stopped": "Stopped", "off": "Off", "pending": "Off"}.get(m_, "Off")
+                        reason = eng.fmm_status(now) if m_ in ("paper", "live", "stopped") else f"paper from {eng.FMM_CFG['paper_from'][5:16]}, live gate {eng.FMM_CFG['live_at'][5:16]}"
+                    except Exception:
+                        st, reason = "Off", ""
                 elif states:
                     s0 = "full" if "full" in states else "pilot" if "pilot" in states else "off"
                     st = {"full": "Live", "pilot": "Pilot", "off": "Off"}[s0]

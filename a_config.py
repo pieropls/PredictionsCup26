@@ -33,7 +33,7 @@ ENGINE_HOST = os.environ.get("SIG_ENGINE_HOST", "engine-host")   # the ONE machi
 LOOP_S = 15
 FILL_POLL_S = 10                # day 2 §6: SIG sends no account_batch -> REST fills at least every 10 s
 WRITES_PER_MIN = 25
-BATCH_SIZE = 20                 # orders per batch write
+BATCH_SIZE = 50                 # orders per batch write (SIG: up to 50; the executor sizes it to SIG's measured rate) — fmm_spec v2 §2.5
 MAX_PLACE_PER_LOOP = 60         # new orders per loop
 SETTLE_S = 90                   # after a write with an unknown outcome: nothing new on those markets for this long
 PM_MAX_AGE_S = 90               # Polymarket data older than this: no new market-bot orders
@@ -458,7 +458,7 @@ READ_BUDGET = 95                # SIG reads per minute we allow ourselves (SIG's
 SPARE_KEEP = 20                 # optional reads (depth, tape, sampler, pairs, leaders) run while reads_last_min <= READ_BUDGET - SPARE_KEEP
 FILLS_READ_S, POSITIONS_READ_S = 60, 120
 SAMPLER_EVERY_S, SAMPLER_PER_LOOP, SAMPLER_DEPTH = 60, 6, 5   # book sampler: the SM universe + RI Senate R, depth at the touch +/- 2 ticks, every ~60 s each, data/intel/books/
-LIFECYCLE_LAYERS = ("sm", "smexit", "tm", "tmexit", "rot", "rotexit")            # order-lifecycle log (+ dump L0 levels): queue ahead at placement, time to fill / expiry, mid and fair at +1/5/30 min, data/intel/orders/
+LIFECYCLE_LAYERS = ("sm", "smexit", "tm", "tmexit", "rot", "rotexit", "fmm", "fmmtake", "fmmexit", "fmmhedge")            # order-lifecycle log (+ dump L0 levels): queue ahead at placement, time to fill / expiry, mid and fair at +1/5/30 min, data/intel/orders/
 LIFECYCLE_MARKS_S = (60, 300, 1800)
 BACKOFF_429_S, BACKOFF_LOOP_S = 120, 20.0   # after a 429: 20 s loops for 2 min
 
@@ -500,3 +500,15 @@ ROTATION = dict(on=True, gap_min=0.04, gap_ext=0.03, keep_gap=0.03, pm_skip_c=0.
                 vol_cap_share=0.10, widen_flag_c=0.02,   # fmm_spec §0.2 / §0.3 (Oct 16 18:20)
                 buys=[])                # C95: the buy list is the live coin-flip universe (rot_candidates), not a fixed list
 ROT_TTL_S = 24 * 3600
+
+# ---- FMM (fmm_spec Oct 16 18:20 + Piero 18:30 item 4): favourite-side market maker + two-book NO+NO locks
+FMM = dict(on=True, fav_min=0.75, edge=0.02, levels=(0, 1, 2, 3), level_step=0.01, min_clip=500, min_new=100, race_cap=5_000.0,
+           k_live=3.0, k_step=5.0, k5_ok=True, inv_cap_live=15_000.0, inv_cap_step=30_000.0, cap_tol=250.0,
+           exit_c=0.005, exit_ring_c=0.01, ring=(("07:00", "08:00"), ("12:00", "15:00"), ("19:30", "21:00")),
+           refill_s=60.0, take_ttl_s=120, fast_writes=5, lock_cost=0.990, lock_cap_sh=10_000, hedge=True,
+           paper_from="2026-10-17 06:00:00", live_at="2026-10-17 10:00:00", step_at="2026-10-18 10:00:00",
+           manual_reserve_live=2_000.0, rot_cap_live=50_000.0, stop_fair=-150.0, replay_ok=True,
+           replay_note="replay v2 Oct 8-16, docs/fmm.md: realized > 0 on 7-9 of 9 days in every config; touch-3 / best-ask exits / K 3 / 15k +855 on 7 of 9 days; "
+                       "with the two largest race ladders <= free, cash never under floor + reserve at guard latencies 2-15 s, K 5 / 30k included")
+# fmm_spec v2 (Piero 18:50 Oct 16). replay_ok / k5_ok / the note follow docs/fmm.md
+FMM_RACE_CAP = FMM["race_cap"]

@@ -73,7 +73,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, CASH_FLOOR_RESUME, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
-                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE,
+                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -140,7 +140,7 @@ def host_id():
 
 # ====================================================================================================== controls
 STARTUP_HOLD_S = 120          # optional reads (sampler, depth, fat-finger queues) wait 2 min after a start: every restart's burst gave a 429 (Oct 8)
-LAYERS = ["position", "recycler", "release", "mm", "scalp", "tm", "sm", "rot", "touch", "wall", "sleeve", "swing", "fm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
+LAYERS = ["position", "recycler", "release", "mm", "scalp", "tm", "sm", "rot", "fmm", "touch", "wall", "sleeve", "swing", "fm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
 TMM_ENABLED = True              # afternoon D-C: the engine's MM is the turnover MM (False: classic MM v2, tests only)
 LAYER_STATES = ("off", "pilot", "full")
 
@@ -381,6 +381,7 @@ class Engine:
         self.cash_msgs, self.neg_cash_n, self.through, self.cash_short = [], 0, {}, None   # afternoon D-B
         self.vanish_seen, self.cash_ok_n, self.resume_check_t = set(), 0, 0.0   # day 4 §1
         self.ex.on_cash_reject = self.cash_msgs.append
+        self.ex.on_noop = lambda m: self.fmm_noops.append(m) if hasattr(self, "fmm_noops") else None
         self.manual_ex = {b.ex for b in self.bots if b.kind == "position"} | manual
         self.last_state = None
         self.fair, self.fair_t, self.events, self.acct, self.book, self.px = {}, 0.0, [], {}, {}, {}
@@ -423,6 +424,9 @@ class Engine:
         self.inv_new_t = {}                                 # C95c: ex -> when the audit last booked unexplained inventory
         self.fit_log = {}                                   # C95d: (ex, layer) -> last 'exit not sent' line
         self.rot_post_log = {}                              # C95f: (ex:side, 'posted') -> last ROT POSTED line
+        self.fmm_now, self.fmm_view, self.fmm_sweep, self.fmm_lat, self.fmm_logged = {}, {}, {}, [], set()   # FMM (fmm_spec)
+        self.fmm_paper = dict(orders={}, asks=[], lots=[], realized=0.0, fills=0, rt=0, takes=0, locks=[], saved_t=0.0)
+        self.fmm_unread, self.fmm_noops, self.fmm_cov = [], [], {}           # v2 §2.5: buys not yet in a cash read; SIG no-op buys; coverage
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
@@ -484,6 +488,7 @@ class Engine:
             self.c93e_migration(time.time())
             self.c94_migration(time.time())
             self.c95_migration(time.time())
+            self.c96_migration(time.time())
             if not (self.controls.d.get("c95c") or {}).get("since"):
                 with self.controls.lock:
                     self.controls.d["c95c"] = dict(since=stamp()); self.controls.save()
@@ -590,8 +595,8 @@ class Engine:
     MARKET_LAYERS = {"exit": "recycler", "recycle": "recycler", "take": "sniper", "mm": "mm",   # "touch" is the day-6 layer (the old MM touch quote is gone)
                      "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs",
                      "release": "release", "fatfinger": "fatfinger", "dump": "dump", "dumpexit": "dump",
-                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall", "sleeve": "sleeve", "swing": "swing", "swingsell": "swing", "fm": "fm", "fmexit": "fm", "tm": "tm", "tmexit": "tm", "rot": "rot", "rotexit": "rot", "sm": "sm", "smexit": "sm"}
-    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit", "touchexit", "wallexit", "tmexit", "fmexit", "swingsell", "smexit", "rotexit"}
+                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall", "sleeve": "sleeve", "swing": "swing", "swingsell": "swing", "fm": "fm", "fmexit": "fm", "tm": "tm", "tmexit": "tm", "rot": "rot", "rotexit": "rot", "fmm": "fmm", "fmmtake": "fmm", "fmmexit": "fmm", "fmmhedge": "fmm", "sm": "sm", "smexit": "sm"}
+    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit", "touchexit", "wallexit", "tmexit", "fmexit", "swingsell", "smexit", "rotexit", "fmmexit"}
 
     def gate(self, b, wants):
         """Layer flags (data/overrides.json): a want survives only if its layer is on and allowed on this market. Pause
@@ -775,6 +780,7 @@ class Engine:
                         msg = f"FILLED {tag}release {self.name(f_['ex'])} {('NO' if f_['side'] == 'yes' else 'YES')} {f_['qty']:,.0f} at {px_s:.3f}: cash freed {f_['qty'] * px_s:,.0f}, realized {(f_.get('realized') or 0):+,.0f}"
                         self.event("RELEASE", msg); self.night.line(msg)
                 self.rot_fill_events(new_f)
+                self.fmm_fill_events(new_f)
                 self.sleeve_fill_events(new_f)
                 self.swing_fill_events(new_f)
                 self.rule0_fill_check(new_f)
@@ -907,6 +913,15 @@ class Engine:
             self.tm_now = self.tm_plan(now, cash, used)    # day 11 §2: the touch maker (its cap is reserved off the top like the FM's)
             self.sm_now = self.sm_plan(now, cash)          # turnover_plan §1: the spread maker
             self.rot_now = self.rot_plan(now, cash)        # C94: the coin-flip rotation's bids (funded by its own sales only)
+            try:
+                self.fmm_gate(now)                         # fmm_spec §3.3 every loop: paper -> live by its gates, the step-up, the stop
+            except Exception as err:
+                self.event("ERR", f"FMM gate: {err!r}")
+            try:
+                self.fmm_now = self.fmm_plan(now)          # fmm_spec: favourite-side MM (paper: simulated, nothing sent)
+            except Exception as err:
+                self.fmm_now = {}
+                self.event("ERR", f"FMM plan: {err!r}")
             self.scalp_now = self.scalp_plan(now, cash, used)
         except Exception as err:
             self.scalp_now = {}
@@ -977,7 +992,7 @@ class Engine:
                     if oid not in open_ids:
                         self.drift_since.pop(oid, None)
             for w in (wants if GTC_TTL_S else ()):          # C93 item 3: GTC — every seller, exit and TM / SM quote rests until re-pegged
-                if w.get("reduce") or w.get("layer") in ("tm", "sm", "release", "rot"):
+                if w.get("reduce") or w.get("layer") in ("tm", "sm", "release", "rot", "fmm", "fmmhedge"):   # (not fmmtake: a sweep take keeps its 120 s)
                     w["ttl"] = GTC_TTL_S
             kept, cancels, places = bots.reconcile(wants, mine.get(b.name, []))
             cancels, places = self.repeg_grace(b, cancels, places, now)
@@ -1133,6 +1148,10 @@ class Engine:
         """A sweep on the feed: logged (data/intel/feed_sweeps.jsonl) and, in live mode, the loop wakes for that market."""
         try:
             self.intel_write(f"feed_sweeps/{datetime.fromtimestamp(sw['t']).strftime('%Y-%m-%d')}.jsonl", dict(sw, name=self.name(sw["ex"]), mode=self.feed_mode()))
+        except Exception:
+            pass
+        try:
+            self.fmm_note_sweep(sw)                         # fmm_spec §2.2: a sweep that drops a favourite side arms the refill
         except Exception:
             pass
         if self.feed_mode() == "live":
@@ -1561,6 +1580,7 @@ class Engine:
                     wall=self.wall_now.get(b.ex) or [], wall_exits=self.wall_view.get(b.ex, []), sleeve=self.sleeve_now.get(b.ex) or [], swing=self.swing_now.get(b.ex) or {}, fm=self.fm_now.get(b.ex) or [],
                     tm=self.tm_now.get(b.ex) or [], tm_exits=self.tm_view.get(b.ex, []), sm=self.sm_now.get(b.ex) or [],
                     rot=self.rot_now.get(b.ex) or [], rot_exits=self.rot_view.get(b.ex, []),
+                    fmm=self.fmm_now.get(b.ex) or [], fmm_exits=self.fmm_view.get(b.ex, []),
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
                     room={sd: max(0.0, MARKET_MAX_POS - held[sd]) for sd in ("yes", "no")},
@@ -3667,6 +3687,11 @@ class Engine:
                                 f"{-s3['B']['given']:+,.0f}, net {s3['B']['net']:+,.0f}, {s3['B']['sales']} sales / {s3['B']['entries']} entries, realized {s3['B']['realized']:+,.0f}; verdict: {v3}")
             if ROTATION.get("on") and (self.controls.d.get("rotation") or {}).get("since"):
                 self.night.line(self.rot_status(now))      # C94: the hourly rotation line
+            try:
+                if self.fmm_mode(now) in ("paper", "live", "stopped"):
+                    self.night.line(self.fmm_status(now))  # fmm_spec §4: the hourly FMM line
+            except Exception as err:
+                self.event("ERR", f"FMM status: {err!r}")
             if self.h1_test_day(now) and (self.controls.d.get("h1_test") or {}).get("opened"):
                 fl = self.h1_test_fills(now)
                 ent = [f for f in fl if f.get("layer") == "tm"]; ex_ = [f for f in fl if f.get("layer") == "tmexit"]
@@ -4140,7 +4165,7 @@ class Engine:
             race = cd["race"]
             if race in races or f"{cd['ex']}:{cd['side']}" in skips or race in widened:
                 continue
-            room = min(self.rot_cap(race) - rc[race], float(ROTATION["total_cap"]) - total)
+            room = min(self.rot_cap(race) - rc[race], self.rot_total_cap() - total)
             sh_room = float(ROTATION.get("vol_cap_share", 0.10)) * race_vol.get(race, 0.0) - race_sh[race]   # fmm_spec §0.2: <= 10% of the race's 48-h shares
             room = min(room, max(0.0, sh_room) * cd["px"])
             if room < clip * cd["px"]:
@@ -4166,7 +4191,7 @@ class Engine:
     def rot_reserve_guard(self, plan, ages):
         """fmm_spec §0.1 (the only exception to no-churn): every loop the rotation's (+ FMM's) resting and new bids must fit in
         cash - 5,000 - the manual reserve left; if they don't, the newest are pulled until they do."""
-        room = self.engine_bid_room() - self.fmm_bid_notional()
+        room = self.engine_bid_room()                       # fmm_spec v2 §2.5: FMM bids lock no cash (their own K x free cap and fill guard)
         total = sum(a[3] for a in ages)
         if total <= room + 1e-6:
             return plan
@@ -4188,9 +4213,638 @@ class Engine:
             self.event("ROT", msg); self.night.line(msg)
         return out
 
+    FMM_LAYERS = ("fmm", "fmmtake", "fmmhedge")              # FMM bids: not a cash lock (fmm_spec v2 §2.5), capped at K x free
+    FMM_CFG = FMM
+
+    def fmm_bids(self):
+        return [o for o in self.open if o["action"] == "buy" and (self.ledger.orders.get(o["id"]) or {}).get("layer") in self.FMM_LAYERS]
+
     def fmm_bid_notional(self):
-        """Resting FMM entry bids (notional); 0 until the FMM layer is built."""
-        return sum(o["qty"] * o["price"] for o in self.open if o["action"] == "buy" and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "fmm")
+        """Resting FMM entry / take / hedge bids (notional)."""
+        return sum(o["qty"] * o["price"] for o in self.fmm_bids())
+
+    def rot_total_cap(self):
+        """fmm_spec v2 §3.3: the rotation's 65k shrinks to 50k while FMM is live (its 15k inventory cap comes from the rotation pool)."""
+        return float(FMM["rot_cap_live"]) if self.fmm_mode(time.time()) == "live" else float(ROTATION["total_cap"])
+
+    # ------------------------------------------------------------------ FMM: favourite-side market maker + two-book locks (fmm_spec v2, Oct 16 18:45)
+    def fmm_state(self):
+        return self.controls.d.get("fmm") or {}
+
+    def fmm_mode(self, now):
+        """off (before Sat 06:00) -> paper (06:00-10:00, nothing sent) -> live / off by the 10:00 gate; stopped: no auto-restart."""
+        st = self.fmm_state()
+        if not FMM.get("on"):
+            return "off"
+        if st.get("stopped"):
+            return "stopped"
+        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+        if t < FMM["paper_from"]:
+            return "off"
+        if t < FMM["live_at"]:
+            return "paper"
+        return st.get("decision") or "pending"
+
+    def fmm_k(self):
+        return float(self.fmm_state().get("K") or FMM["k_live"])
+
+    def fmm_inv_cap(self):
+        return float(self.fmm_state().get("inv_cap") or FMM["inv_cap_live"])
+
+    def fmm_free(self):
+        """Free cash for FMM: cash - 5,000 - manual reserve left, less the buys filled since the last cash read (the fill guard's view)."""
+        t0 = self.pnl_read_t
+        self.fmm_unread = [(t, n) for t, n in self.fmm_unread if t >= t0]
+        return self.engine_bid_room() - sum(n for _, n in self.fmm_unread)
+
+    def fmm_ring(self, now):
+        hm = time.strftime("%H:%M", time.localtime(now))
+        return any(a <= hm < b for a, b in FMM["ring"])
+
+    def fmm_two(self, race):
+        """{party: ex} when the race has exactly a D and an R book (locks / hedges)."""
+        senate = ROTATION.get("senate_exs") or ()
+        if race == "U.S. Senate control" and len(senate) == 2:
+            return {"D": str(senate[0]), "R": str(senate[1])}
+        d = {}
+        for ex, m in self.meta.items():
+            if self.rot_race(ex) == race:
+                d.setdefault(str(m.get("party") or ""), []).append(str(ex))
+        return {"D": d["D"][0], "R": d["R"][0]} if set(d) == {"D", "R"} and len(d["D"]) == len(d["R"]) == 1 else None
+
+    def fmm_lots(self):
+        """{sub: (ex, side, shares, avg)} FMM inventory, one sub-book per fill price ('fmm:<ex>:<side>:<px>'); locks excluded."""
+        out = {}
+        for ex, books in self.ledger.subbooks.items():
+            for sub, q in books.items():
+                if sub.startswith("fmm:") and abs(q) >= 1:
+                    side = "yes" if q > 0 else "no"
+                    tr = self.ledger.tranches.get(sub) or {}
+                    avg = float(tr.get("avg") or 0) or float(sub.rsplit(":", 1)[-1]) if sub.count(":") >= 3 else float(tr.get("avg") or 0) or float(self.sig_mark(ex, side) or 0.5)
+                    out[sub] = (str(ex), side, abs(q), avg)
+        return out
+
+    def fmm_lock_capital(self):
+        """Cash in FMM locks: pair sets (a NO set costs 1 - margin a share) and hedge-made locks (shares - profit locked)."""
+        st = (self.fmm_state().get("live") or {})
+        sets = sum(bk["qty"] * (1 - bk["margin"]) for bk in self.ledger.baskets if bk.get("fmm") and bk.get("state", "held") == "held")
+        return sets + max(0.0, float(st.get("locks_sh") or 0) - float(st.get("locks_profit") or 0))
+
+    def fmm_race_locked(self, race, legs=()):
+        """Shares locked in a race (pair sets + hedge locks), for the 10,000-share cap."""
+        sets = sum(bk["qty"] for bk in self.ledger.baskets if bk.get("fmm") and bk["race"] == race and bk.get("state", "held") == "held")
+        exs = [str(e) for e in legs] or [str(ex) for ex in self.meta if self.rot_race(ex) == race]
+        sub = sum(abs(float(q)) for ex in exs for s_, q in (self.ledger.subbooks.get(ex) or {}).items() if s_.startswith("fmmlock:"))
+        return sets + sub / 2
+
+    def fmm_others_ask(self, ex, side):
+        """The best ask on `side` without our own resting asks (the feed's depth less our quantity at each level), else the touch."""
+        own = collections.Counter()
+        for o in self.open:
+            if str(o["ex"]) == str(ex) and o["action"] == "buy" and o["side"] != side and self.ex.owned(o["id"]):
+                own[round(1 - o["price"], 3)] += o["qty"]
+        fb = self.feed_book(ex)
+        if fb is not None:
+            lv = fb[1] if side == "yes" else [(round(1 - p, 3), q) for p, q in fb[0]]
+            for p, q in lv:
+                if q - own.get(round(p, 3), 0) >= 1:
+                    return round(p, 3)
+            return None
+        return self.rot_touch(ex, side)[1]
+
+    def fmm_targets(self, now, paper):
+        """fmm_spec v2 §2.1: -> [(race, ex, side, px, qty, layer, sub)]. Every eligible favourite-side book (fair >= 0.75, touch <= fair - 2c)
+        gets the touch; the race's cheaper book the ladder (touch, -1, -2, -3c). Race resting budget = K x free x race share of 48-h shares,
+        clip max(500, budget / 4); total resting <= K x free; no clip bigger than free (the fill guard's rule); resting + inventory inside the
+        race cap (5k at cost) and the inventory cap (15k / 30k), so a fill never breaks a cap. Kept bids keep their place; the largest go
+        first when they no longer fit. Paper: the same plan against the live feed, with the paper inventory."""
+        K, cap, rcap, edge = self.fmm_k(), self.fmm_inv_cap(), float(FMM["race_cap"]), float(FMM["edge"])
+        P = self.fmm_paper
+        free = self.fmm_free() - (sum(q * p for _, _, q, p in P["lots"]) if paper else 0.0)
+        allow = K * max(0.0, free)
+        vol = self.rot_vol48(now)
+        hand = {str(o["ex"]) for o in self.open if not self.ex.owned(o["id"])}   # Piero's own resting orders (RI-GOV-D): FMM stays out of those books
+        books = collections.defaultdict(list)
+        for ex, b in self.owner.items():
+            ex = str(ex)
+            if b.kind != "market" or ex in self.manual_ex or ex in hand or self.ex.is_frozen(ex):
+                continue
+            f = self.fair.get(ex)
+            if f is None:
+                continue
+            side = "yes" if f >= FMM["fav_min"] else "no" if f <= 1 - FMM["fav_min"] else None
+            if side is None:
+                continue
+            pos_ = float((self.book.get(ex) or {}).get("pos") or 0)
+            if not paper and ((side == "yes" and pos_ <= -1) or (side == "no" and pos_ >= 1)):
+                continue                                     # C95f: we hold the other side here; a buy would net against it
+            bid, ask, fs = self.rot_touch(ex, side)
+            if bid is None or fs is None or bid > fs - edge + 1e-9 or not (0.01 <= bid <= 0.99):
+                continue
+            books[self.rot_race(ex)].append((ex, side, fs, bid, ask))
+        rvol = collections.Counter()
+        for ex_, v_ in vol.items():
+            rvol[self.rot_race(ex_)] += v_
+        tot = sum(rvol[r] for r in books) or 1.0
+        inv = collections.Counter()
+        if paper:
+            for ex, side, q, px in P["lots"]:
+                inv[self.rot_race(ex)] += q * px
+        else:
+            for sub, (ex, side, q, avg) in self.fmm_lots().items():
+                inv[self.rot_race(ex)] += q * avg
+        inv_tot = sum(inv.values())
+        cur = collections.defaultdict(dict)                  # (ex, side) -> {px: (qty, age key)}
+        if paper:
+            for (ex, side, px), o in P["orders"].items():
+                cur[(ex, side)][px] = (o["qty"] - o["filled"], o["placed"])
+        else:
+            for o in self.open:
+                rec = self.ledger.orders.get(o["id"]) or {}
+                if o["action"] == "buy" and rec.get("layer") == "fmm":
+                    cur[(str(o["ex"]), o["side"])][round(o["price"], 3)] = (o["qty"], int(o["id"]) if str(o["id"]).isdigit() else 0)
+        # 1. what each book wants (levels), the kept bids first
+        plan, kept = [], []
+        for race, legs in books.items():
+            ladder = [l for l in legs if len(cur.get((l[0], l[1]), {})) > 1] or [max(legs, key=lambda l: l[2] - l[3])]   # the cheaper book, sticky while its ladder rests
+            sw = self.fmm_sweep.get(race)
+            for ex, side, fs, bid, ask in legs:
+                lv = list(FMM["levels"]) if ex == ladder[0][0] else [0]
+                refill = sw is not None and sw.get("ex") == ex and now - sw["t"] <= FMM["refill_s"]
+                if refill:                                   # §2.2 (b): every level the sweep cleared, down to fair - 2c
+                    lv = list(range(0, max(lv[-1], int((bid - (fs - edge)) / FMM["level_step"] + 1e-9)) + 1))
+                own = None if paper else self.own_ask(ex, side)
+                for k in lv:
+                    px = round(bid - k * FMM["level_step"], 3)
+                    if px > fs - edge + 1e-9 or px < 0.01 or (own is not None and px >= own - 1e-9):
+                        continue                             # never above fair - 2c; never at or through our own ask in the same book
+                    have = cur.get((ex, side), {}).get(px)
+                    (kept if have else plan).append(dict(race=race, ex=ex, side=side, px=px, k=k, fs=fs, ask=ask, have=have, refill=refill))
+        # 2. kept bids that no longer fit go, the largest first (the planner applies the fill guard's rule every loop)
+        kept.sort(key=lambda w: -w["have"][0] * w["px"])
+        rest_tot = sum(w["have"][0] * w["px"] for w in kept)
+        rest_race = collections.Counter()
+        for w in kept:
+            rest_race[w["race"]] += w["have"][0] * w["px"]
+        out, cut = [], []
+        other = lambda rc: max([v for r_, v in rest_race.items() if r_ != rc] + [0.0])   # a burst spans <= 2 races (replay): the two largest ladders must fit in free
+        for w in kept:
+            n = w["have"][0] * w["px"]
+            if (n > max(0.0, free) + 1e-6 or rest_race[w["race"]] + other(w["race"]) > max(0.0, free) + 1e-6 or rest_tot > allow + 1e-6
+                    or inv[w["race"]] + rest_race[w["race"]] > rcap + 1e-6 or inv_tot + rest_tot > cap + 1e-6):
+                rest_tot -= n; rest_race[w["race"]] -= n; cut.append(w)
+                continue
+            out.append((w["race"], w["ex"], w["side"], w["px"], int(w["have"][0]), "fmm", f"fmm:{w['ex']}:{w['side']}:{w['px']:.3f}"))
+        if cut and not paper:
+            self.fmm_note_guard(f"FMM GUARD (plan): {len(cut)} bids / {sum(w['have'][0] * w['px'] for w in cut):,.0f} pulled, largest first, to fit free {free:,.0f} "
+                                f"(K {K:g} x free = {allow:,.0f}; caps {rcap:,.0f} a race / {cap:,.0f})")
+        # 3. sweep takes (§2.2 a) and new bids, the races with the most volume first
+        allow_new = paper or api.writes_left() > int(FMM["fast_writes"])   # §2.5: 5 writes / min kept for the fast lane (refill, guard, exits)
+        order = sorted(plan, key=lambda w: (w["k"], -rvol[w["race"]], w["race"]))   # every eligible book's touch first, then the deeper levels
+        taken = set()
+        for w in order:
+            race, ex, side, px, fs = w["race"], w["ex"], w["side"], w["px"], w["fs"]
+            budget = min(K * max(0.0, free) * rvol[race] / tot, rcap - inv[race])   # the race's resting budget, never more than its cap leaves
+            room = min(rcap - inv[race] - rest_race[race], cap - inv_tot - rest_tot, allow - rest_tot, max(0.0, free) - rest_race[race] - other(race))   # a sweep takes a race's whole ladder at once: the two largest must fit in free
+            sw = self.fmm_sweep.get(race)
+            if w["refill"] and sw is not None and not sw.get("taken") and (race, ex) not in taken and w["ask"] is not None and w["ask"] <= fs - edge + 1e-9 and room > 0:
+                taken.add((race, ex)); sw["taken"] = True
+                q = int(min(room, budget if budget > 0 else room) / w["ask"])
+                fb = self.feed_book(ex)
+                if fb is not None:
+                    lv_ = fb[1] if side == "yes" else [(round(1 - p, 3), q_) for p, q_ in fb[0]]
+                    q = int(min(q, sum(q_ for p, q_ in lv_ if p <= fs - edge + 1e-9)))
+                if q >= MIN_QTY:
+                    out.append((race, ex, side, round(min(fs - edge, w["ask"]), 3), q, "fmmtake", f"fmm:{ex}:{side}:{round(min(fs - edge, w['ask']), 3):.3f}"))
+                    rest_tot += q * w["ask"]; rest_race[race] += q * w["ask"]; room -= q * w["ask"]
+                    self.fmm_lat.append(now - sw["t"]); self.fmm_lat = self.fmm_lat[-500:]
+                    msg = f"FMM REFILL {self.name(ex)} {side.upper()}: take {q:,} at <= {min(fs - edge, w['ask']):.3f} (fair {fs:.3f}) {now - sw['t']:.1f} s after the sweep ({'paper' if paper else 'live'})"
+                    self.event("FMM", msg); self.night.line(msg)
+            if not allow_new:
+                continue
+            clip = max(float(FMM["min_clip"]), budget / 4 / px)
+            lim = [clip, room / px]
+            if w["k"] > 0:
+                lim.append((budget - rest_race[race]) / px)  # the touch is every eligible book's floor; deeper levels within the race budget
+            q = int(min(lim))
+            if q < FMM["min_new"]:
+                continue
+            out.append((race, ex, side, px, q, "fmm", f"fmm:{ex}:{side}:{px:.3f}"))
+            rest_tot += q * px; rest_race[race] += q * px
+        # 4. hedges (§2.4 b): a NO lot gets a bid on the other book's NO at <= 0.990 - its cost (live only)
+        if FMM.get("hedge") and not paper:
+            for sub, (lex, lside, lq, lavg) in self.fmm_lots().items():
+                if lside != "no":
+                    continue
+                race = self.rot_race(lex); two = self.fmm_two(race)
+                if not two or lex not in two.values():
+                    continue
+                other = two["R"] if lex == two["D"] else two["D"]
+                if other in hand or self.ex.is_frozen(other) or float((self.book.get(other) or {}).get("pos") or 0) >= 1:
+                    continue
+                hpx = bots.tick_down(round(FMM["lock_cost"] - lavg, 6))
+                hq = int(min(lq, FMM["lock_cap_sh"] - self.fmm_race_locked(race, (two["D"], two["R"])), (allow - rest_tot) / max(hpx, 0.01), max(0.0, free) / max(hpx, 0.01)))
+                oa = self.own_ask(other, "no")
+                if 0.01 <= hpx <= 0.99 and hq >= MIN_QTY and not (oa is not None and hpx >= oa - 1e-9):
+                    out.append((race, other, "no", hpx, hq, "fmmhedge", f"fmmlock:{race}:{lex}:{lavg:.3f}"))
+                    rest_tot += hq * hpx
+        quoted = {(t[1], t[2]) for t in out if t[5] == "fmm"}
+        self.fmm_cov = dict(eligible=sum(len(v) for v in books.values()), quoted=len(quoted), rest=round(rest_tot), allow=round(allow), free=round(free), K=K)
+        return out
+
+    def fmm_plan(self, now):
+        """-> {ex: [want-spec]} in live mode; in paper mode the same targets become simulated orders and nothing is sent."""
+        mode = self.fmm_mode(now)
+        self.track_fmm(now)                                  # exits keep running whatever the mode (live lots only)
+        if mode not in ("paper", "live") or self.fills_blind or (mode == "live" and (self.controls.paused or self.controls.state("fmm") == "off")):
+            return {}
+        tg = self.fmm_targets(now, paper=(mode == "paper"))
+        if mode == "paper":
+            self.fmm_paper_place(now, tg)
+            return {}
+        plan = {}
+        for race, ex, side, px, q, layer, sub in tg:
+            plan.setdefault(ex, []).append(dict(side=side, px=px, qty=q, sub=sub, ttl=FMM["take_ttl_s"] if layer == "fmmtake" else 86400, layer=layer))
+        return plan
+
+    def track_fmm(self, now):
+        """§2.3 v2: every FMM lot (one per fill price) rests a GTC ask at max(fill + 0.5c (ring hours + 1c), the best ask), never below
+        lot avg + 0.5c; re-pegged down to a new best ask, never below fill + 0.5c (exempt from the 10-min keep-place grace)."""
+        self.fmm_view = {}
+        ring = self.fmm_ring(now)
+        cur = {}
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"]) or {}
+            if rec.get("layer") == "fmmexit":
+                cur[rec.get("sub")] = round(1 - o["price"], 3)
+        for sub, (ex, side, q, avg) in self.fmm_lots().items():
+            if q < MIN_QTY:
+                continue
+            lots = [l for l in self.lots(ex, side, sub) if l[0] >= 1 and l[2] == "engine"]
+            top = max([l[1] for l in lots] + [avg])
+            floor_ = max(bots.tick_up(round(top + FMM["exit_c"], 6)), bots.tick_up(round(avg + RULE0_MARGIN, 6)))
+            first = max(floor_, bots.tick_up(round(top + (FMM["exit_ring_c"] if ring else FMM["exit_c"]), 6)))
+            oa = self.fmm_others_ask(ex, side)
+            have = cur.get(sub)
+            if have is not None and have >= floor_ - 1e-9:
+                px = max(floor_, oa) if oa is not None and oa < have - 1e-9 else have
+            else:
+                px = max(first, oa) if oa is not None else first
+            self.fmm_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg))
+
+    def fmm_note_guard(self, msg):
+        k = ("guard", msg[:40], int(time.time() // 300))
+        if k not in self.fmm_logged:
+            self.fmm_logged.add(k)
+            self.event("FMM", msg); self.night.line(msg)
+
+    def fmm_guard(self, now, why):
+        """§2.5 fill guard, run when the loop books an FMM fill (docs/latency.md: ~6 s p50 / ~12 s p90 after SIG's match): if free (cash - floor
+        - reserve, less buys not yet in a cash read) is under the largest resting FMM clip or the two largest race ladders, or resting > K x free,
+        pull FMM bids, the largest first, until the rest fit."""
+        free = self.fmm_free(); K = self.fmm_k()
+        cash0 = self.engine_bid_room()
+        bids = sorted(self.fmm_bids(), key=lambda o: -o["qty"] * o["price"])
+        total = sum(o["qty"] * o["price"] for o in bids)
+        by_race = collections.Counter()
+        for o in bids:
+            if (self.ledger.orders.get(o["id"]) or {}).get("layer") != "fmmhedge":
+                by_race[self.rot_race(o["ex"])] += o["qty"] * o["price"]
+        pulled = []
+        for o in bids:                                       # the replay: a sweep fills a race's whole ladder in one burst, <= 2 races inside the guard's ~6-12 s
+            n = o["qty"] * o["price"]; rc = self.rot_race(o["ex"])
+            hedge = (self.ledger.orders.get(o["id"]) or {}).get("layer") == "fmmhedge"
+            two = by_race[rc] + max([v for r_, v in by_race.items() if r_ != rc] + [0.0])
+            if n > max(0.0, free) + 1e-6 or total > K * max(0.0, free) + 1e-6 or (not hedge and two > max(0.0, free) + 1e-6):
+                if self.ex.cancel(o, reason="FMM GUARD", front=True):
+                    pulled.append(n); total -= n
+                    if not hedge:
+                        by_race[rc] -= n
+        if pulled:
+            msg = (f"FMM GUARD ({why}): free {cash0:,.0f} at the last cash read -> {free:,.0f} after the fills; pulled {len(pulled)} bids / {sum(pulled):,.0f} "
+                   f"(largest first), {total:,.0f} left resting (<= K {K:g} x free; every clip and the two largest race ladders <= free): the 5,000 floor and Piero's reserve hold")
+            self.event("FMM", msg); self.night.line(msg)
+        return pulled
+
+    def fmm_funds(self, what, raw=None):
+        """§2.5: a SIG funds / balance event (a write refused for funds, a buy accepted as a no-op, a bid SIG shrank or cancelled, a balance < 0)."""
+        c = self.controls
+        with c.lock:
+            st = c.d.setdefault("fmm", {})
+            ev = st.setdefault("funds", [])
+            ev.append(dict(t=stamp(), what=str(what)[:200], cash=None if raw is None else round(raw, 2)))
+            st["funds"] = ev[-50:]
+            neg = raw is not None and raw < 0
+            if neg and self.fmm_k() > 1:
+                st["K"] = 1.0
+            c.save()
+        msg = f"FMM FUNDS: {str(what)[:200]}" + ("" if raw is None else f"; SIG cash {raw:,.0f}") + ("; cash below 0: K -> 1 at once (report to Piero)" if raw is not None and raw < 0 else "")
+        self.event("FMM", msg); self.night.line(msg)
+        if raw is not None and raw < 0:
+            self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+
+    def fmm_fill_events(self, fills):
+        """Live FMM fills: per-price lots (tranche avg), exits' realized and round trips, hedge fills -> locks; then the fill guard."""
+        st = self.controls.d.setdefault("fmm", {})
+        lv = st.setdefault("live", dict(fills=0, realized=0.0, rt=0, locks_sh=0.0, locks_profit=0.0))
+        changed, entry = False, False
+        for f in fills:
+            lay = f.get("layer")
+            if lay not in ("fmm", "fmmtake", "fmmexit", "fmmhedge"):
+                if f.get("action") == "buy" and lay not in self.REDUCING:
+                    self.fmm_unread.append((time.time(), f["qty"] * f["price"]))   # any entry buy spends cash the fill guard must see
+                continue
+            changed = True
+            ex = str(f["ex"]); lv["fills"] += 1
+            rec = self.ledger.orders.get(str(f.get("order") or "")) or {}
+            sub = rec.get("sub") or ""
+            if lay in ("fmm", "fmmtake"):
+                entry = True
+                self.fmm_unread.append((time.time(), f["qty"] * f["price"]))
+                sub = sub or f"fmm:{ex}:{f['side']}:{f['price']:.3f}"
+                tr = self.ledger.tranches.get(sub)
+                if tr is None or tr.get("state") != "open":
+                    tr = self.ledger.tranches[sub] = dict(ex=ex, side=f["side"], kind="fmm", t=stamp(), ts=time.time(), state="open", avg=f["price"], qty=0.0)
+                qa = float(tr.get("qty") or 0.0)
+                tr["avg"] = round((float(tr["avg"]) * qa + f["price"] * f["qty"]) / (qa + f["qty"]), 5) if qa + f["qty"] > 0 else f["price"]
+                tr["qty"] = qa + f["qty"]
+                q = abs(float((self.ledger.subbooks.get(ex) or {}).get(sub, 0.0)))
+                msg = f"FMM FILL {self.name(ex)} {f['side'].upper()} {f['qty']:,.0f} at {f['price']:.3f} ({lay}; fair {self.side_fair(ex, f['side']) or 0:.3f}); lot {q:,.0f} at {tr['avg']:.3f}"
+            elif lay == "fmmexit":
+                lv["realized"] += f.get("realized") or 0.0
+                left = abs(float((self.ledger.subbooks.get(ex) or {}).get(sub, 0.0))) if sub else 0.0
+                msg = f"FMM EXIT {self.name(ex)} {('NO' if f['side'] == 'yes' else 'YES')} {f['qty']:,.0f} at {1 - f['price']:.3f}: realized {(f.get('realized') or 0):+,.0f}; lot left {left:,.0f}"
+                if sub and left < MIN_QTY:
+                    lv["rt"] += 1
+                    tr = self.ledger.tranches.get(sub)
+                    if tr is not None:
+                        tr.update(state="closed", closed_ts=time.time())
+                    msg += " (round trip done)"
+            else:                                            # a hedge filled: the NO lot on the other book and this NO are a lock
+                parts = sub.split(":")                       # fmmlock:<race>:<lot ex>:<lot avg>
+                race = self.rot_race(ex)
+                lot_ex = parts[-2] if len(parts) >= 4 else None
+                lot_avg = float(parts[-1]) if len(parts) >= 4 else 0.0
+                lot_sub = f"fmm:{lot_ex}:no:{lot_avg:.3f}" if lot_ex else None
+                lot_q = abs(float((self.ledger.subbooks.get(lot_ex) or {}).get(lot_sub, 0.0))) if lot_ex else 0.0
+                mq = min(lot_q, f["qty"])
+                if mq >= 1:
+                    self.ledger.split_sub(lot_ex, lot_sub, f"fmmlock:{race}", -mq)
+                    lv["locks_sh"] += mq; lv["locks_profit"] += mq * (1 - (lot_avg + f["price"]))
+                if f["qty"] - mq >= 1:                       # the lot sold meanwhile: the hedge's excess is an FMM lot of its own (it gets an exit)
+                    xs = f"fmm:{ex}:no:{f['price']:.3f}"
+                    self.ledger.split_sub(ex, sub, xs, -(f["qty"] - mq))
+                    tr = self.ledger.tranches.get(xs)
+                    if tr is None or tr.get("state") != "open":
+                        tr = self.ledger.tranches[xs] = dict(ex=ex, side="no", kind="fmm", t=stamp(), ts=time.time(), state="open", avg=f["price"], qty=0.0)
+                    qa = float(tr.get("qty") or 0.0); qn = f["qty"] - mq
+                    tr["avg"] = round((float(tr["avg"]) * qa + f["price"] * qn) / (qa + qn), 5); tr["qty"] = qa + qn
+                msg = (f"FMM LOCK {race}: hedge NO {f['qty']:,.0f} at {f['price']:.3f} + NO lot at {lot_avg:.3f} = {lot_avg + f['price']:.3f} -> {mq:,.0f} locked "
+                       f"(+{mq * (1 - lot_avg - f['price']):,.0f} at settlement; cost {mq * (lot_avg + f['price']):,.0f}), held")
+            self.event("FMM", msg); self.night.line(msg)
+        if changed:
+            with self.controls.lock:
+                self.controls.save()
+        if entry and self.fmm_mode(time.time()) == "live":
+            self.fmm_guard(time.time(), "fill")
+
+    def fmm_note_sweep(self, sw):
+        """§2.2: a feed sweep that drops a favourite side arms that book's refill for 60 s (detection time kept for the latency log)."""
+        ex = str(sw["ex"]); f = self.fair.get(ex)
+        if f is None:
+            return
+        if (f >= FMM["fav_min"] and sw.get("direction") == "down") or (f <= 1 - FMM["fav_min"] and sw.get("direction") == "up"):
+            self.fmm_sweep[self.rot_race(ex)] = dict(t=float(sw.get("recv") or time.time()), ex=ex, taken=False)
+
+    # ---- paper mode (fmm_spec §3.2)
+    def fmm_paper_place(self, now, targets):
+        """Simulated orders for the targets: depth ahead from the feed's book at placement; a take crosses at once (from the asks at or
+        under it); an order not wanted for > 10 min goes; exits re-peg down to the best ask (never below fill + 0.5c)."""
+        P = self.fmm_paper
+        if not P.get("restored"):                            # a restart in the paper window keeps the counters (not the simulated queue)
+            P["restored"] = True
+            old = self.fmm_state().get("paper") or {}
+            if str(old.get("t") or "")[:10] == time.strftime("%Y-%m-%d", time.localtime(now)):
+                P["realized"], P["fills"], P["rt"], P["takes"] = float(old.get("realized") or 0), int(old.get("fills") or 0), int(old.get("rt") or 0), int(old.get("takes") or 0)
+        want = {}
+        for race, ex, side, px, q, layer, sub in targets:
+            want[(ex, side, round(px, 3))] = (q, race, layer)
+        for key, (q, race, layer) in want.items():
+            ex, side, px = key
+            o = P["orders"].get(key)
+            if o is not None:
+                o["unwanted"] = None
+                continue
+            fb = self.feed_book(ex)
+            if fb is None:
+                continue
+            bids_s = fb[0] if side == "yes" else [(round(1 - p_, 3), q_) for p_, q_ in fb[1]]
+            asks_s = fb[1] if side == "yes" else [(round(1 - p_, 3), q_) for p_, q_ in fb[0]]
+            if asks_s and px >= asks_s[0][0] - 1e-9:         # a take: filled at once from the asks at or under it
+                got = min(float(q), sum(q_ for p_, q_ in asks_s if p_ <= px + 1e-9))
+                if got >= 1:
+                    self.fmm_paper_fill(ex, side, px, got, now, take=True)
+                continue
+            ahead = sum(q_ for p_, q_ in bids_s if abs(p_ - px) < 1e-9)
+            if bids_s and px > bids_s[0][0] + 1e-9:
+                ahead = 0.0
+            P["orders"][key] = dict(qty=float(q), ahead=ahead, cum=0.0, filled=0.0, placed=now, unwanted=None, race=race)
+        for key, o in list(P["orders"].items()):
+            if key not in want:
+                o["unwanted"] = o["unwanted"] or now
+                if now - o["unwanted"] > 600:
+                    P["orders"].pop(key, None)
+        for a in P["asks"]:                                  # exits: down to a new best ask, never below fill + 0.5c
+            fb = self.feed_book(a["ex"])
+            if fb is None:
+                continue
+            asks_s = fb[1] if a["side"] == "yes" else [(round(1 - p_, 3), q_) for p_, q_ in fb[0]]
+            if asks_s and asks_s[0][0] < a["px"] - 1e-9:
+                npx = max(a["floor"], asks_s[0][0])
+                if npx < a["px"] - 1e-9:
+                    a["px"] = npx; a["ahead"] = sum(q_ for p_, q_ in asks_s if abs(p_ - npx) < 1e-9); a["cum"] = 0.0; a["placed"] = now
+        if now - P["saved_t"] > 60:
+            P["saved_t"] = now
+            with self.controls.lock:
+                self.controls.d.setdefault("fmm", {})["paper"] = dict(realized=round(P["realized"], 2), fills=P["fills"], rt=P["rt"], takes=P["takes"],
+                                                                      inv_cost=round(sum(q * p for _, _, q, p in P["lots"]), 2), t=stamp())
+                self.controls.save()
+
+    def fmm_paper_fill(self, ex, side, px, q, ts, take=False):
+        P = self.fmm_paper
+        P["lots"].append((ex, side, q, px)); P["fills"] += 1; P["takes"] += 1 if take else 0
+        ring = self.fmm_ring(ts)
+        floor_ = bots.tick_up(round(px + FMM["exit_c"], 6))
+        ask = max(floor_, bots.tick_up(round(px + (FMM["exit_ring_c"] if ring else FMM["exit_c"]), 6)))
+        fb = self.feed_book(ex)
+        ahead = 0.0
+        if fb is not None:
+            lv = fb[1] if side == "yes" else [(round(1 - p_, 3), q_) for p_, q_ in fb[0]]
+            if lv:
+                ask = max(ask, lv[0][0])
+            ahead = sum(q_ for p_, q_ in lv if abs(p_ - ask) < 1e-9)
+        P["asks"].append(dict(ex=ex, side=side, px=ask, floor=floor_, qty=q, cost=px, ahead=ahead, cum=0.0, sold=0.0, placed=ts))
+        self.fmm_paper_write(dict(t=stamp(), ev="fill", ex=ex, name=self.name(ex), side=side, px=px, qty=round(q), take=take, ask=ask, fair=self.side_fair(ex, side)))
+
+    def fmm_paper_print(self, ex, ts, p, q):
+        """A print on `ex`: simulated bid fills (half rate beyond the depth ahead) and exit fills."""
+        P = self.fmm_paper
+        for key, o in list(P["orders"].items()):
+            oex, side, px = key
+            if oex != ex or ts < o["placed"]:
+                continue
+            ps = p if side == "yes" else 1 - p
+            if ps <= px + 1e-9:
+                o["cum"] += q
+                new = min(o["qty"], max(0.0, o["cum"] - o["ahead"]) * 0.5) - o["filled"]
+                if new >= 1:
+                    o["filled"] += new
+                    self.fmm_paper_fill(ex, side, px, new, ts)
+                if o["filled"] >= o["qty"] - 1:
+                    P["orders"].pop(key, None)
+        for a in P["asks"]:
+            if a["ex"] != ex or ts < a["placed"] or a["sold"] >= a["qty"] - 1e-9:
+                continue
+            ps = p if a["side"] == "yes" else 1 - p
+            if ps >= a["px"] - 1e-9:
+                a["cum"] += q
+                new = min(a["qty"], max(0.0, a["cum"] - a["ahead"]) * 0.5) - a["sold"]
+                if new >= 1:
+                    a["sold"] += new; P["realized"] += new * (a["px"] - a["cost"])
+                    left = new
+                    for i, (lex, lside, lq, lpx) in enumerate(P["lots"]):
+                        if lex == ex and lside == a["side"] and abs(lpx - a["cost"]) < 1e-9 and lq > 0:
+                            tk = min(lq, left); P["lots"][i] = (lex, lside, lq - tk, lpx); left -= tk
+                            if left <= 0:
+                                break
+                    P["lots"] = [l for l in P["lots"] if l[2] >= 1]
+                    if a["sold"] >= a["qty"] - 1:
+                        P["rt"] += 1
+                    self.fmm_paper_write(dict(t=stamp(), ev="exit", ex=ex, name=self.name(ex), side=a["side"], px=a["px"], qty=round(new), realized=round(new * (a["px"] - a["cost"]), 2)))
+        P["asks"] = [a for a in P["asks"] if a["sold"] < a["qty"] - 1e-9]
+
+    def fmm_paper_write(self, rec):
+        try:
+            self.intel_write(f"paper/fmm-{time.strftime('%Y-%m-%d')}.jsonl", rec)
+        except Exception:
+            pass
+
+    def fmm_locks_view(self):
+        """Live FMM locks: (shares, profit locked) from the hedge locks and the FMM pair sets."""
+        st = (self.fmm_state().get("live") or {})
+        sets = [bk for bk in self.ledger.baskets if bk.get("fmm")]
+        sh = float(st.get("locks_sh") or 0) + sum(bk["qty"] for bk in sets)
+        pr = float(st.get("locks_profit") or 0) + sum(bk["qty"] * bk["margin"] for bk in sets)
+        return sh, pr
+
+    def fmm_pnl_fair(self):
+        st = (self.fmm_state().get("live") or {})
+        open_fair = 0.0
+        for sub, (ex, side, q, avg) in self.fmm_lots().items():
+            fs = self.side_fair(ex, side)
+            if fs is not None:
+                open_fair += q * (fs - avg)
+        return float(st.get("realized") or 0) + open_fair
+
+    def fmm_gate(self, now):
+        """§3.3 v2: Sat 10:00 — live (K 3, inventory cap 15k at cost, 5k a race; Piero's reserve cut to 2,000: 18:30 item 4) if the replay was
+        positive on >= 6 of 9 days and paper realized >= 0, else off; Sun 10:00 — inventory cap 30k and K 5 if live realized > 0, every cap
+        held, no funds event and the replay's 5-s measure supports it; stop and report (no auto-restart) on live P&L at fair < -150, a cap
+        break, or an I2 trim from FMM."""
+        if not FMM.get("on"):
+            return
+        c = self.controls; st = c.d.setdefault("fmm", {})
+        for m in list(self.fmm_noops):                      # buys SIG accepted as no-ops (buying power committed on that exchange)
+            self.fmm_funds(m)
+        self.fmm_noops[:] = []
+        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+        if t >= FMM["live_at"] and not st.get("decision") and not st.get("stopped"):
+            paper = st.get("paper") or {}
+            pr = float(paper.get("realized") or 0) if paper else float(self.fmm_paper["realized"])
+            ok = bool(FMM.get("replay_ok")) and pr >= -1e-9
+            with c.lock:
+                st["decision"] = "live" if ok else "off"; st["decided"] = stamp()
+                if ok:
+                    st["K"] = float(FMM["k_live"]); st["inv_cap"] = float(FMM["inv_cap_live"])
+                    st["trims0"] = sum(v for k, v in self.ex.trims.items() if k in ("fmm", "fmmtake", "fmmexit", "fmmhedge"))
+                    mr = c.d.get("manual_reserve") or {}
+                    st["manual_reserve_before"] = mr.get("amount")
+                    mr["amount"] = float(FMM["manual_reserve_live"]); c.d["manual_reserve"] = mr
+                    c.d["layers"].setdefault("fmm", dict(state="off", since=now, caps={}, killed=None))["state"] = "full"
+                c.save()
+            msg = (f"FMM GATE {t[11:16]}: {'LIVE' if ok else 'stays OFF'} — replay {'positive on >= 6 of 9 days' if FMM.get('replay_ok') else 'not positive enough'} "
+                   f"({FMM.get('replay_note', '')}); paper realized {pr:+,.1f} ({(paper or {}).get('fills', self.fmm_paper['fills'])} fills, {(paper or {}).get('rt', self.fmm_paper['rt'])} round trips)"
+                   + (f"; K {FMM['k_live']:g} (resting <= K x free), inventory cap {FMM['inv_cap_live']:,.0f} at cost ({FMM['race_cap']:,.0f} a race) from the rotation pool "
+                      f"(its cap {ROTATION['total_cap']:,.0f} -> {FMM['rot_cap_live']:,.0f}); Piero's manual reserve cut to {FMM['manual_reserve_live']:,.0f} (item 4)" if ok else ""))
+            self.event("FMM", msg); self.night.line(msg); self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+        if st.get("decision") != "live" or st.get("stopped"):
+            return
+        lv = st.get("live") or {}
+        why = None
+        pf = self.fmm_pnl_fair()
+        if pf < FMM["stop_fair"] - 1e-9:
+            why = f"live P&L at fair {pf:+,.0f} < {FMM['stop_fair']:+,.0f}"
+        trims = sum(v for k, v in self.ex.trims.items() if k in ("fmm", "fmmtake", "fmmexit", "fmmhedge"))
+        if trims > int(st.get("trims0") or 0):
+            why = why or f"an I2 trim came from FMM ({trims - int(st.get('trims0') or 0)})"
+        lots = self.fmm_lots()
+        inv_tot = sum(v[2] * v[3] for v in lots.values())
+        by_race = collections.Counter()
+        for v in lots.values():
+            by_race[self.rot_race(v[0])] += v[2] * v[3]
+        cap = self.fmm_inv_cap(); tol = float(FMM["cap_tol"])
+        if inv_tot > cap + tol:
+            why = why or f"inventory cap broken: {inv_tot:,.0f} at cost > {cap:,.0f}"
+        big = [r for r, v in by_race.items() if v > float(FMM["race_cap"]) + tol]
+        if big:
+            why = why or f"race cap broken: {big[0]} {by_race[big[0]]:,.0f} at cost > {FMM['race_cap']:,.0f}"
+        raw = min(self.cash_raw_hist) if getattr(self, "cash_raw_hist", None) else None
+        if raw is not None and raw < CASH_RESERVE - 1e-6 and self.fmm_unread_since_live():
+            why = why or f"cash {raw:,.0f} under the {CASH_RESERVE:,} floor after FMM fills"
+        if why:
+            with c.lock:
+                st["stopped"] = dict(t=stamp(), why=why); c.save()
+            msg = f"FMM STOPPED: {why}; FMM bids pulled, exits keep running; no auto-restart (report to Piero)"
+            self.event("FMM", msg); self.night.line(msg); self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
+            for o in self.fmm_bids():
+                self.ex.cancel(o, reason="FMM STOPPED", front=True)
+            return
+        if t >= FMM["step_at"] and not st.get("stepped"):
+            funds = [e for e in st.get("funds") or [] if str(e.get("t") or "") >= str(st.get("decided") or "")]
+            ok = float(lv.get("realized") or 0) > 0 and not funds and bool(FMM.get("k5_ok"))
+            with c.lock:
+                st["stepped"] = stamp()
+                if ok:
+                    st["inv_cap"] = float(FMM["inv_cap_step"]); st["K"] = float(FMM["k_step"])
+                c.save()
+            msg = (f"FMM STEP {t[11:16]}: " + (f"inventory cap -> {FMM['inv_cap_step']:,.0f}, K -> {FMM['k_step']:g}" if ok else f"held at cap {cap:,.0f}, K {self.fmm_k():g}")
+                   + f" (live realized {float(lv.get('realized') or 0):+,.0f}, caps held, funds events {len(funds)}, replay 5-s measure {'supports' if FMM.get('k5_ok') else 'does not support'} K 5)")
+            self.event("FMM", msg); self.night.line(msg)
+
+    def fmm_unread_since_live(self):
+        return bool(self.fmm_unread) or bool(self.fmm_bids())
+
+    def fmm_status(self, now):
+        mode = self.fmm_mode(now)
+        lat = sorted(self.fmm_lat)
+        p50 = lat[len(lat) // 2] if lat else None; p90 = lat[int(len(lat) * 0.9)] if lat else None
+        cv = getattr(self, "fmm_cov", None) or {}
+        cov = (f"coverage {cv.get('quoted', 0)} of {cv.get('eligible', 0)} books quoted, resting {cv.get('rest', 0):,} of K {cv.get('K', self.fmm_k()):g} x free {cv.get('allow', 0):,} "
+               f"(free {cv.get('free', 0):,})")
+        latx = f"refill latency p50 {'n/a' if p50 is None else f'{p50:.1f} s'} p90 {'n/a' if p90 is None else f'{p90:.1f} s'}"
+        if mode == "paper":
+            P = self.fmm_paper
+            n = len(P["orders"]); notional = sum((o["qty"] - o["filled"]) * k[2] for k, o in P["orders"].items())
+            inv = sum(q * p for _, _, q, p in P["lots"])
+            return (f"FMM (paper) quotes {n} / {notional:,.0f}; fills {P['fills']} (takes {P['takes']}), round trips {P['rt']}, realized {P['realized']:+,.1f}; "
+                    f"inventory at cost {inv:,.0f}; {cov}; {latx}")
+        lv = self.fmm_state().get("live") or {}
+        bids = self.fmm_bids()
+        inv = sum(v[2] * v[3] for v in self.fmm_lots().values())
+        lsh, lpr = self.fmm_locks_view()
+        return (f"FMM ({mode}) quotes {len(bids)} / {sum(o['qty'] * o['price'] for o in bids):,.0f}; fills {lv.get('fills', 0)}, round trips {lv.get('rt', 0)}, "
+                f"realized {float(lv.get('realized') or 0):+,.0f}, P&L at fair {self.fmm_pnl_fair():+,.0f}; inventory at cost {inv:,.0f} of {self.fmm_inv_cap():,.0f}; "
+                f"locks {lsh:,.0f} shares / +{lpr:,.0f} locked; {cov}; {latx}; funds events {len(self.fmm_state().get('funds') or [])}")
 
     def track_rot(self, now):
         """C95 item 5: each rotation lot rests an ask at max(entry + 0.5c, PM fair - 1.5c) (GTC); it sells at the touch instead (a swap)
@@ -4319,7 +4973,33 @@ class Engine:
         return (f"ROT REPORT {slot} (Piero 15:05 Oct 16 item 6): FUNDING sold {sum(fl['sold'].values()):,.0f} of {sum(int(v) for v in sells.values()):,} shares, cash {fl['freed']:,.0f} "
                 f"(realized {fl['realized_sales']:+,.0f} vs lot avg) — {fund}. LOTS {len(rows)} (entry / mark / fair, gap closed, board / fair): {lots or 'none'}. "
                 f"OPEN {sum(r[7] for r in rows):+,.0f} on the board / {sum(r[8] for r in rows):+,.0f} at fair; REALIZED exits {fl['realized_exits']:+,.0f}; buys {fl['buys']:,.0f}, exits {fl['exits']:,.0f}.{flag} "
-                f"CASH {cash:,.0f}, manual reserve left {self.manual_reserve_left():,.0f}, engine free {self.engine_cash_now() - CASH_RESERVE:,.0f}, pool {self.rot_reserve():,.0f}. {rk}.")
+                f"CASH {cash:,.0f}, manual reserve left {self.manual_reserve_left():,.0f}, engine free {self.engine_cash_now() - CASH_RESERVE:,.0f}, pool {self.rot_reserve():,.0f}. {rk}."
+                + ("" if self.fmm_mode(now) == "off" else " " + self.fmm_status(now)))
+
+    def c96_migration(self, now):
+        """Once (C96, fmm_spec v2 Oct 16 18:45 + Piero 18:30 item 4): the favourite-side market maker's schedule and gates."""
+        c = self.controls
+        if (c.d.get("c96") or {}).get("done") or not FMM.get("on"):
+            return
+        with c.lock:
+            c.d["c96"] = dict(done=stamp())
+            c.d["layers"].setdefault("fmm", dict(state="off", since=now, caps={}, killed=None))
+            c.save()
+        msg = (f"C96 (fmm_spec v2, Piero 18:50 Oct 16): FAVOURITE MM — paper {FMM['paper_from'][5:16]} to {FMM['live_at'][11:16]} (planner on the live feed, nothing sent, "
+               f"simulated fills to data/intel/paper/fmm-<date>.jsonl); live at {FMM['live_at'][11:16]} if the replay was positive on >= 6 of 9 days ({FMM['replay_note']}) and paper "
+               f"realized >= 0: every eligible favourite-side book (fair >= {FMM['fav_min']:.2f}, touch <= fair - {FMM['edge'] * 100:.0f}c) quoted GTC at the touch, the race's cheaper book "
+               f"also -1 / -2 / -3c; resting bids lock no cash, total <= K x (cash - 5,000 - manual reserve left), K {FMM['k_live']:g}; race budget K x free x 48-h volume share, clip "
+               f"max({FMM['min_clip']}, budget / 4), no clip above free; inventory cap {FMM['inv_cap_live']:,.0f} at cost ({FMM['race_cap']:,.0f} a race; resting + inventory inside both) "
+               f"from the rotation pool (rotation cap {ROTATION['total_cap']:,.0f} -> {FMM['rot_cap_live']:,.0f}); Piero's manual reserve cut to {FMM['manual_reserve_live']:,.0f} at go-live "
+               f"(item 4). Fill guard on every FMM fill: pull bids, largest first, until each clip AND the two largest race ladders fit free and resting <= K x free (FMM GUARD; "
+               f"the replay's worst burst is one race's whole ladder, 5,010, <= 2 races: with this rule cash never went under floor + reserve at guard latencies 2-15 s). Exits at max(fill + 0.5c "
+               f"(ring hours + 1c), best ask), re-pegged down to the best ask, never below fill + 0.5c. Sweep refill: take asks <= fair - 2c, re-post the cleared levels. "
+               f"Locks: NO + NO at a walked cost <= {FMM['lock_cost']:.3f} (atomic, <= {FMM['lock_cap_sh']:,} shares a race, held) and hedges of NO lots, replacing H4 while live. "
+               f"FMM FUNDS on every SIG funds / balance event (SIG: resting buys escrow nothing; it shrinks or cancels resting buys a falling balance cannot cover; a buy is a "
+               f"no-op when that exchange's resting buys commit the whole buying power); cash below 0 -> K 1. Sun {FMM['step_at'][11:16]}: cap {FMM['inv_cap_step']:,.0f}, K {FMM['k_step']:g} "
+               f"if live realized > 0, caps held, no funds event and the replay's 5-s measure supports it. STOP (no auto-restart) on live P&L at fair < {FMM['stop_fair']:+,.0f}, "
+               f"a cap break or an I2 trim from FMM. Invariants unchanged.")
+        self.event("CONTROL", "C96 (fmm_spec v2): favourite MM — paper Sat 06:00-10:00, live by its gates (the full text is in the night log)"); self.night.line(msg)
 
     def c95_migration(self, now):
         """Once (C95, Piero 15:05 Oct 16): the manual reserve, the rotation's new phase (sales, universe, caps), RI Governor R's
@@ -5747,6 +6427,11 @@ class Engine:
             why.append(f"balance {raw:,.0f} below 0 on {self.neg_cash_n} reads")
         msgs, self.cash_msgs[:] = list(self.cash_msgs), []
         why += [f"write refused: {m[:140]}" for m in msgs]
+        if FMM.get("on") and self.fmm_mode(now) in ("paper", "live", "stopped"):
+            for m in msgs:
+                self.fmm_funds(f"write refused for funds: {m[:160]}", raw)
+            if raw < 0:
+                self.fmm_funds("SIG balance below 0", raw)
         # Day 4 §1.1: a vanished remainder is never evidence on its own. At its TTL (- 120 s) it expired. Otherwise one
         # GET /orders/{id} is logged as evidence, and only the balance (the hard triggers above) can pause.
         for oid in catch_open:
@@ -7565,7 +8250,7 @@ class Engine:
     ROTATION_SKIP = ("manual", "pairset:", "recycle:", "sleeve:", "wall:", "swing:", "fm:", "tm:", "sm:")   # Piero 22:15: never manual, wall, sleeve or pair-set lots; swing / fm / recycle / tm / sm have their own exits (the TM's and SM's already sit at the touch ask)
 
     ROTATION_SKIP = ("manual", "pairset:", "sleeve:", "wall:", "swing:")   # C89: Piero's position orders and pair sets only; every trading lot can be sold
-    OWN_EXIT_SUBS = ("dump:", "tm:", "sm:", "fm:", "touch:", "scalp:", "longshot:", "rot:")   # subs whose layer rests its own exit while the lot is not held
+    OWN_EXIT_SUBS = ("dump:", "tm:", "sm:", "fm:", "touch:", "scalp:", "longshot:", "rot:", "fmm:")   # subs whose layer rests its own exit while the lot is not held
 
     def trading_cost(self):
         """C89: the TRADING book at cost — every engine lot that is not core (RI, walls, manual, pair sets apart)."""
@@ -7619,7 +8304,7 @@ class Engine:
             for sub, v in subs_iter:
                 if sub == "inventory" and fresh_inv:
                     continue
-                if v * q <= 0 or sub.startswith(("manual", "pairset:")) or (not allow_all and (sub.startswith(("sleeve:", "swing:")) or sub in res_subs)) or ((str(ex), sub) in self.core_set and str(ex) not in rot_left):
+                if v * q <= 0 or sub.startswith(("manual", "pairset:", "fmm:", "fmmlock:")) or (not allow_all and (sub.startswith(("sleeve:", "swing:")) or sub in res_subs)) or ((str(ex), sub) in self.core_set and str(ex) not in rot_left):
                     continue                                # never a core lot (unless Piero named the market for the rotation, C94), his manual / pair / sleeve lots, or the RI reservoir
                 key = f"{ex}|{sub}"
                 sig_avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
@@ -7883,6 +8568,11 @@ class Engine:
             ids.append(pid)
         ring = self.prints.setdefault(ex, collections.deque(maxlen=4000))
         ring.append((float(ts), round(float(p), 3), float(q or 0), fair))
+        if self.fmm_paper["orders"] or self.fmm_paper["asks"]:
+            try:
+                self.fmm_paper_print(ex, float(ts), float(p), float(q or 0))
+            except Exception:
+                pass
 
     def seed_prints(self, now, exs):
         """Once: the ring of each market from today's (and yesterday's) tape file, the last 30 min."""
@@ -8754,17 +9444,22 @@ class Engine:
             book = "bids" if (o["side"] == "yes") == (o["action"] == "buy") else "asks"
             own[(o["ex"], book, yes_px)] = own.get((o["ex"], book, yes_px), 0) + o["qty"]
         cands = []
+        fmm_live = self.fmm_mode(now) == "live" and self.controls.on("fmm")   # fmm_spec §2.4: NO+NO locks at <= 0.990 replace H4 (<= 0.96, its free-cash gate)
         for pb in self.pairs:
             if not all(self.controls.allows(ex, "pairs") for ex in pb.legs):
                 continue
-            for e_, side in pb.screen(self.px, self.fair, PAIR_EDGE, PAIR_THIRD_PARTY):
+            for e_, side in pb.screen(self.px, self.fair, min(PAIR_EDGE, 1 - FMM["lock_cost"]) if fmm_live else PAIR_EDGE, PAIR_THIRD_PARTY):
                 if now - pb.last_shot >= PAIR_COOLDOWN_S and not any(self.ex.is_frozen(ex) for ex in pb.legs):
                     cands.append((e_, side, pb))
-        h4_budget = self.h4_budget(now) if self.h4_active() else 0.0
+        h4_budget = self.h4_budget(now) if self.h4_active() and not fmm_live else 0.0
+        fmm_room = max(0.0, self.fmm_free()) if fmm_live else 0.0   # v2: locks are outside the inventory cap but inside cash
         for e_, side, pb in sorted(cands, key=lambda c: -c[0]):
             if shots >= PAIR_MAX_SHOTS or self.ex.admit() < 2 or not api.spare_reads(20):
                 break
-            h4_set = self.h4_active() and side == "no" and self.h4_race_ok(pb) and e_ >= H4["edge"] - 1e-9 and h4_budget > 0
+            fmm_set = fmm_live and side == "no" and self.h4_race_ok(pb) and e_ >= 1 - FMM["lock_cost"] - 1e-9 and fmm_room > 0
+            h4_set = not fmm_live and self.h4_active() and side == "no" and self.h4_race_ok(pb) and e_ >= H4["edge"] - 1e-9 and h4_budget > 0
+            if fmm_live and e_ < PAIR_EDGE - 1e-9 and not fmm_set:
+                continue                                    # screened at the lock's 1c only for an FMM lock
             pb.last_shot = now
             books, key = {}, "bids" if side == "no" else "asks"
             try:                                                                # a bad read skips this pair, not the loop
@@ -8781,7 +9476,10 @@ class Engine:
             for ex, (bids, asks) in zip(pb.legs, fetched):
                 lv = bids if side == "no" else asks
                 books[ex] = [(p, q - own.get((ex, key, round(p, 3)), 0)) for p, q in lv if q - own.get((ex, key, round(p, 3)), 0) > 0]
-            if h4_set:
+            if fmm_set:
+                lock_q = int(min(FMM["lock_cap_sh"] - self.fmm_race_locked(pb.race, pb.legs), fmm_room / FMM["lock_cost"]))
+                orders, qty, margin = pb.size(side, books, self.fair, 1 - FMM["lock_cost"], PAIR_THIRD_PARTY, max(0, lock_q))
+            elif h4_set:
                 race_used = sum(bk["qty"] * (bk["legs"] - bk["margin"]) for bk in self.ledger.baskets if bk.get("h4") and bk["race"] == pb.race)
                 room = min(h4_budget, H4["per_race"] - race_used)
                 orders, qty, margin = pb.size(side, books, self.fair, H4["edge"], PAIR_THIRD_PARTY, int(max(0, room) / 0.96))
@@ -8790,7 +9488,9 @@ class Engine:
             if not orders:
                 continue
             fairs = [self.side_fair(o[0], side) for o in orders]
-            if None in fairs:
+            if fmm_set:
+                pass                                        # a D/R NO+NO set pays 1.00 whoever wins: the walked cost <= 0.990 is the whole test
+            elif None in fairs:
                 if margin < 0.03 - 1e-9:                    # A12.1: no fair on a leg -> require >= 3c locked
                     continue
             elif sum(f - o[3] for f, o in zip(fairs, orders)) < -1e-9:
@@ -8798,19 +9498,25 @@ class Engine:
                                    f"{sum(f - o[3] for f, o in zip(fairs, orders)) * 100:+.1f}c (A12.1)")
                 continue
             cost = sum(o[3] * o[4] for o in orders)
-            if (cost > budget and not h4_set) or (h4_set and cost > h4_budget) or qty * margin < PAIR_MIN_LOCK:
+            if fmm_set:
+                if cost > fmm_room + 1e-6 or qty * margin < PAIR_MIN_LOCK or sum(o[3] for o in orders) > FMM["lock_cost"] + 1e-9:
+                    continue
+                fmm_room -= cost
+                self.fmm_unread.append((time.time(), cost))  # the fill guard sees the lock's cash at once
+            elif (cost > budget and not h4_set) or (h4_set and cost > h4_budget) or qty * margin < PAIR_MIN_LOCK:
                 continue
             if h4_set:
                 h4_budget -= cost
                 self.h4_used += cost
             set_id = f"{pb.race}:{int(now)}:{uuid.uuid4().hex[:6]}"                 # unique even for two sets a second
 
-            def recorded(results, pb=pb, side=side, qty=qty, margin=margin, n=len(orders), set_id=set_id, ts=now, h4_set=h4_set):
+            def recorded(results, pb=pb, side=side, qty=qty, margin=margin, n=len(orders), set_id=set_id, ts=now, h4_set=h4_set, fmm_set=fmm_set):
                 ids = [str(d.get("orderId")) for _, _, ok, d in results if ok and d.get("orderId") is not None]
                 if len(ids) == n or api.DRY_RUN:            # the set exists once SIG acked every leg
                     with self.ledger.lock:
                         self.ledger.baskets.append(dict(id=set_id, t=stamp(), ts=ts, race=pb.race, side=side, qty=qty,
-                                                        margin=round(margin, 4), legs=n, orders=ids, repaired=False, state="held", h4=bool(h4_set)))
+                                                        margin=round(margin, 4), legs=n, orders=ids, repaired=False, state="held",
+                                                        h4=bool(h4_set or fmm_set), fmm=bool(fmm_set)))
             if self.ex.place([(pb.name, f"pairset:{set_id}", "set", o) for o in orders], ttl_s=PAIR_TTL_S, atomic=True,
                              on_done=recorded):
                 budget -= cost
@@ -8818,6 +9524,11 @@ class Engine:
                 self.event("PAIR", f"{pb.race}: queued buy {side.upper()} on all {len(orders)} legs x{qty:,} at "
                                    f"{' + '.join(f'{o[3]:.3f}' for o in orders)} -> locks {margin * 100:.1f}c/set "
                                    f"(~{qty * margin:,.0f} SIG once every leg fills)")
+                if fmm_set:
+                    msg = (f"FMM LOCK {pb.race}: NO + NO x{qty:,} at {' + '.join(f'{o[3]:.3f}' for o in orders)} = {sum(o[3] for o in orders):.3f} "
+                           f"(walked, atomic) -> +{qty * margin:,.0f} at settlement, held; cost {cost:,.0f} (inside cash, outside the inventory cap)")
+                    self.event("FMM", msg); self.night.line(msg)
+                    self.fmm_guard(now, "lock")
         return shots, start - budget
 
     # ------------------------------------------------------------------------------------------------ C93 item 4: the H1 decisive test (Oct 13 04:00-15:00 PT)
@@ -8936,11 +9647,15 @@ class Engine:
     def repeg_grace(self, b, cancels, places, now):
         """C93 item 3: a re-peg (a cancel paired with a new want on the same layer / sub / side) waits until the order has sat off its
         target for > 10 min; a pull (no replacement) goes at once. -> (cancels, places) to act on now."""
-        key = lambda o: (o.get("layer"), o.get("sub"), o.get("side"), o.get("action"))
+        nsub = lambda o: str(o.get("sub") or "").rsplit(":", 1)[0] if o.get("layer") == "fmm" else o.get("sub")   # FMM bids: one sub-book per price
+        key = lambda o: (o.get("layer"), nsub(o), o.get("side"), o.get("action"))
         want_keys = collections.Counter(key(w) for w in places)
         keep_c, deferred = [], collections.Counter()
         for o in cancels:
             k = key(o)
+            if o.get("layer") == "fmmexit":                 # fmm_spec v2 §2.3: an FMM exit follows the best ask at once
+                keep_c.append(o)
+                continue
             if o.get("id") and want_keys.get(k):
                 t0 = self.drift_since.setdefault(o["id"], now)
                 if now - t0 < REPEG_AWAY_S:
