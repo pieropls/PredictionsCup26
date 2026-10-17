@@ -218,7 +218,7 @@ class EngineCase(unittest.TestCase):
         f_engine.STARTUP_HOLD_S = 0                         # the rigs read from their first loop (the 2-min start-up hold is a live-only guard)
         for k, v in (("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
                      ("CORE_CAP_COST", 0.0), ("TRADING_HOLD_C", 99.0), ("CORE_LOCK_RET", -99.0), ("TRADING_INV_CAP", 1e12), ("TRADING_CASH_TARGET", 0.0),
-                     ("NOEDGE", dict(ret=-99.0, low_fair=0.0, low_edge_c=0.0)), ("REPEG_AWAY_S", 0.0), ("GTC_TTL_S", 0), ("SM_REPEG_TICKS", 2), ("TM_REPEG_TICKS", 2), ("ROTATION", dict(a_config.ROTATION, on=False, sells={}, buys=[])), ("MANUAL_RESERVE", 0.0), ("FMM", dict(a_config.FMM, on=False)), ("DASH_EVERY_S", 0)):   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
+                     ("NOEDGE", dict(ret=-99.0, low_fair=0.0, low_edge_c=0.0)), ("REPEG_AWAY_S", 0.0), ("GTC_TTL_S", 0), ("SM_REPEG_TICKS", 2), ("TM_REPEG_TICKS", 2), ("ROTATION", dict(a_config.ROTATION, on=False, sells={}, buys=[])), ("MANUAL_RESERVE", 0.0), ("FMM", dict(a_config.FMM, on=False)), ("DASH_EVERY_S", 0), ("ALLOC", dict(a_config.ALLOC, on=False)), ("FUND", dict(a_config.FUND, on=False))):   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
             self.addCleanup(setattr, f_engine, k, getattr(f_engine, k, None))
             setattr(f_engine, k, v)                         # C87 gates (real clock, no tape in the rigs, rig cash under BUFFER): off unless C87Tests set them
         for k in ("PNL_READ_S", "ORDERS_READ_S", "FILLS_READ_S", "POSITIONS_READ_S"):   # day 4 §4 / Oct 8 read caching have their own tests; the rigs (no realtime feed) read fresh each loop
@@ -6092,12 +6092,12 @@ class FMMTests(EngineCase):
         drain(eng)
         sets = [cl for cl in fake.calls if cl[0] == "multileg"]
         self.assertTrue(sets and all(cl[1][0] == 2 for cl in sets), "atomic multi-leg orders of two legs")
-        self.assertTrue(all(x["side"] == "no" and 1 - x["margin"] <= 0.990 + 1e-9 for x in eng.ledger.baskets if x.get("fmm")), "every FMM lock: NO + NO at <= 0.990")
+        self.assertTrue(all(x["side"] == "no" and 1 - x["margin"] <= 0.985 + 1e-9 for x in eng.ledger.baskets if x.get("fmm")), "every FMM lock: NO + NO at <= 0.985")
         bk = [x for x in eng.ledger.baskets if x.get("fmm") and x["race"] == pb.race]
         self.assertEqual(len(bk), 1, "this race: one lock")
         self.assertTrue(bk[-1]["side"] == "no" and bk[-1]["h4"], "a NO + NO set, held to settlement")
-        self.assertEqual(bk[-1]["qty"], 4000, "walked while the pair stays <= 0.990: 3,000 at 0.98 + 1,000 at 0.99")
-        self.assertLessEqual(1 - bk[-1]["margin"], 0.990 + 1e-9)
+        self.assertEqual(bk[-1]["qty"], 3000, "walked while the pair stays <= 0.985 (C97 item 4b): 3,000 at 0.98; the next level costs 0.99")
+        self.assertLessEqual(1 - bk[-1]["margin"], 0.985 + 1e-9)
         self.assertFalse([cl for cl in fake.calls if cl[0] == "batch"], "never legged in")
         self.assertTrue(any(e["text"].startswith("FMM LOCK") for e in eng.events))
         # at 0.995 a lock is not taken
@@ -6247,6 +6247,82 @@ class Piero2115Tests(EngineCase):
         eng.fast_reconcile(time.time())
         self.assertEqual(eng.fast_stats["mismatch"], n0, "the SM refill rests under its sm:<ex> sub-book: no mismatch")
         self.assertFalse(eng.fast_slow.get(ex, 0) > time.time())
+
+
+class C97Tests(EngineCase):
+    """Piero 15:55 Oct 17: the capital allocation — the fund sale (its cash not the rotation's), FMM's first 10k, the rotation's 30k cap,
+    the catcher's 10k slice (L0 / L1 >= 3c under the 6-h VWAP mark and below fair), locks <= 10k at cost from idle cash."""
+
+    def on(self, eng):
+        f_engine.ALLOC = dict(a_config.ALLOC, on=True)
+        FMMTests.live(self, eng)
+
+    def test_fund_sale_asks_every_lot_that_clears_rule_0_core_included_and_rotation_lots_stay(self):
+        fake, eng, favs = C94Tests.rig(self)
+        a = favs[0]
+        C93Tests.lot(self, eng, fake, a, f"dump:{a}:yes:1", 3000, 0.80, (0.90, 0.905, 0.9025), 0.99)   # 9% left: HELD by C93 unless funded
+        loop(eng, fake); loop(eng, fake)
+        eng.ledger.subbooks[a] = {f"dump:{a}:yes:1": 3000.0, f"rot:{a}:yes": 500.0}; fake.pos[a] = 3500; eng.lots_cache = (None, {})
+        eng.book.setdefault(a, dict(pos=0, row={}))["pos"] = 3500
+        eng.core_set = {(a, f"dump:{a}:yes:1")}
+        self.assertNotIn(a, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time()), "held without the fund sale")
+        f_engine.FUND = dict(a_config.FUND, on=True, sells={a: 3000}, sell_all_subs=())
+        eng.controls.d["fund"] = dict(since=a_config.FUND["since"], sell_left={a: 3000}, cash_freed=0.0)
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertIn(a, plan); self.assertEqual(plan[a]["why"], "fund sale")
+        self.assertAlmostEqual(plan[a]["px"], 0.905, places=3, msg="max(lot avg + 0.5c, touch)")
+        self.assertEqual(plan[a]["subs"], {f"dump:{a}:yes:1": 3000}, "the core lot is sold; the rotation lot is not")
+        eng.ledger.fills.append(dict(ex=a, qty=1000.0, price=0.095, side="no", action="buy", layer="release", t="2026-10-17 17:00:00", order="ff1", realized=105.0))
+        self.assertEqual(eng.fund_flows()["sold"].get(a), 1000.0)
+        self.assertEqual(eng.fund_sync()[a], 2000)
+        self.assertEqual(eng.rot_sale_fill(dict(ex=a, t="2026-10-17 17:00:00"), 0.905), "fund ")
+
+    def test_fmm_gets_the_first_10k_of_free_cash_and_the_rotation_claims_nothing_at_its_cap(self):
+        fake, eng, mk = FMMTests.rig(self)
+        self.on(eng)
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 6_000.0
+        self.assertAlmostEqual(eng.fmm_priority(), 6_000.0, places=0, msg="free 6,000 < 10k: all FMM's")
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 25_000.0
+        self.assertAlmostEqual(eng.fmm_priority(), 10_000.0, places=0, msg="the first 10k only")
+        f_engine.ROTATION = dict(a_config.ROTATION, on=True, sells={}, total_cap=30_000.0)
+        eng.controls.d["rotation"] = dict(since="2026-10-16 15:00:00", sell_left={}, skipped={}, reports={})
+        eng.rot_flows = lambda: dict(net=8_000.0, sold={}, cash={}, freed=8_000.0, exits=0.0, buys=0.0, realized_sales=0.0, realized_exits=0.0)
+        eng.rot_lots = lambda: {"rot:x:no": ("x", "no", 60_000.0, 0.52)}         # 31.2k at cost: over the 30k cap
+        f_engine.FMM = dict(f_engine.FMM, rot_cap_live=30_000.0)
+        self.assertEqual(eng.rot_claim(), 0.0, "at its cap the rotation holds no cash back")
+        eng.rot_lots = lambda: {"rot:x:no": ("x", "no", 40_000.0, 0.50)}         # 20k: 10k of room
+        self.assertAlmostEqual(eng.rot_claim(), 8_000.0, places=0, msg="its unspent 8k (under the cap room and what FMM's 10k leaves)")
+
+    def test_the_catcher_takes_l0_l1_only_3c_under_the_6h_vwap_mark_and_below_fair(self):
+        fake, eng, mk = FMMTests.rig(self)
+        self.on(eng)
+        a = mk[0]
+        eng._vwap6 = (time.time(), {a: 0.90})
+        self.assertTrue(eng.catcher_ok(a, "yes", 0, 0.87, 0.95), "L1 3c under the mark, under fair")
+        self.assertTrue(eng.catcher_ok(a, "yes", 4, 0.86, 0.95), "L0")
+        self.assertFalse(eng.catcher_ok(a, "yes", 1, 0.85, 0.95), "L2 is off")
+        self.assertFalse(eng.catcher_ok(a, "yes", 0, 0.88, 0.95), "only 2c under the mark")
+        self.assertFalse(eng.catcher_ok(a, "yes", 0, 0.87, 0.87), "not below fair")
+        self.assertTrue(eng.catcher_ok(a, "no", 0, 0.07, 0.15), "NO side: the mark is 1 - VWAP (0.10)")
+        self.assertFalse(eng.catcher_ok(mk[1], "yes", 0, 0.5, 0.9), "no 6-h prints: no catch")
+        sub = f"dump:{a}:yes:0"
+        eng.ledger.subbooks.setdefault(a, {})[sub] = 4000.0
+        eng.ledger.tranches[sub] = dict(ex=a, side="yes", kind="dump", state="open", ts=time.time(), t="2026-10-17 17:00:00", avg=0.85)
+        eng.ledger.subbooks.setdefault(mk[1], {})[f"dump:{mk[1]}:yes:0"] = 9000.0
+        eng.ledger.tranches[f"dump:{mk[1]}:yes:0"] = dict(ex=mk[1], side="yes", kind="dump", state="open", ts=time.time(), t="2026-10-10 12:00:00", avg=0.85)
+        self.assertAlmostEqual(eng.catcher_new_cost(), 3_400.0, places=0, msg="the slice counts only the lots opened since the allocation")
+
+    def test_locks_take_at_most_10k_and_only_idle_cash(self):
+        fake, eng, mk = FMMTests.rig(self)
+        self.on(eng)
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 12_000.0
+        self.assertAlmostEqual(eng.fmm_lock_room(), 2_000.0, places=0, msg="free above FMM's first 10k")
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 40_000.0
+        self.assertAlmostEqual(eng.fmm_lock_room(), 10_000.0, places=0, msg="the 10k cap")
+        eng.ledger.baskets.append(dict(id="fl9", t="x", ts=time.time(), race="RZ", side="no", qty=7000, margin=0.015, legs=2, orders=[], repaired=False, state="held", h4=True, fmm=True))
+        self.assertAlmostEqual(eng.fmm_lock_room(), 10_000.0 - 7000 * 0.985, places=0, msg="less what the locks already hold")
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 9_000.0
+        self.assertEqual(eng.fmm_lock_room(), 0.0, "no idle cash")
 
 
 if __name__ == "__main__":

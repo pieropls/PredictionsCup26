@@ -481,10 +481,10 @@ HOST_ID_FILE = os.path.join(DATA, "host_id")
 NIGHT_LOG_FILE = os.path.join(os.path.dirname(DATA), "docs", "RUN_LOG.md")   # day 2: the run log (NIGHT_LOG.md = the night)
 
 # ---- C95 (Piero 15:05 Oct 16; replaces C94's lists): the COIN-FLIP ROTATION at full size (~55-60k) + a MANUAL RESERVE
-MANUAL_RESERVE = 10_000.0       # the engine never spends cash below the 5,000 floor + this; Piero's own fills draw from it
+MANUAL_RESERVE = 2_000.0        # the engine never spends cash below the 5,000 floor + this; Piero's own fills draw from it (10,000 until Piero 15:55 Oct 17 item 5: 2,000 for every layer)
 ROTATION = dict(on=True, gap_min=0.04, gap_ext=0.03, keep_gap=0.03, pm_skip_c=0.02, pm_skip_s=24 * 3600, exit_fair_c=0.015, swap_gap_c=0.03,
                 release_exempt_ret=0.02, fair_lo=0.25, fair_hi=0.75, min_vol48=100_000.0, min_clip=500,
-                race_cap=8_000.0, senate_cap=12_000.0, total_cap=65_000.0, senate_exs=("842", "843"),
+                race_cap=8_000.0, senate_cap=12_000.0, total_cap=30_000.0, senate_exs=("842", "843"),
                 # FUND: GTC asks at max(lot avg + 0.5c, touch), place kept, cash counted on SIG fills only
                 sells={"1072": 16265,   # Oklahoma Senate D NO (all)
                        "1074": 8468,    # Rhode Island Governor R NO (all, swing sub included; its reservoir retired)
@@ -506,12 +506,23 @@ ROT_TTL_S = 24 * 3600
 FMM = dict(on=True, fav_min=0.75, edge=0.02, levels=(0, 1, 2, 3), level_step=0.01, min_clip=500, min_new=100, race_cap=5_000.0,
            race_caps={"Rhode Island Senate": 15_000.0},     # Piero 21:15 item 2: RI Senate's inventory clears daily (25 round trips/day in the replay)
            lock_free_share=0.30, hedge_after_s=7_200,        # Piero 21:15 item 1: new locks <= 30% of engine free cash, from cash FMM's ladders don't need; stuck lots (>= 2 h) hedged first
-           k_live=3.0, k_step=5.0, k5_ok=True, inv_cap_live=15_000.0, inv_cap_step=30_000.0, cap_tol=250.0,
+           k_live=3.0, k_step=5.0, k5_ok=True, inv_cap_live=30_000.0, inv_cap_step=30_000.0, cap_tol=250.0,   # Piero 15:55 Oct 17 item 2: 30k now (Sunday's step brought forward)
            exit_c=0.005, exit_ring_c=0.01, ring=(("07:00", "08:00"), ("12:00", "15:00"), ("19:30", "21:00")),
-           refill_s=60.0, take_ttl_s=120, fast_writes=5, lock_cost=0.990, lock_cap_sh=10_000, hedge=True,
+           refill_s=60.0, take_ttl_s=120, fast_writes=5, lock_cost=0.985, lock_cap_sh=10_000, hedge=True,   # item 4b: locks only at a walked cost <= 0.985
            paper_from="2026-10-17 06:00:00", live_at="2026-10-17 10:00:00", step_at="2026-10-18 10:00:00",
-           manual_reserve_live=2_000.0, rot_cap_live=50_000.0, stop_fair=-150.0, replay_ok=True,
+           manual_reserve_live=2_000.0, rot_cap_live=30_000.0, stop_fair=-150.0, replay_ok=True,
            replay_note="replay v2 Oct 8-16, docs/fmm.md: realized > 0 on 7-9 of 9 days in every config; touch-3 / best-ask exits / K 3 / 15k +855 on 7 of 9 days; "
                        "with the two largest race ladders <= free, cash never under floor + reserve at guard latencies 2-15 s, K 5 / 30k included")
 # fmm_spec v2 (Piero 18:50 Oct 16). replay_ok / k5_ok / the note follow docs/fmm.md
 FMM_RACE_CAP = FMM["race_cap"]
+
+# ---- C97 (Piero 15:55 Oct 17): CAPITAL ALLOCATION — ~30k market making (FMM), ~30k coin flips (rotation), ~20k other (catcher 10k slice,
+# locks <= 10k at cost), holdings only what can't be sold at >= lot avg + 0.5c
+ALLOC = dict(on=True, since="2026-10-17 15:55:00",
+             fmm_priority_free=10_000.0,       # item 2: freed cash goes to FMM first, until FMM's free cash reaches 10k (the other layers see free above it)
+             catcher_slice=10_000.0,           # item 4a: the catcher's new lots (since `since`) at cost + its resting bids <= 10k
+             catcher_mark_c=0.03,              # item 4a: L0 / L1 only, >= 3c under the 6-h VWAP mark and below PM fair
+             lock_cap=10_000.0)                # item 4b: all locks (pair sets + hedge locks) <= 10k at cost, from idle cash only
+FUND = dict(on=True, since="2026-10-17 15:55:00",  # item 1: GTC asks at max(lot avg + 0.5c, touch), place kept, core lots included; the cash is not the rotation's
+            sells={"1075": 1_000_000, "1072": 3_904, "986": 2_172, "980": 2_000, "964": 2_008, "1045": 1_355, "894": 974, "896": 1_030},
+            sell_all_subs=("1075",))           # Delaware Senate R NO: every lot (its reservoir is retired, swing sub included)
