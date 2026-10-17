@@ -6012,6 +6012,7 @@ class FMMTests(EngineCase):
         eng.controls.d["layers"].setdefault("fmm", dict(state="off", caps={}, killed=None))["state"] = "full"   # even with the layer on
         eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 10_000.0
         eng.feed_book = lambda ex: ([(0.85, 5000.0)], [(0.86, 3000.0)]) if ex == a else ([(0.80, 2000.0)], [(0.81, 3000.0)]) if ex == c else None
+        eng.fmm_paper_book = eng.feed_book                   # paper reads the feed's current book whatever its age (a quiet book is not re-sent)
         self.assertEqual(eng.fmm_mode(time.time()), "paper")
         sent = []
         for _ in range(3):

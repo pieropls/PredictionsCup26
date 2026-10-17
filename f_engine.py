@@ -4670,6 +4670,13 @@ class Engine:
             self.fmm_sweep[self.rot_race(ex)] = dict(t=float(sw.get("recv") or time.time()), ex=ex, taken=False)
 
     # ---- paper mode (fmm_spec §3.2)
+    def fmm_paper_book(self, ex):
+        """The feed's current book for paper: the feed sends a book only when it changes, so an older book is still the current one
+        (feed_book's 10-s freshness would skip every quiet book — live orders don't need a fresh book, paper shouldn't either)."""
+        if self.feed_mode() != "live" or self.mkt_feed is None:
+            return None
+        return self.mkt_feed.book(ex, 6 * 3600)
+
     def fmm_paper_place(self, now, targets):
         """Simulated orders for the targets: depth ahead from the feed's book at placement; a take crosses at once (from the asks at or
         under it); an order not wanted for > 10 min goes; exits re-peg down to the best ask (never below fill + 0.5c)."""
@@ -4688,7 +4695,7 @@ class Engine:
             if o is not None:
                 o["unwanted"] = None
                 continue
-            fb = self.feed_book(ex)
+            fb = self.fmm_paper_book(ex)
             if fb is None:
                 continue
             bids_s = fb[0] if side == "yes" else [(round(1 - p_, 3), q_) for p_, q_ in fb[1]]
@@ -4708,7 +4715,7 @@ class Engine:
                 if now - o["unwanted"] > 600:
                     P["orders"].pop(key, None)
         for a in P["asks"]:                                  # exits: down to a new best ask, never below fill + 0.5c
-            fb = self.feed_book(a["ex"])
+            fb = self.fmm_paper_book(a["ex"])
             if fb is None:
                 continue
             asks_s = fb[1] if a["side"] == "yes" else [(round(1 - p_, 3), q_) for p_, q_ in fb[0]]
@@ -4729,7 +4736,7 @@ class Engine:
         ring = self.fmm_ring(ts)
         floor_ = bots.tick_up(round(px + FMM["exit_c"], 6))
         ask = max(floor_, bots.tick_up(round(px + (FMM["exit_ring_c"] if ring else FMM["exit_c"]), 6)))
-        fb = self.feed_book(ex)
+        fb = self.fmm_paper_book(ex)
         ahead = 0.0
         if fb is not None:
             lv = fb[1] if side == "yes" else [(round(1 - p_, 3), q_) for p_, q_ in fb[0]]
