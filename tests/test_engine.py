@@ -5126,7 +5126,7 @@ class C94Tests(EngineCase):
         self.assertAlmostEqual(eng.rot_reserve(), 1500 * 0.905, places=1, msg="freed cash is reserved for the rotation's bids")
 
     def c95_market(self, eng, fake, ex, fair, book, race, vol=200_000.0):
-        FAIR[ex] = fair; self.addCleanup(FAIR.pop, ex, None)
+        FAIR[ex] = fair; self.addCleanup(FAIR.pop, ex, None); eng.fair[ex] = fair
         fake.px[ex] = eng.px[ex] = book
         eng.meta[ex] = dict(eng.meta.get(ex) or {}, race=race, party="X")
         v = dict(getattr(eng, "_vol48", (0, {}))[1]); v[ex] = vol; eng._vol48 = (time.time() + 1e6, v)
@@ -5251,6 +5251,58 @@ class C94Tests(EngineCase):
         eng.ex.trims["recycle"] += 1                          # a NEW trim after the click: the safety pause still works
         loop(eng, fake)
         self.assertTrue(eng.controls.paused)
+
+    def fmm0_rig(self):
+        fake, eng, favs = self.rig()
+        mk = [b.ex for b in eng.bots if b.kind == "market" and b.ex not in POS and b.ex not in eng.manual_ex and str(b.ex) not in f_engine.dash5.RI_EX][:6]
+        for ex in mk:
+            self.c95_market(eng, fake, ex, 0.95, (0.94, 0.95, 0.945), race=f"far {ex}", vol=0.0)
+        f_engine.ROTATION = dict(a_config.ROTATION, on=True, sells={}, senate_exs=("x842", "x843"))
+        eng.controls.d["layers"].setdefault("rot", dict(state="off", caps={}, killed=None))["state"] = "full"
+        eng.controls.d["rotation"] = dict(since="2026-10-16 15:00:00", sell_left={}, skipped={}, reports={})
+        loop(eng, fake)
+        flows = dict(net=50_000.0, sold={}, cash={}, freed=0.0, exits=0.0, buys=0.0, realized_sales=0.0, realized_exits=0.0)
+        eng.rot_flows = lambda: flows
+        return fake, eng, mk, flows
+
+    def rest_rot(self, eng, oid, ex, px, qty):
+        eng.open.append(dict(id=oid, ex=ex, side="yes", action="buy", price=px, qty=float(qty), status="open", filled=0))
+        eng.ledger.orders[oid] = dict(layer="rot", sub=f"rot:{ex}:yes", ex=ex, side="yes", action="buy", price=px, qty=float(qty), status="open", bot=f"MKT {ex}", filled=0)
+        self.addCleanup(lambda: (eng.open.__setitem__(slice(None), [o for o in eng.open if o["id"] != oid]), eng.ledger.orders.pop(oid, None)))
+
+    def test_fmm0_reserve_guard_pulls_the_newest_bid(self):
+        """fmm_spec §0.1: rotation bids must fit in cash - 5,000 - manual reserve left; the newest are pulled (the one exception to no-churn)."""
+        fake, eng, mk, flows = self.fmm0_rig()
+        a, b = mk[:2]
+        self.c95_market(eng, fake, a, 0.55, (0.49, 0.50, 0.495), race="RA"); self.c95_market(eng, fake, b, 0.55, (0.49, 0.50, 0.495), race="RB")
+        self.rest_rot(eng, "100", a, 0.49, 2000); self.rest_rot(eng, "200", b, 0.49, 2000)     # 980 each; 200 is the newer
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 1_500.0                            # room 1,500: only one fits
+        plan = eng.rot_plan(time.time(), 0)
+        self.assertIn(a, plan); self.assertNotIn(b, plan, "the newest resting bid is pulled")
+        self.assertTrue(any(e["text"].startswith("ROT GUARD") for e in eng.events))
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 5_000.0
+        plan = eng.rot_plan(time.time(), 0)
+        self.assertIn(a, plan); self.assertIn(b, plan, "room for both: nothing pulled")
+
+    def test_fmm0_volume_cap_and_gap_widening_flag(self):
+        """fmm_spec §0.2: a race's rotation position <= 10% of its 48-h shares; §0.3: a lot whose gap widened >= 2c stops the race."""
+        fake, eng, mk, flows = self.fmm0_rig()
+        a, b = mk[:2]
+        self.c95_market(eng, fake, a, 0.55, (0.49, 0.50, 0.495), race="RA", vol=120_000.0)       # 10% = 12,000 shares, under the 8k-at-cost cap (16.3k)
+        plan = eng.rot_plan(time.time(), 0)
+        self.assertEqual(plan[a][0]["qty"], 12_000, "the volume cap binds before the cost cap")
+        self.c95_market(eng, fake, b, 0.55, (0.49, 0.50, 0.495), race="RB", vol=500_000.0)
+        eng.ledger.subbooks[b] = {f"rot:{b}:yes": 1000.0}
+        eng.ledger.tranches[f"rot:{b}:yes"] = dict(ex=b, side="yes", kind="rot", state="open", ts=time.time(), t="x", avg=0.53, qty=1000.0, fair0=0.57)   # gap 4c at entry, now 0.55 - 0.495 = 5.5c: +1.5c
+        self.assertNotIn("RB", eng.rot_widened())
+        eng.ledger.tranches[f"rot:{b}:yes"]["fair0"] = 0.56                                     # gap 3c at entry -> 5.5c now: +2.5c
+        self.assertIn("RB", eng.rot_widened())
+        self.rest_rot(eng, "300", b, 0.49, 1000)
+        plan = eng.rot_plan(time.time(), 0)
+        self.assertNotIn(b, plan, "a widened race gets nothing more (its resting bid is pulled)")
+        self.assertTrue(any(e["text"].startswith("ROT FLAG RB") for e in eng.events))
+        self.assertIn("FLAGGED", eng.rot_report_text(time.time()))
+        eng.ledger.subbooks.pop(b, None); eng.ledger.tranches.pop(f"rot:{b}:yes", None)
 
     def test_rotation_exit_at_max_entry_half_cent_fair_less_1_5c_and_release_exemption(self):
         fake, eng, favs = self.rig()

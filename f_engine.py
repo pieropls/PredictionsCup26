@@ -4044,6 +4044,31 @@ class Engine:
         self.rot_cands = sorted(best.values(), key=lambda r: (r["tier"], -r["pct"]))
         return self.rot_cands
 
+    def engine_bid_room(self):
+        """fmm_spec §0.1: what the engine's resting entry bids (rotation + FMM) may total: cash - the 5,000 floor - the manual reserve left."""
+        return self.engine_cash_now() - CASH_RESERVE
+
+    def rot_widened(self):
+        """fmm_spec §0.3: {race: (gap at entry, gap now)} for rotation lots whose gap to PM fair has widened by >= 2c since entry
+        (mark = SIG mid; no stop-loss — rule 0 holds; the race gets nothing more)."""
+        out = {}
+        for sub, (ex, side, q, avg) in self.rot_lots().items():
+            tr = self.ledger.tranches.get(sub) or {}
+            f0 = tr.get("fair0"); pxs = self.px.get(ex); fs = self.side_fair(ex, side)
+            if f0 is None or fs is None or not pxs or pxs[0] is None or pxs[1] is None:
+                continue
+            mid = (pxs[0] + pxs[1]) / 2; mark = mid if side == "yes" else 1 - mid
+            g0, g1 = float(f0) - avg, fs - mark
+            if g1 - g0 >= float(ROTATION.get("widen_flag_c", 0.02)) - 1e-9:
+                out[self.rot_race(ex)] = (round(g0, 4), round(g1, 4))
+        for race, (g0, g1) in out.items():
+            k_ = (race, "widened")
+            if k_ not in self.rot_logged:
+                self.rot_logged.add(k_)
+                msg = f"ROT FLAG {race}: the gap to PM fair widened from {g0 * 100:.1f}c at entry to {g1 * 100:.1f}c; nothing more is added to this race (no stop-loss: rule 0 holds)"
+                self.event("ROT", msg); self.night.line(msg)
+        return out
+
     def rot_caps(self):
         """(race cost {race: cost}, total cost) of inventory at cost + resting bids."""
         rc = collections.defaultdict(float)
@@ -4075,12 +4100,22 @@ class Engine:
         rc, total = self.rot_caps()
         clip = int(ROTATION["min_clip"])
         skips = self.rot_skips(now)
-        plan, races = {}, set()
+        widened = self.rot_widened()
+        vol = self.rot_vol48(now)
+        race_vol = collections.Counter()
+        for ex_, v_ in vol.items():
+            race_vol[self.rot_race(ex_)] += v_
+        race_sh = collections.Counter()
+        for sub, (ex_, side_, q_, avg_) in self.rot_lots().items():
+            race_sh[self.rot_race(ex_)] += q_
+        for o in self.rot_bids():
+            race_sh[self.rot_race(o["ex"])] += o["qty"]
+        plan, races, ages = {}, set(), []                 # ages: (age key, ex, index in plan[ex], notional) for the reserve guard
         for o in self.rot_bids():
             ex, side = str(o["ex"]), o["side"]
             k = f"{ex}:{side}"
             bid, ask, fs = self.rot_touch(ex, side)
-            if bid is None or fs is None or k in skips:
+            if bid is None or fs is None or k in skips or self.rot_race(ex) in widened:
                 continue
             posted = self.rot_posted.get(k)
             if posted is not None and fs < posted - ROTATION["pm_skip_c"] + 1e-9:
@@ -4099,12 +4134,15 @@ class Engine:
                     pool -= q2 * bid - o["qty"] * o["price"]
                     px, qty = bid, q2
             plan.setdefault(ex, []).append(dict(side=side, px=px, qty=qty, sub=f"rot:{ex}:{side}", ttl=ROT_TTL_S))
+            ages.append((int(o["id"]) if str(o["id"]).isdigit() else 0, ex, len(plan[ex]) - 1, qty * px))
             races.add(self.rot_race(ex))
         for cd in cands:
             race = cd["race"]
-            if race in races or f"{cd['ex']}:{cd['side']}" in skips:
+            if race in races or f"{cd['ex']}:{cd['side']}" in skips or race in widened:
                 continue
             room = min(self.rot_cap(race) - rc[race], float(ROTATION["total_cap"]) - total)
+            sh_room = float(ROTATION.get("vol_cap_share", 0.10)) * race_vol.get(race, 0.0) - race_sh[race]   # fmm_spec §0.2: <= 10% of the race's 48-h shares
+            room = min(room, max(0.0, sh_room) * cd["px"])
             if room < clip * cd["px"]:
                 continue                                    # this race (or the whole book) is full
             if pool < clip * cd["px"]:
@@ -4121,7 +4159,38 @@ class Engine:
             if not quiet:
                 self.event("ROT", msg); self.night.line(msg)
             plan.setdefault(cd["ex"], []).append(dict(side=cd["side"], px=cd["px"], qty=qty, sub=f"rot:{cd['ex']}:{cd['side']}", ttl=ROT_TTL_S))
-        return plan
+            ages.append((10 ** 18, cd["ex"], len(plan[cd["ex"]]) - 1, qty * cd["px"]))   # a new bid is the newest
+            race_sh[race] += qty
+        return self.rot_reserve_guard(plan, ages)
+
+    def rot_reserve_guard(self, plan, ages):
+        """fmm_spec §0.1 (the only exception to no-churn): every loop the rotation's (+ FMM's) resting and new bids must fit in
+        cash - 5,000 - the manual reserve left; if they don't, the newest are pulled until they do."""
+        room = self.engine_bid_room() - self.fmm_bid_notional()
+        total = sum(a[3] for a in ages)
+        if total <= room + 1e-6:
+            return plan
+        drop = set()
+        for age, ex, i, notional in sorted(ages, key=lambda a: -a[0]):
+            if total <= room + 1e-6:
+                break
+            drop.add((ex, i)); total -= notional
+        out = {}
+        for ex, ws in plan.items():
+            keep = [w for i, w in enumerate(ws) if (ex, i) not in drop]
+            if keep:
+                out[ex] = keep
+        k_ = ("guard", round(room, -2))
+        if k_ not in self.rot_logged:
+            self.rot_logged.add(k_)
+            msg = (f"ROT GUARD: rotation bids pulled to fit the room (cash - 5,000 - manual reserve left = {room + self.fmm_bid_notional():,.0f}, FMM bids {self.fmm_bid_notional():,.0f}): "
+                   + ", ".join(f"{self.name(ex)} #{i}" for ex, i in sorted(drop)))
+            self.event("ROT", msg); self.night.line(msg)
+        return out
+
+    def fmm_bid_notional(self):
+        """Resting FMM entry bids (notional); 0 until the FMM layer is built."""
+        return sum(o["qty"] * o["price"] for o in self.open if o["action"] == "buy" and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "fmm")
 
     def track_rot(self, now):
         """C95 item 5: each rotation lot rests an ask at max(entry + 0.5c, PM fair - 1.5c) (GTC); it sells at the touch instead (a swap)
@@ -4244,10 +4313,12 @@ class Engine:
         cash = (a.get("totalAccountValue") or 0) - (a.get("totalHoldingsValue") or 0)
         fund = "; ".join(f"{self.name(ex)} {int(fl['sold'].get(str(ex), 0)):,}/{int(v):,}" for ex, v in sells.items())
         lots = "; ".join(f"{n} {sd.upper()} {q:,.0f} @ {e:.3f} / {m:.3f} / {f_:.3f}" + ("" if c_ is None else f" ({c_:.0%} closed)") + f" {pb:+,.0f} / {pf:+,.0f}" for n, sd, q, e, m, f_, c_, pb, pf in rows)
+        wid = self.rot_widened()
+        flag = ("" if not wid else " FLAGGED (gap widened >= 2c, no more adds): " + "; ".join(f"{r} {g0 * 100:.1f}c -> {g1 * 100:.1f}c" for r, (g0, g1) in wid.items()) + ".")
         rk = "rank n/a" if rank is None else (f"rank {rank} of {total}" + ("" if ours is None or r100 is None else f", P&L {ours:+,.0f} vs #100 {r100:+,.0f} ({ours - r100:+,.0f})"))
         return (f"ROT REPORT {slot} (Piero 15:05 Oct 16 item 6): FUNDING sold {sum(fl['sold'].values()):,.0f} of {sum(int(v) for v in sells.values()):,} shares, cash {fl['freed']:,.0f} "
                 f"(realized {fl['realized_sales']:+,.0f} vs lot avg) — {fund}. LOTS {len(rows)} (entry / mark / fair, gap closed, board / fair): {lots or 'none'}. "
-                f"OPEN {sum(r[7] for r in rows):+,.0f} on the board / {sum(r[8] for r in rows):+,.0f} at fair; REALIZED exits {fl['realized_exits']:+,.0f}; buys {fl['buys']:,.0f}, exits {fl['exits']:,.0f}. "
+                f"OPEN {sum(r[7] for r in rows):+,.0f} on the board / {sum(r[8] for r in rows):+,.0f} at fair; REALIZED exits {fl['realized_exits']:+,.0f}; buys {fl['buys']:,.0f}, exits {fl['exits']:,.0f}.{flag} "
                 f"CASH {cash:,.0f}, manual reserve left {self.manual_reserve_left():,.0f}, engine free {self.engine_cash_now() - CASH_RESERVE:,.0f}, pool {self.rot_reserve():,.0f}. {rk}.")
 
     def c95_migration(self, now):

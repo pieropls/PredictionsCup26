@@ -497,5 +497,6 @@ ROTATION = dict(on=True, gap_min=0.04, gap_ext=0.03, keep_gap=0.03, pm_skip_c=0.
                        "1052": 1167,    # Tennessee Senate R YES
                        "965": 776},     # Montana Senate I NO
                 sell_all_subs=("1074",),
+                vol_cap_share=0.10, widen_flag_c=0.02,   # fmm_spec §0.2 / §0.3 (Oct 16 18:20)
                 buys=[])                # C95: the buy list is the live coin-flip universe (rot_candidates), not a fixed list
 ROT_TTL_S = 24 * 3600
