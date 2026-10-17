@@ -429,6 +429,8 @@ class MarketBot:
         # FMM (fmm_spec): favourite-side bids at the touch and below (GTC), hedge bids on the other book's NO, exits at fill + 1c / + 2c
         out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], QTY_TOL, x.get("layer") or "fmm", sub=x["sub"], ttl=x.get("ttl") or 86400)
                 for x in (s.get("fmm") or [])]
+        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], QTY_TOL, "carry", sub=x["sub"], ttl=x.get("ttl") or 86400)   # C98 alpha_spec §2: carry bids (held)
+                for x in (s.get("carry") or [])]
         for x in s.get("fmm_exits") or []:
             q = abs(subs.get(x["sub"], 0))
             if q >= MIN_QTY:

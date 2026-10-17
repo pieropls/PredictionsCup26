@@ -526,3 +526,7 @@ ALLOC = dict(on=True, since="2026-10-17 15:55:00",
 FUND = dict(on=True, since="2026-10-17 15:55:00",  # item 1: GTC asks at max(lot avg + 0.5c, touch), place kept, core lots included; the cash is not the rotation's
             sells={"1075": 1_000_000, "1072": 3_904, "986": 2_172, "980": 2_000, "964": 2_008, "1045": 1_355, "894": 974, "896": 1_030},
             sell_all_subs=("1075",))           # Delaware Senate R NO: every lot (its reservoir is retired, swing sub included)
+# ---- C98 (alpha_spec §2, Piero 16:35 Oct 17): the CARRY book — the favourites in the holdings bucket, held to settlement (no +0.5c exits),
+# rebalanced every 30 min: sell EV/$ held <= 6.5% (rule 0 holds), buy resting bids on EV/$ >= 11% favourites
+CARRY = dict(on=True, sell_ev=0.065, buy_ev=0.11, min_daily=150_000, fav_min=0.75, below_fair=0.05, race_cap=12_000.0,
+             race_caps={"Rhode Island Senate": 30_000.0}, swap_pts=0.04, refresh_s=1800, min_clip=500, ttl=86400)

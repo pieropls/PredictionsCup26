@@ -73,7 +73,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, CASH_FLOOR_RESUME, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
-                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND,
+                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -140,7 +140,7 @@ def host_id():
 
 # ====================================================================================================== controls
 STARTUP_HOLD_S = 120          # optional reads (sampler, depth, fat-finger queues) wait 2 min after a start: every restart's burst gave a 429 (Oct 8)
-LAYERS = ["position", "recycler", "release", "mm", "scalp", "tm", "sm", "rot", "fmm", "touch", "wall", "sleeve", "swing", "fm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
+LAYERS = ["position", "recycler", "release", "mm", "scalp", "tm", "sm", "rot", "fmm", "carry", "touch", "wall", "sleeve", "swing", "fm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders"]
 TMM_ENABLED = True              # afternoon D-C: the engine's MM is the turnover MM (False: classic MM v2, tests only)
 LAYER_STATES = ("off", "pilot", "full")
 
@@ -428,6 +428,7 @@ class Engine:
         self.fmm_paper = dict(orders={}, asks=[], lots=[], realized=0.0, fills=0, rt=0, takes=0, locks=[], saved_t=0.0)
         self.fmm_unread, self.fmm_noops, self.fmm_cov = [], [], {}           # v2 §2.5: buys not yet in a cash read; SIG no-op buys; coverage
         self.fmm_cash_seen, self.rot_seen_fills = set(), set()               # each fill once (the loop re-hands an order's earlier fills)
+        self.carry_now, self.carry_sell, self.carry_t, self.carry_seen, self.carry_view = {}, {}, 0.0, set(), {}   # C98: the carry book
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
@@ -597,7 +598,7 @@ class Engine:
     MARKET_LAYERS = {"exit": "recycler", "recycle": "recycler", "take": "sniper", "mm": "mm",   # "touch" is the day-6 layer (the old MM touch quote is gone)
                      "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs",
                      "release": "release", "fatfinger": "fatfinger", "dump": "dump", "dumpexit": "dump",
-                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall", "sleeve": "sleeve", "swing": "swing", "swingsell": "swing", "fm": "fm", "fmexit": "fm", "tm": "tm", "tmexit": "tm", "rot": "rot", "rotexit": "rot", "fmm": "fmm", "fmmtake": "fmm", "fmmexit": "fmm", "fmmhedge": "fmm", "sm": "sm", "smexit": "sm"}
+                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall", "sleeve": "sleeve", "swing": "swing", "swingsell": "swing", "fm": "fm", "fmexit": "fm", "tm": "tm", "tmexit": "tm", "rot": "rot", "rotexit": "rot", "fmm": "fmm", "fmmtake": "fmm", "fmmexit": "fmm", "fmmhedge": "fmm", "carry": "carry", "sm": "sm", "smexit": "sm"}
     REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit", "touchexit", "wallexit", "tmexit", "fmexit", "swingsell", "smexit", "rotexit", "fmmexit"}
 
     def gate(self, b, wants):
@@ -783,6 +784,7 @@ class Engine:
                         self.event("RELEASE", msg); self.night.line(msg)
                 self.rot_fill_events(new_f)
                 self.fmm_fill_events(new_f)
+                self.carry_fill_events(new_f)
                 self.sleeve_fill_events(new_f)
                 self.swing_fill_events(new_f)
                 self.rule0_fill_check(new_f)
@@ -916,6 +918,10 @@ class Engine:
             self.sm_now = self.sm_plan(now, cash)          # turnover_plan §1: the spread maker
             self.rot_now = self.rot_plan(now, cash)        # C94: the coin-flip rotation's bids (funded by its own sales only)
             try:
+                self.c98_migration(now)                    # once, with positions and fair in
+            except Exception as err:
+                self.event("ERR", f"C98 migration: {err!r}")
+            try:
                 self.fmm_gate(now)                         # fmm_spec §3.3 every loop: paper -> live by its gates, the step-up, the stop
             except Exception as err:
                 self.event("ERR", f"FMM gate: {err!r}")
@@ -924,6 +930,11 @@ class Engine:
             except Exception as err:
                 self.fmm_now = {}
                 self.event("ERR", f"FMM plan: {err!r}")
+            try:
+                self.carry_now = self.carry_plan(now)      # C98 alpha_spec §2: the carry book's bids (held to settlement)
+            except Exception as err:
+                self.carry_now = {}
+                self.event("ERR", f"carry plan: {err!r}")
             self.scalp_now = self.scalp_plan(now, cash, used)
         except Exception as err:
             self.scalp_now = {}
@@ -994,7 +1005,7 @@ class Engine:
                     if oid not in open_ids:
                         self.drift_since.pop(oid, None)
             for w in (wants if GTC_TTL_S else ()):          # C93 item 3: GTC — every seller, exit and TM / SM quote rests until re-pegged
-                if w.get("reduce") or w.get("layer") in ("tm", "sm", "release", "rot", "fmm", "fmmhedge"):   # (not fmmtake: a sweep take keeps its 120 s)
+                if w.get("reduce") or w.get("layer") in ("tm", "sm", "release", "rot", "fmm", "fmmhedge", "carry"):   # (not fmmtake: a sweep take keeps its 120 s)
                     w["ttl"] = GTC_TTL_S
             kept, cancels, places = bots.reconcile(wants, mine.get(b.name, []))
             cancels, places = self.repeg_grace(b, cancels, places, now)
@@ -1582,7 +1593,7 @@ class Engine:
                     wall=self.wall_now.get(b.ex) or [], wall_exits=self.wall_view.get(b.ex, []), sleeve=self.sleeve_now.get(b.ex) or [], swing=self.swing_now.get(b.ex) or {}, fm=self.fm_now.get(b.ex) or [],
                     tm=self.tm_now.get(b.ex) or [], tm_exits=self.tm_view.get(b.ex, []), sm=self.sm_now.get(b.ex) or [],
                     rot=self.rot_now.get(b.ex) or [], rot_exits=self.rot_view.get(b.ex, []),
-                    fmm=self.fmm_now.get(b.ex) or [], fmm_exits=self.fmm_view.get(b.ex, []),
+                    fmm=self.fmm_now.get(b.ex) or [], fmm_exits=self.fmm_view.get(b.ex, []), carry=self.carry_now.get(b.ex) or [],
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
                     room={sd: max(0.0, MARKET_MAX_POS - held[sd]) for sd in ("yes", "no")},
@@ -2702,7 +2713,7 @@ class Engine:
                 continue
             books = self.ledger.subbooks.get(e, {})
             for sub, q in books.items():
-                if abs(q) < 1 or sub.startswith(("fmm:", "fmmlock:")) or (not senate and (sub == "manual" or (ri and not sub.startswith(("dump:", "touch:", "scalp:", "sniper"))))):
+                if abs(q) < 1 or sub.startswith(("fmm:", "fmmlock:", "carry:")) or (not senate and (sub == "manual" or (ri and not sub.startswith(("dump:", "touch:", "scalp:", "sniper"))))):
                     continue                                # Piero 21:15 item 2: FMM lots are outside the RI cap
                 sd = "yes" if q > 0 else "no"
                 avg = (self.ledger.tranches.get(sub) or {}).get("avg") or ((self.book.get(e) or {}).get("row") or {}).get("avgCost") or self.sig_mark(e, sd) or 0.0
@@ -2953,7 +2964,7 @@ class Engine:
         # Day 9 §2-§3: the budget is k x free cash above the floor (minus Piero's walls); levels are allocated resting-first
         # (hysteresis: a resting level loses its slot only when the resting set alone no longer fits), L0 first within its
         # 8k cap (held + resting), then by expected edge = (fair - price) x reach / weight.
-        budget = max(0.0, self.entry_budget(cash) - self.wall_resting() - self.fm_reserve() - self.tm_reserve() - self.sm_reserve() - self.reservoir_resting() - self.h1_sleeve_reserve(now))   # C93 item 4: the H1 sleeve ahead of the catcher; C95: the rotation's cash and the manual reserve are already off `cash`   # C84c: the reservoir's rebuys come first   # C70: Piero's walls, (C81b) the FM's cap and (C83) the TM's cap come off the top (weight 1.0)
+        budget = max(0.0, self.entry_budget(cash) - self.wall_resting() - self.fm_reserve() - self.tm_reserve() - self.sm_reserve() - self.reservoir_resting() - self.h1_sleeve_reserve(now) - self.carry_bid_notional())   # C93 item 4: the H1 sleeve ahead of the catcher; C95: the rotation's cash and the manual reserve are already off `cash`   # C84c: the reservoir's rebuys come first   # C70: Piero's walls, (C81b) the FM's cap and (C83) the TM's cap come off the top (weight 1.0)
         if ALLOC.get("on"):
             budget = min(budget, max(0.0, float(ALLOC["catcher_slice"]) - self.catcher_new_cost()))   # C97 item 4a: a fixed 10k slice (new lots at cost + resting levels)
         out, cut, spent = self.allocate_levels(rows, budget, float(DUMP_L0_BUDGET) if DUMP_L0_CAP_RESTING else max(0.0, DUMP_L0_BUDGET - self.l0_held()))   # fix #1: the L0 rows themselves (resting + new) fit the cap
@@ -3005,7 +3016,7 @@ class Engine:
             if m.get("race") not in RI_RACES:
                 continue
             for sub, q in self.ledger.subbooks.get(e, {}).items():
-                if abs(q) < 1 or sub == "manual" or sub.startswith(("fmm:", "fmmlock:")):
+                if abs(q) < 1 or sub == "manual" or sub.startswith(("fmm:", "fmmlock:", "carry:")):
                     continue                                # Piero 21:15 item 2: FMM lots are outside the RI cap
                 sd = "yes" if q > 0 else "no"
                 avg = (self.ledger.tranches.get(sub) or {}).get("avg") or ((self.book.get(e) or {}).get("row") or {}).get("avgCost") or self.sig_mark(e, sd) or 0.0
@@ -3744,6 +3755,11 @@ class Engine:
             if ROTATION.get("on") and (self.controls.d.get("rotation") or {}).get("since"):
                 self.night.line(self.rot_status(now))      # C94: the hourly rotation line
             try:
+                if CARRY.get("on") and (self.controls.d.get("c98") or {}).get("done"):
+                    self.night.line(self.carry_status())   # alpha_spec §2 / §6: the carry book's EV/$ hourly
+            except Exception as err:
+                self.event("ERR", f"carry status: {err!r}")
+            try:
                 if self.fmm_mode(now) in ("paper", "live", "stopped"):
                     self.night.line(self.fmm_status(now))  # fmm_spec §4: the hourly FMM line
             except Exception as err:
@@ -4399,14 +4415,14 @@ class Engine:
     def fmm_lock_capital(self):
         """Cash in FMM locks: pair sets (a NO set costs 1 - margin a share) and hedge-made locks (shares - profit locked)."""
         st = (self.fmm_state().get("live") or {})
-        sets = sum(bk["qty"] * (1 - bk["margin"]) for bk in self.ledger.baskets if bk.get("fmm") and bk.get("state", "held") == "held")
+        sets = sum(bk["qty"] * float(bk.get("cost") or (1 - bk["margin"])) for bk in self.ledger.baskets if bk.get("fmm") and bk.get("state", "held") == "held")
         return sets + max(0.0, float(st.get("locks_sh") or 0) - float(st.get("locks_profit") or 0))
 
     def fmm_lock_room(self):
         """Piero 21:15 item 1: new two-book locks take only cash FMM isn't using — free less the guard's need (the two largest race ladders
         resting) and the resting hedges — and at most 30% of engine free cash (free before the locks) in all."""
         free = self.fmm_free()
-        sets = sum(bk["qty"] * (1 - bk["margin"]) for bk in self.ledger.baskets if bk.get("fmm") and bk.get("state", "held") == "held")
+        sets = sum(bk["qty"] * float(bk.get("cost") or (1 - bk["margin"])) for bk in self.ledger.baskets if bk.get("fmm") and bk.get("state", "held") == "held")
         by_race, hedge = collections.Counter(), 0.0
         if ALLOC.get("on"):                                  # C97 item 4b: every lock <= 10k at cost in all, only from idle cash (above FMM's first 10k and its ladders' need)
             for o in self.fmm_bids():
@@ -4414,7 +4430,7 @@ class Engine:
                     hedge += o["qty"] * o["price"]
                 else:
                     by_race[self.rot_race(o["ex"])] += o["qty"] * o["price"]
-            need = sum(sorted(by_race.values(), reverse=True)[:2]) + hedge
+            need = sum(sorted(by_race.values(), reverse=True)[:2]) + hedge + self.carry_bid_notional()   # alpha_spec §4: after FMM's and carry's bids
             idle = free - min(max(0.0, free), float(ALLOC["fmm_priority_free"])) - need
             return max(0.0, min(idle, float(ALLOC["lock_cap"]) - self.fmm_lock_capital()))
         for o in self.fmm_bids():
@@ -4974,8 +4990,15 @@ class Engine:
         if big:
             why = why or f"race cap broken: {big[0]} {by_race[big[0]]:,.0f} at cost > {self.fmm_race_cap(big[0]):,.0f}"
         raw = min(self.cash_raw_hist) if getattr(self, "cash_raw_hist", None) else None
-        if raw is not None and raw < CASH_RESERVE - 1e-6 and self.fmm_unread_since_live():
-            why = why or f"cash {raw:,.0f} under the {CASH_RESERVE:,} floor after FMM fills"
+        if raw is not None and raw < CASH_RESERVE - 1e-6:
+            fmm_spent = sum(f["qty"] * f["price"] for f in self.ledger.fills[-400:] if f.get("layer") in ("fmm", "fmmtake", "fmmhedge")
+                            and str(f.get("t", "")) >= time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 900)))
+            if raw + fmm_spent >= CASH_RESERVE:              # FMM's own fills of the last 15 min took cash under the floor
+                why = why or f"cash {raw:,.0f} under the {CASH_RESERVE:,} floor after FMM fills ({fmm_spent:,.0f} in 15 min)"
+            elif ("floor-other", int(now // 3600)) not in self.fmm_logged:
+                self.fmm_logged.add(("floor-other", int(now // 3600)))   # Piero's AZ-06 buy, Oct 17 15:54: not FMM's — the engine's cash-floor pause handles it
+                msg = f"FMM: cash {raw:,.0f} under the {CASH_RESERVE:,} floor, not from FMM's fills ({fmm_spent:,.0f} in 15 min): FMM keeps its quotes (the fill guard sizes them to free cash); the cash-floor pause handles new risk"
+                self.event("FMM", msg); self.night.line(msg)
         if why:
             with c.lock:
                 st["stopped"] = dict(t=stamp(), why=why); c.save()
@@ -5178,7 +5201,8 @@ class Engine:
                 f"OPEN {sum(r[7] for r in rows):+,.0f} on the board / {sum(r[8] for r in rows):+,.0f} at fair; REALIZED exits {fl['realized_exits']:+,.0f}; buys {fl['buys']:,.0f}, exits {fl['exits']:,.0f}.{flag} "
                 f"CASH {cash:,.0f}, manual reserve left {self.manual_reserve_left():,.0f}, engine free {self.engine_cash_now() - CASH_RESERVE:,.0f}, pool {self.rot_reserve():,.0f}. {rk}."
                 + ("" if self.fmm_mode(now) == "off" else " " + self.fmm_status(now))
-                + (" " + self.alloc_line(now) if ALLOC.get("on") else ""))
+                + (" " + self.alloc_line(now) if ALLOC.get("on") else "")
+                + (" " + self.carry_status() if CARRY.get("on") and (self.controls.d.get("c98") or {}).get("done") else ""))
 
     def alloc_line(self, now):
         """C97 item 7: the allocation by bucket (at cost; holdings at SIG's marks), FMM realized and at fair, the fund sale, rank vs #100."""
@@ -8602,7 +8626,11 @@ class Engine:
                     self.event("RELEASE", f"LOT AVG CHECK {self.name(ex)} {side.upper()} {abs(v):,.0f} ({sub}): the ledger's lots average {float(avg):.3f}, SIG's position average {sig_avg:.3f} "
                                           f"(SIG averages every buy and lets a sale reduce the quantity at that average; the lots are what rule 0 holds): the ask floors at {float(avg) + RULE0_MARGIN:.3f}")
                 floor_ = bots.tick_up(round(float(avg) + RULE0_MARGIN, 6))
-                if str(ex) in fund_left:
+                if sub.startswith("carry:"):
+                    if str(ex) not in self.carry_sell:
+                        continue                            # C98: a carry lot is held to settlement unless the carry rule sells it
+                    px, reason = max(ask, floor_), "carry sale"
+                elif str(ex) in fund_left:
                     if sub.startswith("rot:"):
                         continue                            # C97 item 1: rotation lots are not the fund's
                     px, reason = max(ask, floor_), "fund sale"   # C97 item 1 (Piero 15:55 Oct 17): every lot that clears rule 0, core included
@@ -9736,7 +9764,7 @@ class Engine:
         for pb in self.pairs:
             if not all(self.controls.allows(ex, "pairs") for ex in pb.legs):
                 continue
-            for e_, side in pb.screen(self.px, self.fair, min(PAIR_EDGE, 1 - FMM["lock_cost"]) if fmm_live else PAIR_EDGE, PAIR_THIRD_PARTY):
+            for e_, side in pb.screen(self.px, self.fair, PAIR_EDGE, PAIR_THIRD_PARTY):
                 if now - pb.last_shot >= PAIR_COOLDOWN_S and not any(self.ex.is_frozen(ex) for ex in pb.legs):
                     cands.append((e_, side, pb))
         h4_budget = self.h4_budget(now) if self.h4_active() and not fmm_live else 0.0
@@ -9744,10 +9772,10 @@ class Engine:
         for e_, side, pb in sorted(cands, key=lambda c: -c[0]):
             if shots >= PAIR_MAX_SHOTS or self.ex.admit() < 2 or not api.spare_reads(20):
                 break
-            fmm_set = fmm_live and side == "no" and self.h4_race_ok(pb) and e_ >= 1 - FMM["lock_cost"] - 1e-9 and fmm_room > 0
+            fmm_set = False                                 # alpha_spec §4: FMM's NO sets go through fmm_nsets (every book of a race)
             h4_set = not fmm_live and self.h4_active() and side == "no" and self.h4_race_ok(pb) and e_ >= H4["edge"] - 1e-9 and h4_budget > 0
-            if fmm_live and e_ < PAIR_EDGE - 1e-9 and not fmm_set:
-                continue                                    # screened at the lock's 1c only for an FMM lock
+            if fmm_live and side == "no":
+                continue
             pb.last_shot = now
             books, key = {}, "bids" if side == "no" else "asks"
             try:                                                                # a bad read skips this pair, not the loop
@@ -9817,7 +9845,304 @@ class Engine:
                            f"(walked, atomic) -> +{qty * margin:,.0f} at settlement, held; cost {cost:,.0f} (inside cash, outside the inventory cap)")
                     self.event("FMM", msg); self.night.line(msg)
                     self.fmm_guard(now, "lock")
+        if fmm_live:
+            shots += self.fmm_nsets(now, own)
         return shots, start - budget
+
+    # ------------------------------------------------------------------ C98: the CARRY book (alpha_spec §2, Piero 16:35 Oct 17)
+    def carry_lots(self):
+        """{sub: (ex, side, shares, avg)} of the carry book ('carry:<ex>:<side>')."""
+        out = {}
+        for ex, books in list(self.ledger.subbooks.items()):
+            for sub, q in list(books.items()):
+                if sub.startswith("carry:") and abs(q) >= 1:
+                    side = "yes" if q > 0 else "no"
+                    avg = float((self.ledger.tranches.get(sub) or {}).get("avg") or 0) or float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0) or float(self.sig_mark(ex, side) or 0.5)
+                    out[sub] = (str(ex), side, abs(q), avg)
+        return out
+
+    def carry_bid_notional(self):
+        return sum(o["qty"] * o["price"] for o in self.open if o["action"] == "buy" and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "carry")
+
+    def carry_cap(self, race):
+        return float((CARRY.get("race_caps") or {}).get(race, CARRY["race_cap"]))
+
+    def carry_ev_held(self, ex, side):
+        """EV/$ held at the exit bid: side fair / side bid - 1 (None without a bid or a fair)."""
+        bid = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
+        fs = self.side_fair(ex, side)
+        return None if not bid or fs is None else fs / bid - 1
+
+    def carry_candidates(self, now):
+        """Favourite sides (fair >= 0.75) with >= 150k shares a day where a bid at the touch, <= fair - 5c, earns EV/$ >= 11%."""
+        vol = self.rot_vol48(now)
+        hand = {str(o["ex"]) for o in self.open if not self.ex.owned(o["id"])}
+        out = []
+        for ex, b in self.owner.items():
+            ex = str(ex)
+            if b.kind != "market" or ex in self.manual_ex or ex in hand or self.ex.is_frozen(ex):
+                continue
+            f = self.fair.get(ex)
+            if f is None or vol.get(ex, 0.0) / 2 < CARRY["min_daily"]:
+                continue
+            side = "yes" if f >= CARRY["fav_min"] else "no" if f <= 1 - CARRY["fav_min"] else None
+            if side is None:
+                continue
+            pos_ = float((self.book.get(ex) or {}).get("pos") or 0)
+            if (side == "yes" and pos_ <= -1) or (side == "no" and pos_ >= 1):
+                continue                                     # C95f: never net against a held other side
+            bid, ask, fs = self.rot_touch(ex, side)
+            if bid is None or fs is None:
+                continue
+            px = bots.tick_down(min(bid, fs - CARRY["below_fair"]))
+            if px < 0.01:
+                continue
+            ev = fs / px - 1
+            if ev < CARRY["buy_ev"] - 1e-9:
+                continue
+            out.append(dict(ex=ex, side=side, px=px, fs=fs, ev=ev, race=self.rot_race(ex)))
+        return sorted(out, key=lambda c: -c["ev"])
+
+    def carry_refresh(self, now, cands):
+        """Every 30 min: the carry lots to sell — EV/$ held <= 6.5% (at max(lot avg + 0.5c, best ask): rule 0 holds), and, when cash is
+        short, the swap rule: a lot >= 4 points of EV/$ under a waiting buy."""
+        if now - self.carry_t < CARRY["refresh_s"] and self.carry_t:
+            return
+        self.carry_t = now
+        sell = {}
+        lots = []
+        for sub, (ex, side, q, avg) in self.carry_lots().items():
+            ev = self.carry_ev_held(ex, side)
+            if ev is None:
+                continue
+            lots.append((ev, ex, side, q, avg))
+            if ev <= CARRY["sell_ev"] + 1e-9:
+                sell[ex] = f"EV/$ held {ev * 100:.1f}% <= {CARRY['sell_ev'] * 100:.1f}%"
+        room = self.carry_room()
+        if cands and room < CARRY["min_clip"] * cands[0]["px"]:
+            best = cands[0]["ev"]
+            for ev, ex, side, q, avg in sorted(lots):
+                if ex not in sell and best >= ev + CARRY["swap_pts"] - 1e-9:
+                    sell[ex] = f"swap: {self.name(cands[0]['ex'])} {cands[0]['side'].upper()} {best * 100:.1f}% waits, this lot {ev * 100:.1f}%"
+                    break
+        new = {ex: why for ex, why in sell.items() if ex not in self.carry_sell}
+        self.carry_sell = sell
+        for ex, why in new.items():
+            msg = f"CARRY SELL {self.name(ex)}: {why}; GTC ask at max(lot avg + 0.5c, best ask)"
+            self.event("CARRY", msg); self.night.line(msg)
+
+    def carry_room(self):
+        """Cash for new carry bids: the other layers' free cash (after FMM's first 10k) less every resting engine entry bid but FMM's."""
+        committed = sum(o["qty"] * o["price"] for o in self.open if o["action"] == "buy" and (self.ledger.orders.get(o["id"]) or {}).get("layer") not in self.REDUCING
+                        and (self.ledger.orders.get(o["id"]) or {}).get("layer") not in self.FMM_LAYERS and self.ex.owned(o["id"]))
+        return max(0.0, self.free_cash() - committed)
+
+    def carry_plan(self, now):
+        """{ex: [want-spec]}: one resting bid per candidate book at the touch (<= fair - 5c), sized to the race cap (12k at cost; RI Senate
+        30k) and the cash left; a resting bid keeps its place and size."""
+        if not CARRY.get("on") or self.controls.state("carry") == "off" or self.controls.paused or self.fills_blind:
+            return {}
+        cands = self.carry_candidates(now)
+        self.carry_refresh(now, cands)
+        race_cost = collections.Counter()
+        for sub, (ex, side, q, avg) in self.carry_lots().items():
+            race_cost[self.rot_race(ex)] += q * avg
+        resting = {}
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"]) or {}
+            if o["action"] == "buy" and rec.get("layer") == "carry":
+                resting[(str(o["ex"]), o["side"])] = (round(o["price"], 3), o["qty"])
+                race_cost[self.rot_race(o["ex"])] += o["qty"] * o["price"]
+        room = self.carry_room()
+        plan = {}
+        for c in cands:
+            ex, side, px = c["ex"], c["side"], c["px"]
+            own = self.own_ask(ex, side)
+            if own is not None and px >= own - 1e-9:
+                continue                                     # no self-trade
+            have = resting.get((ex, side))
+            if have and abs(have[0] - px) < 1e-9:
+                q = int(have[1])                            # keeps its place and size
+            else:
+                cap_left = self.carry_cap(c["race"]) - race_cost[c["race"]] + (have[0] * have[1] if have else 0.0)
+                q = int(min(cap_left, room) / px)
+                if q < CARRY["min_clip"]:
+                    continue
+                room -= q * px; race_cost[c["race"]] += q * px
+            plan.setdefault(ex, []).append(dict(side=side, px=px, qty=q, sub=f"carry:{ex}:{side}", ttl=CARRY["ttl"]))
+        self.carry_view = dict(cands=len(cands), bids=sum(len(v) for v in plan.values()), sell=dict(self.carry_sell))
+        return plan
+
+    def carry_fill_events(self, fills):
+        """Carry fills: the lot's average (tranche), FILLED lines; each fill once."""
+        for f in fills:
+            if f.get("layer") != "carry":
+                continue
+            k = self.fill_key(f)
+            if k in self.carry_seen:
+                continue
+            self.carry_seen.add(k)
+            ex = str(f["ex"]); sub = (self.ledger.orders.get(str(f.get("order") or "")) or {}).get("sub") or f"carry:{ex}:{f['side']}"
+            tr = self.ledger.tranches.get(sub)
+            if tr is None or tr.get("state") != "open":
+                tr = self.ledger.tranches[sub] = dict(ex=ex, side=f["side"], kind="carry", t=stamp(), ts=time.time(), state="open", avg=f["price"], qty=0.0)
+            qa = float(tr.get("qty") or 0.0)
+            tr["avg"] = round((float(tr["avg"]) * qa + f["price"] * f["qty"]) / (qa + f["qty"]), 5) if qa + f["qty"] > 0 else f["price"]
+            tr["qty"] = qa + f["qty"]
+            fs = self.side_fair(ex, f["side"])
+            msg = f"CARRY FILL {self.name(ex)} {f['side'].upper()} {f['qty']:,.0f} at {f['price']:.3f}" + ("" if fs is None else f" (fair {fs:.3f}, EV/$ {fs / f['price'] - 1:.1%})") + "; held to settlement"
+            self.event("CARRY", msg); self.night.line(msg)
+        if len(self.carry_seen) > 5000:
+            self.carry_seen = set(list(self.carry_seen)[-2000:])
+
+    def carry_status(self):
+        lots = self.carry_lots()
+        cost = sum(q * avg for ex, side, q, avg in lots.values())
+        ev = sum(q * ((self.side_fair(ex, side) or avg) - avg) for ex, side, q, avg in lots.values())
+        bids = [o for o in self.open if o["action"] == "buy" and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "carry"]
+        return (f"CARRY {len(lots)} lots, cost {cost:,.0f}, EV to settlement {ev:+,.0f} = {ev / cost * 100 if cost else 0:.1f}% per $ (target >= 11% by Tue); "
+                f"bids resting {len(bids)} / {sum(o['qty'] * o['price'] for o in bids):,.0f}; selling {len(self.carry_sell)} ({', '.join(self.name(ex) for ex in list(self.carry_sell)[:6])})")
+
+    def c98_migration(self, now):
+        """Once (C98, alpha_spec §2): the favourites in the holdings bucket move to the carry book (held to settlement): not rotation, FMM, lock,
+        pair-set or manual lots, not the fund sale's markets, not RI Senate R NO, not the catcher's lots since the allocation. A resting exit of
+        a moved sub-book is re-pointed at the carry sub-book (its fill books there) and the planner then cancels it."""
+        c = self.controls
+        if (c.d.get("c98") or {}).get("done") or not CARRY.get("on") or not self.book:
+            return
+        fund_ex = {str(k) for k, v in (((c.d.get("fund") or {}).get("sell_left")) or {}).items() if int(v) >= MIN_QTY}
+        moved, total = [], 0.0
+        for ex, books in list(self.ledger.subbooks.items()):
+            ex = str(ex)
+            if ex in fund_ex or ex in dash5.RI_EX or ex in self.manual_ex or ex not in self.owner or self.owner[ex].kind != "market":
+                continue
+            if abs(float(books.get("manual", 0.0))) >= 1:
+                continue                                     # Piero trades this market by hand (AZ-06, Oct 17 15:54): the engine leaves it alone
+            pos_ = float((self.book.get(ex) or {}).get("pos") or 0)
+            for sub, q in list(books.items()):
+                if abs(q) < 1 or sub == "manual" or sub.startswith(("rot:", "fmm:", "fmmlock:", "pairset:", "carry:")) or q * pos_ <= 0:
+                    continue                                 # only lots on the side SIG holds (an offset sub-book is not a holding)
+                side = "yes" if q > 0 else "no"
+                fs = self.side_fair(ex, side)
+                if fs is None or fs < CARRY["fav_min"] - 1e-9:
+                    continue
+                t = self.ledger.tranches.get(sub) or {}
+                if sub.startswith("dump:") and str(t.get("t") or "") >= ALLOC["since"]:
+                    continue                                 # the catcher's slice
+                avg = float(t.get("avg") or 0) or float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0) or float(self.sig_mark(ex, side) or 0)
+                dst = f"carry:{ex}:{side}"
+                for oid, rec in self.ledger.orders.items():
+                    if rec.get("ex") == ex and rec.get("sub") == sub and rec.get("status") in ("open", "live", "acked", "queued"):
+                        rec["sub"] = dst
+                qm = abs(self.ledger.move_sub(ex, sub, dst))
+                tr = self.ledger.tranches.get(dst)
+                if tr is None:
+                    tr = self.ledger.tranches[dst] = dict(ex=ex, side=side, kind="carry", t=stamp(), ts=now, state="open", avg=avg, qty=0.0)
+                qa = float(tr.get("qty") or 0.0)
+                tr["avg"] = round((float(tr["avg"]) * qa + avg * qm) / (qa + qm), 5) if qa + qm > 0 else avg
+                tr["qty"] = qa + qm
+                if t:
+                    t["state"] = "closed"
+                moved.append(f"{self.name(ex)} {side.upper()} {qm:,.0f} ({sub.split(':')[0]})"); total += qm * avg
+        with c.lock:
+            c.d["c98"] = dict(done=stamp(), moved=len(moved), cost=round(total, 2))
+            c.d["layers"].setdefault("carry", dict(state="off", since=now, caps={}, killed=None))["state"] = "full"
+            c.save()
+        self.ledger.save()
+        msg = (f"C98 (alpha_spec §2, Piero 16:35 Oct 17): CARRY book — {len(moved)} favourite lots ({total:,.0f} at cost) held to settlement, no +0.5c exits: " + "; ".join(moved[:40]) +
+               f". Every {CARRY['refresh_s'] // 60} min: sell EV/$ held <= {CARRY['sell_ev'] * 100:.1f}% at max(lot avg + 0.5c, best ask); buy resting bids on favourites (fair >= {CARRY['fav_min']:.2f}, "
+               f">= {CARRY['min_daily']:,} shares/day) at the touch, <= fair - {CARRY['below_fair'] * 100:.0f}c, EV/$ >= {CARRY['buy_ev'] * 100:.0f}%; caps {CARRY['race_cap']:,.0f} a race, RI Senate "
+               f"{CARRY['race_caps'].get('Rhode Island Senate', 0):,.0f}; after FMM's first 10k; swap a lot >= {CARRY['swap_pts'] * 100:.0f} points under a waiting buy when cash is short. Invariants unchanged.")
+        self.event("CONTROL", f"C98: carry book — {len(moved)} lots, {total:,.0f} at cost (the full text is in the night log)"); self.night.line(msg)
+
+    def nset_size(self, pb, books, ratio, max_q):
+        """alpha_spec §4: an all-NO set over every book of a race pays >= n - 1 (n if an unlisted candidate wins). Walk each leg's YES bids
+        (a NO bought at 1 - the YES bid) while the set's cost n - Σ worst bids stays <= ratio x (n - 1). -> (orders, qty, cost per set)."""
+        n = len(pb.legs)
+        cums = {}
+        for ex in pb.legs:
+            c, cums[ex] = 0.0, []
+            for p_, q_ in books.get(ex) or []:
+                c += q_
+                cums[ex].append((c, p_))
+        worst = lambda ex, q: next((p_ for c, p_ in cums[ex] if c >= q - 1e-9), None)
+        best_q, wpx = 0, None
+        for q in sorted({int(c) for ex in pb.legs for c, _ in cums[ex]} | {int(max_q)}):
+            q = min(q, int(max_q))
+            if q < 1:
+                continue
+            w = {ex: worst(ex, q) for ex in pb.legs}
+            if None in w.values():
+                break
+            if n - sum(w.values()) > ratio * (n - 1) + 1e-9:
+                break
+            best_q, wpx = q, w
+            if q >= max_q:
+                break
+        if best_q < MIN_QTY:
+            return [], 0, 0.0
+        orders = [(ex, "no", "buy", round(1 - wpx[ex], 3), int(best_q)) for ex in pb.legs]
+        return orders, int(best_q), round(n - sum(wpx.values()), 4)
+
+    def fmm_nsets(self, now, own):
+        """alpha_spec §4 (Piero 16:35 Oct 17): every race's all-NO set (2 or more books) taken at a walked cost <= 0.985 x payout, as ONE atomic
+        multi-leg order, only from idle cash (inside the 10k lock limit, after FMM's and carry's bids), never sold."""
+        room = self.fmm_lock_room()
+        if room <= 0:
+            return 0
+        ratio, shots = float(FMM["lock_cost"]), 0
+        cands = []
+        for pb in self.pairs:
+            n = len(pb.legs)
+            if n < 2 or len(set(pb.parties)) != n or now - getattr(pb, "last_nset", -1e9) < PAIR_COOLDOWN_S:
+                continue
+            if not all(self.controls.allows(ex, "pairs") for ex in pb.legs) or any(self.ex.is_frozen(ex) for ex in pb.legs):
+                continue
+            bids = [self.px.get(ex, (None, None, None))[0] for ex in pb.legs]
+            if None in bids:
+                continue
+            cost = n - sum(bids)
+            if cost > ratio * (n - 1) + 1e-9:
+                continue
+            cands.append((((n - 1) - cost) / cost, pb))
+        for e_, pb in sorted(cands, key=lambda c: -c[0]):
+            n = len(pb.legs)
+            if room <= 0 or shots >= PAIR_MAX_SHOTS or self.ex.admit() < n or not api.spare_reads(20):
+                break
+            pb.last_nset = now
+            try:
+                feed_bks = {ex: self.feed_book(ex) for ex in pb.legs}
+                for ex in [ex for ex in pb.legs if feed_bks[ex] is None]:
+                    feed_bks[ex] = api.orderbook(ex)
+            except Exception as err:
+                self.event("ERR", f"{pb.race} n-set book: {str(err)[:120]}")
+                continue
+            books = {ex: [(p_, q_ - own.get((ex, "bids", round(p_, 3)), 0)) for p_, q_ in feed_bks[ex][0] if q_ - own.get((ex, "bids", round(p_, 3)), 0) > 0] for ex in pb.legs}
+            max_q = int(min(FMM["lock_cap_sh"] - self.fmm_race_locked(pb.race, pb.legs), room / (ratio * (n - 1))))
+            orders, qty, cost_set = self.nset_size(pb, books, ratio, max_q)
+            if not orders:
+                continue
+            margin = (n - 1) - cost_set
+            cost = qty * cost_set
+            if cost > room + 1e-6 or qty * margin < PAIR_MIN_LOCK:
+                continue
+            room -= cost
+            self.fmm_unread.append((time.time(), cost))      # the fill guard sees the lock's cash at once
+            set_id = f"{pb.race}:{int(now)}:{uuid.uuid4().hex[:6]}"
+
+            def recorded(results, pb=pb, qty=qty, margin=margin, n=n, set_id=set_id, ts=now, cost_set=cost_set):
+                ids = [str(d.get("orderId")) for _, _, ok, d in results if ok and d.get("orderId") is not None]
+                if len(ids) == n or api.DRY_RUN:            # the set exists once SIG acked every leg
+                    with self.ledger.lock:
+                        self.ledger.baskets.append(dict(id=set_id, t=stamp(), ts=ts, race=pb.race, side="no", qty=qty, margin=round(margin, 4),
+                                                        cost=round(cost_set, 4), legs=n, orders=ids, repaired=False, state="held", h4=True, fmm=True))
+            if self.ex.place([(pb.name, f"pairset:{set_id}", "set", o) for o in orders], ttl_s=PAIR_TTL_S, atomic=True, on_done=recorded):
+                shots += 1
+                msg = (f"FMM LOCK {pb.race} ({n} books): NO x {n} x{qty:,} at {' + '.join(f'{o[3]:.3f}' for o in orders)} = {cost_set:.3f} for a payout of {n - 1} "
+                       f"(walked, <= {ratio:.3f} x payout, atomic) -> +{qty * margin:,.0f} at settlement, held; cost {cost:,.0f} (idle cash)")
+                self.event("FMM", msg); self.night.line(msg)
+                self.fmm_guard(now, "lock")
+        return shots
 
     # ------------------------------------------------------------------------------------------------ C93 item 4: the H1 decisive test (Oct 13 04:00-15:00 PT)
     def h1_test_day(self, now):
