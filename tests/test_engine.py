@@ -6458,6 +6458,12 @@ class C97Tests(EngineCase):
         self.assertAlmostEqual(eng.fmm_priority(), 6_000.0, places=0, msg="free 6,000 < 10k: all FMM's")
         eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 25_000.0
         self.assertAlmostEqual(eng.fmm_priority(), 10_000.0, places=0, msg="the first 10k only")
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 3_113.0
+        eng.pnl_read_t = time.time() - 30; eng.fmm_unread = [(time.time(), 1_967.0)]   # FMM fills since the last cash read (07:58 Oct 18)
+        self.assertAlmostEqual(eng.fmm_free(), 1_146.0 + eng.fmm_reserve_release(), places=0)
+        self.assertAlmostEqual(eng.fmm_priority(), 3_113.0 + eng.fmm_reserve_release(), places=0,
+                               msg="the unread buys are not the other layers' free cash: they see 0, not 1,967 (the 07:59 RI carry bid)")
+        eng.fmm_unread = []; eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 25_000.0
         f_engine.ROTATION = dict(a_config.ROTATION, on=True, sells={}, total_cap=30_000.0)
         eng.controls.d["rotation"] = dict(since="2026-10-16 15:00:00", sell_left={}, skipped={}, reports={})
         eng.rot_flows = lambda: dict(net=8_000.0, sold={}, cash={}, freed=8_000.0, exits=0.0, buys=0.0, realized_sales=0.0, realized_exits=0.0)
@@ -6587,6 +6593,14 @@ class AlphaTests(EngineCase):
         self.assertEqual((w["side"], w["px"], w["sub"]), ("yes", 0.84, f"carry:{c}:yes"))
         self.assertLessEqual(w["px"], 0.95 - 0.05 + 1e-9, "never above fair - 5c")
         self.assertLessEqual(w["qty"] * w["px"], a_config.CARRY["race_cap"] + 1, "the 12k race cap")
+        # a resting carry bid the cash no longer covers (FMM's first 10k comes first) is pulled
+        eng.open.append(dict(id="440001", ex=c, side="yes", action="buy", price=0.84, qty=2000.0, status="open", filled=0))
+        eng.ledger.orders["440001"] = dict(id="440001", layer="carry", sub=f"carry:{c}:yes", ex=c, side="yes", action="buy", price=0.84, qty=2000.0, status="open", bot=f"MKT {c}", filled=0)
+        eng.carry_room = lambda signed=False: -1_680.0 if signed else 0.0
+        self.assertNotIn(c, eng.carry_plan(time.time()), "pulled: the cash after FMM's priority does not cover it")
+        eng.carry_room = lambda signed=False: 0.0
+        kept = eng.carry_plan(time.time())
+        self.assertEqual(kept[c][0]["qty"], 2000, "covered exactly: it keeps its place and size")
 
 
 if __name__ == "__main__":

@@ -4102,7 +4102,9 @@ class Engine:
         catcher, TM / SM, locks) see only free cash above FMM's first 10k while FMM is live."""
         if not ALLOC.get("on") or self.fmm_mode(time.time()) != "live":
             return 0.0
-        return min(max(0.0, self.fmm_free()), float(ALLOC["fmm_priority_free"]))
+        first = min(max(0.0, self.fmm_free()), float(ALLOC["fmm_priority_free"]))
+        return first + sum(n for _, n in self.fmm_unread)   # C99f: + the buys since the last cash read — fmm_free nets them, the others' cash read
+                                                             # doesn't yet (07:59 Oct 18: 1,967 of unread FMM fills became a 1,966 RI carry bid)
 
     def rot_reserve(self):
         return max(0.0, self.rot_pool()[0])
@@ -10270,11 +10272,12 @@ class Engine:
             msg = f"CARRY SELL {self.name(ex)}: {why}; GTC ask at max(lot avg + 0.5c, best ask)"
             self.event("CARRY", msg); self.night.line(msg)
 
-    def carry_room(self):
-        """Cash for new carry bids: the other layers' free cash (after FMM's first 10k) less every resting engine entry bid but FMM's."""
+    def carry_room(self, signed=False):
+        """Cash for new carry bids: the other layers' free cash (after FMM's first 10k) less every resting engine entry bid but FMM's
+        (signed: below 0 when the resting bids are more than that cash)."""
         committed = sum(o["qty"] * o["price"] for o in self.open if o["action"] == "buy" and (self.ledger.orders.get(o["id"]) or {}).get("layer") not in self.REDUCING
                         and (self.ledger.orders.get(o["id"]) or {}).get("layer") not in self.FMM_LAYERS and self.ex.owned(o["id"]))
-        return max(0.0, self.free_cash() - committed)
+        return self.free_cash() - committed if signed else max(0.0, self.free_cash() - committed)
 
     def carry_plan(self, now):
         """{ex: [want-spec]}: one resting bid per candidate book at the touch (<= fair - 5c), sized to the race cap (12k at cost; RI Senate
@@ -10292,7 +10295,12 @@ class Engine:
             if o["action"] == "buy" and rec.get("layer") == "carry":
                 resting[(str(o["ex"]), o["side"])] = (round(o["price"], 3), o["qty"])
                 race_cost[self.rot_race(o["ex"])] += o["qty"] * o["price"]
-        room = self.carry_room()
+        room = self.carry_room(signed=True)
+        pull = set()                                         # C99f (Piero 01:05 item 3): FMM's first 10k comes before carry bids — resting carry bids the cash
+        for c in sorted(cands, key=lambda c: c["ev"]):       # no longer covers (after FMM's priority) are pulled, lowest EV/$ first (RI Senate R NO filled 08:00, FMM free -871)
+            have = resting.get((c["ex"], c["side"]))
+            if have and room < -1e-6:
+                pull.add((c["ex"], c["side"])); room += have[0] * have[1]
         party = dict(net=self.party_view()["net"]) if ROTATION.get("party_cap") else None
         plan = {}
         for c in cands:
@@ -10304,6 +10312,8 @@ class Engine:
             if have and abs(have[0] - px) < 1e-9:
                 q = int(have[1])                            # keeps its place and size
                 if not self.carry_party_ok(ex, side, q * px, party):
+                    continue
+                if (ex, side) in pull:
                     continue
             else:
                 cap_left = self.carry_cap(c["race"]) - race_cost[c["race"]] + (have[0] * have[1] if have else 0.0)
