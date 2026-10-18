@@ -484,7 +484,8 @@ NIGHT_LOG_FILE = os.path.join(os.path.dirname(DATA), "docs", "RUN_LOG.md")   # d
 MANUAL_RESERVE = 2_000.0        # the engine never spends cash below the 5,000 floor + this; Piero's own fills draw from it (10,000 until Piero 15:55 Oct 17 item 5: 2,000 for every layer)
 ROTATION = dict(on=True, gap_min=0.04, gap_ext=0.03, keep_gap=0.03, pm_skip_c=0.02, pm_skip_s=24 * 3600, exit_fair_c=0.015, swap_gap_c=0.03,
                 release_exempt_ret=0.02, fair_lo=0.25, fair_hi=0.75, min_vol48=100_000.0, min_clip=500,
-                race_cap=8_000.0, senate_cap=12_000.0, total_cap=30_000.0, senate_exs=("842", "843"),
+                race_cap=8_000.0, senate_cap=12_000.0, total_cap=30_000.0, party_cap=10_000.0, party_band=(0.20, 0.80), party_r_gap=0.04, party_rho=0.5, exit_touch={},   # alpha_spec §5.5; Piero 17:20: no forced Alaska exit (uncalled races settle later on the real result)
+                party_list_at="2026-11-01 18:00:00", party_slow=("Alaska", "Arizona", "AZ-", "Nevada", "NV-", "California", "CA-", "Maine", "ME-", "Oregon", "OR-", "Washington", "WA-"), senate_exs=("842", "843"),
                 # FUND: GTC asks at max(lot avg + 0.5c, touch), place kept, cash counted on SIG fills only
                 sells={"1072": 16265,   # Oklahoma Senate D NO (all)
                        "1074": 8468,    # Rhode Island Governor R NO (all, swing sub included; its reservoir retired)

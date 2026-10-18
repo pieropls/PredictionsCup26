@@ -778,6 +778,10 @@ class Engine:
                 self.wall_fill_events(new_f)
                 for f_ in new_f:                            # C93 item 3: FILLED is logged from SIG's fills only (cash freed counts here, never at POSTED)
                     if f_.get("layer") == "release" and f_.get("action") == "buy":
+                        k_ = self.fill_key(f_)
+                        if k_ in self.rot_seen_fills:
+                            continue                        # the loop re-hands an order's earlier fills: each FILLED line once
+                        self.rot_seen_fills.add(k_)
                         px_s = round(1 - f_["price"], 3)
                         tag = self.rot_sale_fill(f_, px_s)  # C94: a rotation sale's fill feeds the rotation's cash pool
                         msg = f"FILLED {tag}release {self.name(f_['ex'])} {('NO' if f_['side'] == 'yes' else 'YES')} {f_['qty']:,.0f} at {px_s:.3f}: cash freed {f_['qty'] * px_s:,.0f}, realized {(f_.get('realized') or 0):+,.0f}"
@@ -3755,6 +3759,12 @@ class Engine:
             if ROTATION.get("on") and (self.controls.d.get("rotation") or {}).get("since"):
                 self.night.line(self.rot_status(now))      # C94: the hourly rotation line
             try:
+                if ROTATION.get("party_cap"):
+                    self.night.line(self.party_line())     # alpha_spec §5.5: net party exposure and its 1 sigma, hourly
+                    self.party_list(time.time())           # the Nov 1 18:00 decision list (once)
+            except Exception as err:
+                self.event("ERR", f"party line: {err!r}")
+            try:
                 if CARRY.get("on") and (self.controls.d.get("c98") or {}).get("done"):
                     self.night.line(self.carry_status())   # alpha_spec §2 / §6: the carry book's EV/$ hourly
             except Exception as err:
@@ -4252,6 +4262,24 @@ class Engine:
         for o in self.rot_bids():
             race_sh[self.rot_race(o["ex"])] += o["qty"]
         plan, races, ages = {}, set(), []                 # ages: (age key, ex, index in plan[ex], notional) for the reserve guard
+        pcap = float(ROTATION.get("party_cap") or 0)
+        net = self.party_view()["net"] if pcap else 0.0      # alpha_spec §5.5: net D - R at cost on close races
+        def party_ok(ex, side, notional):
+            nonlocal net
+            if not pcap:
+                return True
+            p_ = self.party_dir(ex, side)
+            delta = notional if p_ == "D" else -notional if p_ == "R" else 0.0
+            if (delta > 0 and net + delta > pcap + 1e-6) or (delta < 0 and net + delta < -pcap - 1e-6):
+                k_ = ("party", ex, side, int(net // 1000))
+                if k_ not in self.rot_logged:
+                    self.rot_logged.add(k_)
+                    msg = (f"ROT PARTY CAP {self.name(ex)} {side.upper()} ({p_}): net {'D' if net >= 0 else 'R'} {abs(net):,.0f} at cost on close races; "
+                           f"this bid ({notional:,.0f}) would pass the {pcap:,.0f} cap — not posted (alpha_spec §5.5)")
+                    self.event("ROT", msg); self.night.line(msg)
+                return False
+            net += delta
+            return True
         for o in self.rot_bids():
             ex, side = str(o["ex"]), o["side"]
             k = f"{ex}:{side}"
@@ -4274,9 +4302,14 @@ class Engine:
                 if q2 >= clip:
                     pool -= q2 * bid - o["qty"] * o["price"]
                     px, qty = bid, q2
+            if not party_ok(ex, side, qty * px):
+                continue                                    # alpha_spec §5.5: a resting bid that would pass the party cap is pulled
             plan.setdefault(ex, []).append(dict(side=side, px=px, qty=qty, sub=f"rot:{ex}:{side}", ttl=ROT_TTL_S))
             ages.append((int(o["id"]) if str(o["id"]).isdigit() else 0, ex, len(plan[ex]) - 1, qty * px))
             races.add(self.rot_race(ex))
+        if pcap and net > pcap:                              # §5.5: while net D > the cap, R-side coin-flip gaps (>= 4c) first
+            cands = sorted([cd for cd in cands if self.party_dir(cd["ex"], cd["side"]) != "R" or cd["gap"] >= float(ROTATION.get("party_r_gap") or 0) - 1e-9],
+                           key=lambda cd: (self.party_dir(cd["ex"], cd["side"]) != "R",))
         for cd in cands:
             race = cd["race"]
             if race in races or f"{cd['ex']}:{cd['side']}" in skips or race in widened:
@@ -4289,6 +4322,8 @@ class Engine:
             if pool < clip * cd["px"]:
                 break                                       # post only what the pool funds; the next candidates (and the 3c tier) wait
             qty = int(min(room, pool) / cd["px"])
+            if not party_ok(cd["ex"], cd["side"], qty * cd["px"]):
+                continue
             pool -= qty * cd["px"]; rc[race] += qty * cd["px"]; total += qty * cd["px"]; races.add(race)
             k = f"{cd['ex']}:{cd['side']}"
             self.rot_posted[k] = cd["fs"]
@@ -4303,6 +4338,100 @@ class Engine:
             ages.append((10 ** 18, cd["ex"], len(plan[cd["ex"]]) - 1, qty * cd["px"]))   # a new bid is the newest
             race_sh[race] += qty
         return self.rot_reserve_guard(plan, ages)
+
+    def party_dir(self, ex, side):
+        """alpha_spec §5.5: the party a lot wins with — D YES / R NO = 'D', R YES / D NO = 'R'; a non-D/R book (Alaska, independents) counts
+        by the party it is against: the race's major party (the leading one when both are listed)."""
+        p = self.pol(ex, side)
+        if p in ("D", "R"):
+            return p
+        race = (self.meta.get(ex) or {}).get("race")
+        majors = {}
+        for e2, m in self.meta.items():
+            if m.get("race") == race and m.get("party") in ("D", "R"):
+                majors[m["party"]] = self.fair.get(e2) if self.fair.get(e2) is not None else 0.5
+        if not majors:
+            return "other"
+        against = max(majors, key=lambda k: majors[k]) if len(majors) == 2 else next(iter(majors))
+        other = "R" if against == "D" else "D"
+        return other if side == "yes" else against           # YES on a book against R wins when R loses (counts D); its NO wins when R wins
+
+    def party_view(self):
+        """alpha_spec §5.5 (Piero 16:45 / 17:20 Oct 17): correlated close-race risk. Every SIG position on a close race (side fair 0.20-0.80) at
+        cost, by the party it wins with; net = D - R. 1 sigma of the settlement value (each lot pays q x Bernoulli(fair)): independent, at the
+        configured rho (0.5) between same-party lots (and -rho across), and fully correlated."""
+        lo, hi = ROTATION.get("party_band") or (0.20, 0.80)
+        rho = float(ROTATION.get("party_rho") or 0.5)
+        d = r = 0.0; s_sum = 0.0; var = 0.0; rows = []
+        for ex, b in self.book.items():
+            q = float(b.get("pos") or 0)
+            if abs(q) < 1:
+                continue
+            side = "yes" if q > 0 else "no"
+            fs = self.side_fair(ex, side)
+            if fs is None or not (lo <= fs <= hi):
+                continue
+            pol = self.party_dir(ex, side)
+            if pol not in ("D", "R"):
+                continue
+            avg = float(((b.get("row") or {}).get("avgCost")) or 0) or float(self.sig_mark(ex, side) or fs)
+            cost = abs(q) * avg; sig = abs(q) * math.sqrt(fs * (1 - fs))
+            if pol == "D":
+                d += cost; s_sum += sig
+            else:
+                r += cost; s_sum -= sig
+            var += sig * sig
+            rows.append((pol, self.name(ex), side, abs(q), cost))
+        return dict(d=d, r=r, net=d - r, sigma_ind=math.sqrt(var), sigma_rho=math.sqrt(max(0.0, (1 - rho) * var + rho * s_sum * s_sum)),
+                    sigma_corr=abs(s_sum), rho=rho, rows=rows)
+
+    def party_line(self):
+        v = self.party_view()
+        cap = float(ROTATION.get("party_cap") or 0)
+        lo, hi = ROTATION.get("party_band") or (0.20, 0.80)
+        top = sorted(v["rows"], key=lambda x: -x[4])[:5]
+        return (f"PARTY close races (side fair {lo:.2f}-{hi:.2f}): D {v['d']:,.0f} / R {v['r']:,.0f} at cost, net {'D' if v['net'] >= 0 else 'R'} {abs(v['net']):,.0f} (cap {cap:,.0f}); "
+                f"1 sigma at settlement {v['sigma_ind']:,.0f} independent / {v['sigma_rho']:,.0f} at rho {v['rho']:.1f} / {v['sigma_corr']:,.0f} fully correlated; largest: "
+                + ", ".join(f"{n} {sd.upper()} {c:,.0f} ({p})" for p, n, sd, q, c in top))
+
+    def party_list(self, now):
+        """alpha_spec §5.5: the Nov 1 18:00 decision list for Piero — every lot in a race unlikely to be called by Nov 4 09:00 PT (Alaska; close
+        races in AZ / NV / CA / ME / OR / WA; the control markets), net party exposure and its 1 sigma, the gap to #50 and #25. Once."""
+        c = self.controls
+        at = ROTATION.get("party_list_at")
+        if not at or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) < at or (c.d.get("party_list") or {}).get("done"):
+            return
+        slow = tuple(ROTATION.get("party_slow") or ())
+        lo, hi = ROTATION.get("party_band") or (0.20, 0.80)
+        rows = []
+        for ex, b in self.book.items():
+            q = float(b.get("pos") or 0)
+            if abs(q) < 1:
+                continue
+            side = "yes" if q > 0 else "no"
+            race = str((self.meta.get(ex) or {}).get("race") or "")
+            fs = self.side_fair(ex, side)
+            control = race.startswith("U.S. ") or str(ex) in (ROTATION.get("senate_exs") or ())
+            close = fs is not None and lo <= fs <= hi
+            if race.startswith("Alaska") or control or (close and race.startswith(slow)):
+                avg = float(((b.get("row") or {}).get("avgCost")) or 0)
+                rows.append(f"{self.name(ex)} {side.upper()} {abs(q):,.0f} @ {avg:.3f} (fair {fs if fs is None else round(fs, 3)}, {self.party_dir(ex, side)})")
+        gaps = "n/a"
+        try:
+            with open(os.path.join(DATA, "leaders.csv")) as fh:
+                lines = fh.readlines()[-200:]
+            rr = [r for r in csv.reader(lines) if r and r[0] != "time"]
+            last_t = max(r[0] for r in rr)
+            cur = {r[1]: float(r[4]) for r in rr if r[0] == last_t}
+            ours = next((float(r[4]) for r in rr if r[0] == last_t and r[-1] == "1"), None)
+            if ours is not None:
+                gaps = ", ".join(f"#{k} {cur[k]:+,.0f} ({ours - cur[k]:+,.0f})" for k in ("50", "25") if k in cur)
+        except Exception:
+            pass
+        with c.lock:
+            c.d["party_list"] = dict(done=stamp(), n=len(rows)); c.save()
+        msg = f"NOV 1 DECISION LIST (alpha_spec §5.5): {len(rows)} lots in races unlikely to be called by Nov 4 09:00 PT — " + "; ".join(rows) + f". {self.party_line()}. Gap to {gaps}."
+        self.event("PARTY", msg); self.night.line(msg); self.alerts.append(f"{time.strftime('%H:%M')} NOV 1 DECISION LIST in RUN_LOG ({len(rows)} lots)")
 
     def rot_reserve_guard(self, plan, ages):
         """fmm_spec §0.1 (the only exception to no-churn): every loop the rotation's (+ FMM's) resting and new bids must fit in
@@ -5080,6 +5209,9 @@ class Engine:
                 continue
             floor_ = bots.tick_up(round(avg + RULE0_MARGIN, 6))
             px, why = max(floor_, bots.tick_up(round(fs - ROTATION["exit_fair_c"], 6))), "fair - 1.5c"
+            dl = (ROTATION.get("exit_touch") or {}).get(str(ex))
+            if dl and ask is not None and time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) < dl:
+                px, why = max(floor_, ask), f"out before {dl[5:16]} (alpha_spec §5.5): max(lot avg + 0.5c, touch ask)"
             left = fs - (ask if ask is not None else px)
             better = [cd for cd in cands if cd["race"] != self.rot_race(ex) and cd["gap"] >= left + ROTATION["swap_gap_c"] - 1e-9]
             if better and ask is not None and ask >= floor_ - 1e-9:
@@ -5202,7 +5334,8 @@ class Engine:
                 f"CASH {cash:,.0f}, manual reserve left {self.manual_reserve_left():,.0f}, engine free {self.engine_cash_now() - CASH_RESERVE:,.0f}, pool {self.rot_reserve():,.0f}. {rk}."
                 + ("" if self.fmm_mode(now) == "off" else " " + self.fmm_status(now))
                 + (" " + self.alloc_line(now) if ALLOC.get("on") else "")
-                + (" " + self.carry_status() if CARRY.get("on") and (self.controls.d.get("c98") or {}).get("done") else ""))
+                + (" " + self.carry_status() if CARRY.get("on") and (self.controls.d.get("c98") or {}).get("done") else "")
+                + (" " + self.party_line() if ROTATION.get("party_cap") else ""))
 
     def alloc_line(self, now):
         """C97 item 7: the allocation by bucket (at cost; holdings at SIG's marks), FMM realized and at fair, the fund sale, rank vs #100."""
@@ -9954,6 +10087,7 @@ class Engine:
                 resting[(str(o["ex"]), o["side"])] = (round(o["price"], 3), o["qty"])
                 race_cost[self.rot_race(o["ex"])] += o["qty"] * o["price"]
         room = self.carry_room()
+        party = dict(net=self.party_view()["net"]) if ROTATION.get("party_cap") else None
         plan = {}
         for c in cands:
             ex, side, px = c["ex"], c["side"], c["px"]
@@ -9963,10 +10097,12 @@ class Engine:
             have = resting.get((ex, side))
             if have and abs(have[0] - px) < 1e-9:
                 q = int(have[1])                            # keeps its place and size
+                if not self.carry_party_ok(ex, side, q * px, party):
+                    continue
             else:
                 cap_left = self.carry_cap(c["race"]) - race_cost[c["race"]] + (have[0] * have[1] if have else 0.0)
                 q = int(min(cap_left, room) / px)
-                if q < CARRY["min_clip"]:
+                if q < CARRY["min_clip"] or not self.carry_party_ok(ex, side, q * px, party):
                     continue
                 room -= q * px; race_cost[c["race"]] += q * px
             plan.setdefault(ex, []).append(dict(side=side, px=px, qty=q, sub=f"carry:{ex}:{side}", ttl=CARRY["ttl"]))
@@ -9994,6 +10130,22 @@ class Engine:
             self.event("CARRY", msg); self.night.line(msg)
         if len(self.carry_seen) > 5000:
             self.carry_seen = set(list(self.carry_seen)[-2000:])
+
+    def carry_party_ok(self, ex, side, notional, party):
+        """alpha_spec §5.5: a carry buy on a close-race side (0.20-0.80) may not raise |net party exposure| above the cap."""
+        if party is None:
+            return True
+        lo, hi = ROTATION.get("party_band") or (0.20, 0.80)
+        fs = self.side_fair(ex, side)
+        if fs is None or not (lo <= fs <= hi):
+            return True                                      # a safe favourite is not close-race exposure
+        p_ = self.party_dir(ex, side)
+        delta = notional if p_ == "D" else -notional if p_ == "R" else 0.0
+        cap = float(ROTATION.get("party_cap") or 0)
+        if abs(party["net"] + delta) > cap + 1e-6 and abs(party["net"] + delta) > abs(party["net"]):
+            return False
+        party["net"] += delta
+        return True
 
     def carry_status(self):
         lots = self.carry_lots()

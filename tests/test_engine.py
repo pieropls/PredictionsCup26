@@ -5267,6 +5267,62 @@ class C94Tests(EngineCase):
         eng.rot_flows = lambda: flows
         return fake, eng, mk, flows
 
+    def test_party_cap_blocks_d_side_coin_flips_while_net_d_is_over_10k_and_takes_r_side(self):
+        fake, eng, mk, flows = self.fmm0_rig()
+        a, b, h = mk[:3]
+        self.c95_market(eng, fake, a, 0.55, (0.49, 0.50, 0.495), race="RA")    # a R-party book: its cheap YES is R-direction
+        self.c95_market(eng, fake, b, 0.55, (0.49, 0.50, 0.495), race="RB")    # a D-party book: its cheap YES is D-direction
+        self.c95_market(eng, fake, h, 0.50, (0.49, 0.51, 0.50), race="RH")
+        eng.meta[a]["party"], eng.meta[b]["party"], eng.meta[h]["party"] = "R", "D", "R"
+        eng.book = {h: dict(pos=-30_000.0, row=dict(avgCost=0.50))}                       # 15k at cost of R NO = net D 15,000 on a close race (the only position)
+        v = eng.party_view()
+        self.assertAlmostEqual(v["net"], 15_000.0, places=0)
+        self.assertAlmostEqual(v["sigma_ind"], 30_000 * 0.5, places=0)
+        plan = eng.rot_plan(time.time(), 0)
+        sides = {(ex, w["side"]) for ex, ws in plan.items() for w in ws}
+        self.assertNotIn((b, "yes"), sides, "D-direction: net D is over the 10k cap")
+        self.assertIn((a, "yes"), sides, "R-direction is taken (it brings net D down)")
+        self.assertTrue(any(e["text"].startswith("ROT PARTY CAP") for e in eng.events))
+        self.assertIn("PARTY close races", eng.party_line())
+
+    def test_party_direction_of_a_non_dr_book_sigma_at_rho_and_the_carry_cap(self):
+        fake, eng, mk, flows = self.fmm0_rig()
+        r, i, x = mk[:3]
+        self.c95_market(eng, fake, r, 0.70, (0.69, 0.70, 0.695), race="AKX")
+        self.c95_market(eng, fake, i, 0.30, (0.29, 0.30, 0.295), race="AKX")
+        eng.meta[r]["party"], eng.meta[i]["party"] = "R", "I"
+        self.assertEqual(eng.party_dir(i, "yes"), "D", "an independent against R: its YES counts D")
+        self.assertEqual(eng.party_dir(i, "no"), "R")
+        self.assertEqual(eng.party_dir(r, "no"), "D", "Alaska Senate R NO counts D")
+        eng.book = {r: dict(pos=-10_000.0, row=dict(avgCost=0.30)), i: dict(pos=10_000.0, row=dict(avgCost=0.30))}
+        v = eng.party_view()
+        self.assertAlmostEqual(v["net"], 6_000.0, places=0, msg="both D-direction")
+        sig = 10_000 * (0.21 ** 0.5)
+        self.assertAlmostEqual(v["sigma_ind"], (2 * sig * sig) ** 0.5, places=0)
+        self.assertAlmostEqual(v["sigma_rho"], ((0.5 * 2 * sig * sig) + 0.5 * (2 * sig) ** 2) ** 0.5, places=0)
+        self.assertAlmostEqual(v["sigma_corr"], 2 * sig, places=0)
+        party = dict(net=9_000.0)
+        self.c95_market(eng, fake, x, 0.78, (0.70, 0.71, 0.705), race="X")
+        eng.meta[x]["party"] = "D"
+        self.assertFalse(eng.carry_party_ok(x, "yes", 2_000.0, party), "a close-race D buy past the 10k cap")
+        self.assertTrue(eng.carry_party_ok(x, "no", 2_000.0, dict(net=9_000.0)), "an R buy brings it down")
+        self.c95_market(eng, fake, x, 0.92, (0.86, 0.87, 0.865), race="X")
+        self.assertTrue(eng.carry_party_ok(x, "yes", 5_000.0, dict(net=9_000.0)), "a safe favourite is not close-race exposure")
+
+    def test_alaska_senate_r_no_exits_at_the_touch_never_below_lot_avg_plus_half_a_cent(self):
+        fake, eng, mk, flows = self.fmm0_rig()
+        a = mk[0]
+        self.c95_market(eng, fake, a, 0.40, (0.31, 0.32, 0.315), race="AK")    # NO: bid 0.68, ask 0.69, fair 0.60
+        f_engine.ROTATION = dict(f_engine.ROTATION, exit_touch={a: "2099-01-01 00:00:00"})
+        eng.ledger.subbooks.setdefault(a, {})[f"rot:{a}:no"] = -11_242.0
+        eng.ledger.tranches[f"rot:{a}:no"] = dict(ex=a, side="no", kind="rot", state="open", ts=time.time(), t="x", avg=0.682)
+        eng.track_rot(time.time())
+        x = eng.rot_view[a][0]
+        self.assertAlmostEqual(x["px"], 0.69, places=3, msg="max(lot avg + 0.5c = 0.687, touch ask 0.69)")
+        eng.ledger.tranches[f"rot:{a}:no"]["avg"] = 0.70
+        eng.track_rot(time.time())
+        self.assertAlmostEqual(eng.rot_view[a][0]["px"], 0.705, places=3, msg="never below lot avg + 0.5c")
+
     def rest_rot(self, eng, oid, ex, px, qty):
         eng.open.append(dict(id=oid, ex=ex, side="yes", action="buy", price=px, qty=float(qty), status="open", filled=0))
         eng.ledger.orders[oid] = dict(layer="rot", sub=f"rot:{ex}:yes", ex=ex, side="yes", action="buy", price=px, qty=float(qty), status="open", bot=f"MKT {ex}", filled=0)
