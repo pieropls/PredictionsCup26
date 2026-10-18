@@ -10338,8 +10338,9 @@ class Engine:
     def sale_price(self, ex, side, px, floor_, bid, reason, anc, bidsell):
         """Piero 01:05 Oct 18: tonight a fund / carry lot sells at the bid when the bid >= lot avg + 0.5c (item 3); otherwise its ask keeps the
         anchored price (item 4) — a lot whose floor is above the anchor waits (None)."""
-        if bidsell and bid is not None and bid >= floor_ - 1e-9:
-            return bid, reason + " at the bid"
+        sig_avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
+        if bidsell and bid is not None and bid >= max(floor_, bots.tick_up(round(sig_avg + RULE0_MARGIN, 6)) if sig_avg else floor_) - 1e-9:
+            return bid, reason + " at the bid"                  # C99d: at the bid only when it also clears SIG's position average + 0.5c (Delaware 01:55: -38 realized)
         if anc is not None:
             if anc["px"] < floor_ - 1e-9:
                 return None, reason

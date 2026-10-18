@@ -6421,6 +6421,9 @@ class C97Tests(EngineCase):
         eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 3_000.0
         rel = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, now + 900)
         self.assertEqual(rel[a]["why"], "fund sale at the bid"); self.assertAlmostEqual(rel[a]["px"], 0.89, places=3)
+        eng.book[a]["row"] = dict(eng.book[a].get("row") or {}, avgCost=0.888)          # SIG's position average 0.888: the bid 0.89 < 0.893
+        rel = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, now + 960)
+        self.assertNotEqual(rel.get(a, {}).get("why"), "fund sale at the bid", "never at the bid under SIG's position average + 0.5c")
 
     def test_a_foreign_sale_is_booked_as_a_sale_from_sigs_order_record(self):
         fake, eng, mk = FMMTests.rig(self)
