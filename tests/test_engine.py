@@ -218,7 +218,7 @@ class EngineCase(unittest.TestCase):
         f_engine.STARTUP_HOLD_S = 0                         # the rigs read from their first loop (the 2-min start-up hold is a live-only guard)
         for k, v in (("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
                      ("CORE_CAP_COST", 0.0), ("TRADING_HOLD_C", 99.0), ("CORE_LOCK_RET", -99.0), ("TRADING_INV_CAP", 1e12), ("TRADING_CASH_TARGET", 0.0),
-                     ("NOEDGE", dict(ret=-99.0, low_fair=0.0, low_edge_c=0.0)), ("REPEG_AWAY_S", 0.0), ("GTC_TTL_S", 0), ("SM_REPEG_TICKS", 2), ("TM_REPEG_TICKS", 2), ("ROTATION", dict(a_config.ROTATION, on=False, sells={}, buys=[])), ("MANUAL_RESERVE", 0.0), ("FMM", dict(a_config.FMM, on=False)), ("DASH_EVERY_S", 0), ("ALLOC", dict(a_config.ALLOC, on=False)), ("FUND", dict(a_config.FUND, on=False)), ("CARRY", dict(a_config.CARRY, on=False))):   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
+                     ("NOEDGE", dict(ret=-99.0, low_fair=0.0, low_edge_c=0.0)), ("REPEG_AWAY_S", 0.0), ("GTC_TTL_S", 0), ("SM_REPEG_TICKS", 2), ("TM_REPEG_TICKS", 2), ("ROTATION", dict(a_config.ROTATION, on=False, sells={}, buys=[])), ("MANUAL_RESERVE", 0.0), ("FMM", dict(a_config.FMM, on=False)), ("DASH_EVERY_S", 0), ("ALLOC", dict(a_config.ALLOC, on=False)), ("FUND", dict(a_config.FUND, on=False)), ("CARRY", dict(a_config.CARRY, on=False)), ("GAPMM", dict(a_config.GAPMM, on=False)), ("NIGHT_SELL", dict(a_config.NIGHT_SELL, on=False))):   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
             self.addCleanup(setattr, f_engine, k, getattr(f_engine, k, None))
             setattr(f_engine, k, v)                         # C87 gates (real clock, no tape in the rigs, rig cash under BUFFER): off unless C87Tests set them
         for k in ("PNL_READ_S", "ORDERS_READ_S", "FILLS_READ_S", "POSITIONS_READ_S"):   # day 4 §4 / Oct 8 read caching have their own tests; the rigs (no realtime feed) read fresh each loop
@@ -6072,6 +6072,43 @@ class FMMTests(EngineCase):
         with self.assertRaises(ValueError):
             f_engine.EngineControls(eng).apply("fmm_restart", dict(inv_cap=99_000, K=3))
 
+    def test_gap_median_exit_price_paper_fills_and_the_10_gate(self):
+        fake, eng, mk = self.rig()
+        a = mk[0]
+        C94Tests.c95_market(self, eng, fake, a, 0.90, (0.85, 0.86, 0.855), race="RX")
+        self.live(eng)
+        f_engine.GAPMM = dict(a_config.GAPMM, on=True, paper_from="2000-01-01 00:00:00", live_at="2099-01-01 00:00:00")
+        eng._gap6 = (time.time(), {a: -0.03})                # prints sit 3c under fair: the exit targets fair - 3c
+        sub = f"fmm:{a}:yes:0.850"
+        eng.ledger.subbooks.setdefault(a, {})[sub] = 1000.0
+        eng.ledger.tranches[sub] = dict(ex=a, side="yes", kind="fmm", state="open", ts=time.time(), t="x", avg=0.85, qty=1000.0)
+        self.assertAlmostEqual(eng.gap_exit_px(a, "yes", 0.85, 0.85, time.time()), 0.87, places=3, msg="max(0.855, 0.90 - 0.03)")
+        eng._gap6 = (time.time(), {a: -0.06})
+        self.assertAlmostEqual(eng.gap_exit_px(a, "yes", 0.85, 0.85, time.time()), 0.855, places=3, msg="never below fill + 0.5c")
+        self.assertAlmostEqual(eng.gap_exit_px(a, "no", 0.10, 0.10, time.time()), 0.16, places=3, msg="NO side: fair 0.10 + 6c")
+        eng._gap6 = (time.time(), {a: -0.03})
+        eng.fmm_paper_book = lambda ex: ([(0.85, 4000.0)], [(0.87, 2000.0)])
+        self.assertTrue(eng.gapmm_paper_on(time.time()))
+        eng.gapmm_paper_step(time.time())
+        self.assertAlmostEqual(eng.gap_paper["asks"][sub]["px"], 0.87, places=3); self.assertEqual(eng.gap_paper["asks"][sub]["ahead"], 2000.0)
+        t0 = time.time()
+        eng._gap6 = (t0, {a: -0.02})                          # the target moves to 0.88: the paper ask keeps its place ...
+        eng.gapmm_paper_step(t0)
+        self.assertAlmostEqual(eng.gap_paper["asks"][sub]["px"], 0.87, places=3, msg="keep place under 10 min")
+        eng._gap6 = (t0 + 601, {a: -0.02})
+        eng.gapmm_paper_step(t0 + 601)
+        self.assertAlmostEqual(eng.gap_paper["asks"][sub]["px"], 0.88, places=3, msg="... and moves after 10 min away")
+        eng._gap6 = (time.time(), {a: -0.03})
+        eng.gap_paper["asks"][sub].update(px=0.87, placed=time.time() - 5, cum=0.0)
+        eng.gapmm_paper_print(a, time.time() + 1, 0.87, 6000.0)   # (6,000 - 2,000 ahead) x half = 2,000 >= our 1,000
+        self.assertEqual(eng.gap_paper["fills"], 1); self.assertAlmostEqual(eng.gap_paper["realized"], 1000 * 0.02, places=2)
+        self.assertFalse(eng.fmm_orders(fake, eng) if hasattr(eng, "fmm_orders") else False)
+        f_engine.GAPMM = dict(f_engine.GAPMM, live_at="2000-01-02 00:00:00")
+        eng.gapmm_gate(time.time())
+        self.assertTrue(eng.gapmm_live(), "replay passed and paper realized >= 0: live on FMM exits")
+        eng.track_fmm(time.time())
+        self.assertAlmostEqual(eng.fmm_view[a][0]["px"], 0.87, places=3, msg="the live exit uses the F1 price")
+
     def test_fmm_paper_mode_sends_zero_orders(self):
         fake, eng, mk = self.rig()
         a, c = mk[:2]
@@ -6356,6 +6393,46 @@ class C97Tests(EngineCase):
         self.assertEqual(eng.fund_flows()["sold"].get(a), 1000.0)
         self.assertEqual(eng.fund_sync()[a], 2000)
         self.assertEqual(eng.rot_sale_fill(dict(ex=a, t="2026-10-17 17:00:00"), 0.905), "fund ")
+
+    def test_a_fund_ask_keeps_its_place_and_re_pegs_only_after_5_min_below_and_tonight_sells_at_the_bid(self):
+        fake, eng, favs = C94Tests.rig(self)
+        a = favs[0]
+        C93Tests.lot(self, eng, fake, a, f"dump:{a}:yes:1", 3000, 0.80, (0.90, 0.905, 0.9025), 0.99)
+        loop(eng, fake); loop(eng, fake)
+        eng.ledger.subbooks[a] = {f"dump:{a}:yes:1": 3000.0}; eng.lots_cache = (None, {})
+        f_engine.FUND = dict(a_config.FUND, on=True, sells={a: 3000}, sell_all_subs=())
+        f_engine.NIGHT_SELL = dict(a_config.NIGHT_SELL, on=False)
+        eng.controls.d["fund"] = dict(since=a_config.FUND["since"], sell_left={a: 3000}, cash_freed=0.0)
+        now = time.time()
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, now)
+        self.assertAlmostEqual(plan[a]["px"], 0.905, places=3)
+        self.assertAlmostEqual(eng.sale_anchor[a]["px"], 0.905, places=3, msg="posted once: the price is anchored")
+        eng.px[a] = fake.px[a] = (0.91, 0.915, 0.9125)                                   # the touch moves up: never chase
+        eng.fmm_others_ask = lambda ex, side: 0.915
+        self.assertAlmostEqual(eng.rotation_plan(a_config.CASH_RESERVE + 2_000, now + 60)[a]["px"], 0.905, places=3)
+        eng.px[a] = fake.px[a] = (0.89, 0.90, 0.895)                                     # someone else at 0.900 below our 0.905
+        eng.fmm_others_ask = lambda ex, side: 0.90
+        self.assertAlmostEqual(eng.rotation_plan(a_config.CASH_RESERVE + 2_000, now + 120)[a]["px"], 0.905, places=3, msg="kept: under 5 min below")
+        self.assertAlmostEqual(eng.rotation_plan(a_config.CASH_RESERVE + 2_000, now + 120 + a_config.SALE_REPEG_S)[a]["px"], 0.90, places=3, msg="re-pegged after 5 min")
+        self.assertEqual(eng.sale_stats[a]["repegs"], 1)
+        # tonight: at the bid when the bid >= lot avg + 0.5c and FMM's free cash is under 10k
+        f_engine.NIGHT_SELL = dict(a_config.NIGHT_SELL, on=True, since="2000-01-01 00:00:00", until="2099-01-01 00:00:00")
+        FMMTests.live(self, eng)
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 3_000.0
+        rel = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, now + 900)
+        self.assertEqual(rel[a]["why"], "fund sale at the bid"); self.assertAlmostEqual(rel[a]["px"], 0.89, places=3)
+
+    def test_a_foreign_sale_is_booked_as_a_sale_from_sigs_order_record(self):
+        fake, eng, mk = FMMTests.rig(self)
+        a = mk[0]
+        eng.controls.d["c95c"] = dict(since="2000-01-01 00:00:00")
+        eng.ledger.subbooks.setdefault(a, {})["manual"] = 41_687.0
+        eng.ledger.fills.append(dict(key="z1:777001", order="777001", ex=a, side="yes", action=None, qty=20_000.0, price=0.21, layer="", t=time.strftime("%Y-%m-%d %H:%M:%S"), bot=f"MKT {a}"))
+        fake.order = lambda oid: dict(id=int(oid), exchangeId=a, side="yes", action="sell", quantity=20_000)
+        eng.foreign_fill_actions()
+        self.assertEqual(eng.ledger.fills[-1]["action"], "sell")
+        eng.manual_book(time.time())
+        self.assertAlmostEqual(eng.ledger.subbooks[a]["manual"], 21_687.0, places=0, msg="Piero's sale reduces his manual book (AZ-06, Oct 17)")
 
     def test_fmm_gets_the_first_10k_of_free_cash_and_the_rotation_claims_nothing_at_its_cap(self):
         fake, eng, mk = FMMTests.rig(self)

@@ -528,7 +528,18 @@ ALLOC = dict(on=True, since="2026-10-17 15:55:00",
 FUND = dict(on=True, since="2026-10-17 15:55:00",  # item 1: GTC asks at max(lot avg + 0.5c, touch), place kept, core lots included; the cash is not the rotation's
             sells={"1075": 1_000_000, "1072": 3_904, "986": 2_172, "980": 2_000, "964": 2_008},   # Piero 01:05 Oct 18 item 5: Kansas D NO, CO-03 D NO, CO-04 D NO dropped (R-side; the party cap)
             sell_all_subs=("1075",))           # Delaware Senate R NO: every lot (its reservoir is retired, swing sub included)
+# Piero 01:05 Oct 18 item 3: tonight, until FMM's free cash reaches 10k, fund-sale and carry-sale lots sell AT THE BID when the bid >= lot avg
+# + 0.5c, at most 15k sold; the rest rests at max(lot avg + 0.5c, touch). Item 4: a sale ask keeps its place; re-peg only after the others' best
+# ask has sat below it >= 5 min, never below lot avg + 0.5c, never chasing up.
+NIGHT_SELL = dict(on=True, since="2026-10-18 01:05:00", until="2026-10-18 08:00:00", cap=15_000.0, fmm_free_target=10_000.0)
+SALE_REPEG_S = 300
+# Piero 01:05 Oct 18 item 8 (alpha_spec §3): the gap-median exit (docs/gapmm.md F1: +2,143 vs +1,698, 6 of 8 days at 6 h; 7 of 8 at 12 h) —
+# paper 06:00-10:00 on the live FMM lots, then live on FMM exits at 10:00 with the FMM gate: an FMM exit rests at
+# max(fill + 0.5c, lot avg + 0.5c, side fair + the book's 6-h median gap), the median gap = median of (print - PM fair at the print).
+GAPMM = dict(on=True, window_s=6 * 3600, refresh_s=600, min_prints=10, repeg_s=600, paper_from="2026-10-18 06:00:00", live_at="2026-10-18 10:00:00", replay_ok=True,
+             replay_note="docs/gapmm.md: F1 6-h +2,143 vs FMM +1,698 (6 of 8 days); 12-h 7 of 8")
 # ---- C98 (alpha_spec §2, Piero 16:35 Oct 17): the CARRY book — the favourites in the holdings bucket, held to settlement (no +0.5c exits),
 # rebalanced every 30 min: sell EV/$ held <= 6.5% (rule 0 holds), buy resting bids on EV/$ >= 11% favourites
 CARRY = dict(on=True, sell_ev=0.065, buy_ev=0.11, min_daily=150_000, fav_min=0.75, below_fair=0.05, race_cap=12_000.0,
-             race_caps={"Rhode Island Senate": 30_000.0}, swap_pts=0.04, refresh_s=1800, min_clip=500, ttl=86400)
+             race_caps={"Rhode Island Senate": 30_000.0}, swap_pts=0.04, refresh_s=1800, min_clip=500, ttl=86400,
+             max_bid_sh=9_900)                 # Piero 01:05 Oct 18 item 6: e.g. RI Senate R NO 9,900 at 0.865

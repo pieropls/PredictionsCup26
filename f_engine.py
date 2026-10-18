@@ -73,7 +73,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, CASH_FLOOR_RESUME, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
-                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY,
+                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -429,6 +429,8 @@ class Engine:
         self.fmm_unread, self.fmm_noops, self.fmm_cov = [], [], {}           # v2 §2.5: buys not yet in a cash read; SIG no-op buys; coverage
         self.fmm_cash_seen, self.rot_seen_fills = set(), set()               # each fill once (the loop re-hands an order's earlier fills)
         self.carry_now, self.carry_sell, self.carry_t, self.carry_seen, self.carry_view = {}, {}, 0.0, set(), {}   # C98: the carry book
+        self.sale_anchor, self.sale_stats, self.foreign_actions = {}, collections.defaultdict(collections.Counter), {}   # C99: sale asks keep their place; foreign fills' direction
+        self.gap_paper = dict(asks={}, realized=0.0, fills=0, done=0)                                 # C99c: the gap-median exit on paper
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
         self.sm_now, self.sm_block, self.sm_fills, self.sm_depth, self.sm_cov, self.sm_wpeak, self.sm_note = {}, {}, collections.deque(maxlen=5000), {}, {}, 0, {}   # turnover_plan §1: the spread maker
@@ -808,6 +810,7 @@ class Engine:
             if abs(diff_) >= 1:
                 self.inv_new_t[str(ex_)] = now               # C95c: new unexplained inventory (maybe Piero's trade, its fill not read yet): no seller for 10 min
         try:
+            self.foreign_fill_actions()                     # C99: SIG's fills carry no buy / sell; a foreign order's direction comes from its record
             self.manual_book(now)                           # C95c: Piero's own fills -> the 'manual' sub-book (never sold by the engine)
         except Exception as err:
             self.event("ERR", f"manual book: {err!r}")
@@ -925,6 +928,12 @@ class Engine:
                 self.c98_migration(now)                    # once, with positions and fair in
             except Exception as err:
                 self.event("ERR", f"C98 migration: {err!r}")
+            try:
+                if self.gapmm_paper_on(now):
+                    self.gapmm_paper_step(now)             # C99c: the gap-median exit on paper, 06:00-10:00
+                self.gapmm_gate(now)
+            except Exception as err:
+                self.event("ERR", f"gapmm: {err!r}")
             try:
                 self.fmm_gate(now)                         # fmm_spec §3.3 every loop: paper -> live by its gates, the step-up, the stop
             except Exception as err:
@@ -3761,7 +3770,9 @@ class Engine:
             try:
                 if ROTATION.get("party_cap"):
                     self.night.line(self.party_line())     # alpha_spec §5.5: net party exposure and its 1 sigma, hourly
+                    self.night.line(self.manual_line())    # Piero 01:05 item 7: his manual tickets next to it
                     self.party_list(time.time())           # the Nov 1 18:00 decision list (once)
+                self.night.line(self.sale_churn_line())    # Piero 01:05 item 4: reposts / re-pegs of the sale asks
             except Exception as err:
                 self.event("ERR", f"party line: {err!r}")
             try:
@@ -3772,6 +3783,8 @@ class Engine:
             try:
                 if self.fmm_mode(now) in ("paper", "live", "stopped"):
                     self.night.line(self.fmm_status(now))  # fmm_spec §4: the hourly FMM line
+                if GAPMM.get("on") and (self.gapmm_paper_on(time.time()) or self.gapmm_live() or self.gap_paper["fills"]):
+                    self.night.line(self.gapmm_line(time.time()))
             except Exception as err:
                 self.event("ERR", f"FMM status: {err!r}")
             if self.h1_test_day(now) and (self.controls.d.get("h1_test") or {}).get("opened"):
@@ -3920,6 +3933,34 @@ class Engine:
                 cap -= q
             out.append(w)
         return out
+
+    def foreign_fill_actions(self, max_reads=6):
+        """C99 (Piero 01:05 Oct 18, AZ-06): SIG's fill rows have no direction (a YES sale and a YES buy look the same), and a fill of an order
+        the engine did not place has no record of its own — it was booked as a buy. Each new foreign fill's order is read once (GET /orders/{id},
+        cached) and its action set before the manual book uses it."""
+        n = 0
+        for f in self.ledger.fills[-400:]:
+            if f.get("action") or (f.get("layer") or "") or f.get("manual_booked"):
+                continue
+            oid = str(f.get("order") or "")
+            if not oid or oid in self.ledger.orders:
+                continue
+            act = self.foreign_actions.get(oid)
+            if act is None:
+                if n >= max_reads or not api.spare_reads(10):
+                    break
+                n += 1
+                try:
+                    act = str((api.order(oid) or {}).get("action") or "").lower() or None
+                except Exception as err:
+                    self.event("ERR", f"foreign order {oid} read: {err!r}")
+                    break
+                self.foreign_actions[oid] = act
+            if act in ("buy", "sell"):
+                f["action"] = act
+                if act == "sell":
+                    msg = f"AUDIT {self.name(f['ex'])}: a fill of order {oid} (not the engine's) is a SALE of {f['qty']:,.0f} {f['side'].upper()} at {f['price']:.3f} (SIG's order record)"
+                    self.event("AUDIT", msg); self.night.line(msg)
 
     def manual_book(self, now):
         """C95c (Piero 15:27 Oct 16: the no-edge release sold 8,356 of his 25,000 SC-01 D YES bought by hand): a fill of an order the
@@ -4777,11 +4818,140 @@ class Engine:
             first = max(floor_, bots.tick_up(round(top + (FMM["exit_ring_c"] if ring else FMM["exit_c"]), 6)))
             oa = self.fmm_others_ask(ex, side)
             have = cur.get(sub)
-            if have is not None and have >= floor_ - 1e-9:
+            if self.gapmm_live():                            # C99c: the gap-median exit, live after the 10:00 gate (docs/gapmm.md §7)
+                gpx = self.gap_exit_px(ex, side, top, avg, now)
+                gfl = self.gap_floor(top, avg)
+                if have is None:
+                    px = gpx if gpx is not None else gfl
+                else:
+                    px = self.gap_keep(("live", sub), have, gpx, gfl, now)
+            elif have is not None and have >= floor_ - 1e-9:
                 px = max(floor_, oa) if oa is not None and oa < have - 1e-9 else have
             else:
                 px = max(first, oa) if oa is not None else first
             self.fmm_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg))
+
+    def gap6(self, now):
+        """{ex: median of (print price - PM fair at the print), YES terms, over the last 6 h} from the tape files (every 10 min)."""
+        c = getattr(self, "_gap6", None)
+        if c and now - c[0] < GAPMM["refresh_s"]:
+            return c[1]
+        gaps, cut = collections.defaultdict(list), now - GAPMM["window_s"]
+        for d in range(2):
+            fn = os.path.join(DATA, "intel", "trades", time.strftime("%Y-%m-%d", time.localtime(now - 86400 * d)) + ".jsonl")
+            try:
+                with open(fn) as fh:
+                    for line in fh:
+                        try:
+                            r = json.loads(line)
+                        except ValueError:
+                            continue
+                        if (r.get("ts") or 0) >= cut and r.get("p") is not None and r.get("fair") is not None:
+                            gaps[str(r.get("ex"))].append(float(r["p"]) - float(r["fair"]))
+            except OSError:
+                continue
+        self._gap6 = (now, {ex: statistics.median(v) for ex, v in gaps.items() if len(v) >= int(GAPMM.get("min_prints") or 1)})   # docs/gapmm.md §7: >= 10 prints
+        return self._gap6[1]
+
+    def gap_floor(self, top, avg):
+        return max(bots.tick_up(round(top + FMM["exit_c"], 6)), bots.tick_up(round(avg + RULE0_MARGIN, 6)))
+
+    def gap_exit_px(self, ex, side, top, avg, now):
+        """F1 (docs/gapmm.md §7): max(fill + 0.5c, lot avg + 0.5c, side fair + the 6-h median gap on that side), the target rounded up to the
+        tick; None without a fair or a median (< 10 prints)."""
+        fs = self.side_fair(ex, side)
+        g = self.gap6(now).get(str(ex))
+        if fs is None or g is None:
+            return None
+        g_side = g if side == "yes" else -g
+        return min(max(self.gap_floor(top, avg), bots.tick_up(round(fs + g_side, 6))), 0.99)
+
+    def gap_keep(self, key, have, target, floor_, now):
+        """§7.6 keep-place: the ask moves to the target only after the target has differed from it by >= 1 tick for > 10 min without a
+        break (either direction, never below the floor); without a target it stays where it is."""
+        away = self._gap_away = getattr(self, "_gap_away", {})
+        if target is None or abs(target - have) < 0.005 - 1e-9:
+            away.pop(key, None)
+            return max(have, floor_)
+        t0 = away.setdefault(key, now)
+        if now - t0 > float(GAPMM.get("repeg_s") or 600):
+            away.pop(key, None)
+            return max(target, floor_)
+        return max(have, floor_)
+
+    def gapmm_live(self):
+        return bool(GAPMM.get("on") and (self.fmm_state().get("gapmm") or {}).get("live"))
+
+    def gapmm_paper_on(self, now):
+        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+        return bool(GAPMM.get("on")) and GAPMM["paper_from"] <= t < GAPMM["live_at"] and self.fmm_mode(now) == "live"
+
+    def gapmm_paper_step(self, now):
+        """06:00-10:00: every live FMM lot gets a paper ask at the F1 price (depth ahead from the feed's book when placed; re-placed when the
+        price moves a tick); fills come from the prints (fmm_paper_print's half rate). Nothing is sent."""
+        P = self.gap_paper
+        live_subs = set()
+        for sub, (ex, side, q, avg) in self.fmm_lots().items():
+            if q < MIN_QTY:
+                continue
+            live_subs.add(sub)
+            lots = [l for l in self.lots(ex, side, sub) if l[0] >= 1 and l[2] == "engine"]
+            top = max([l[1] for l in lots] + [avg])
+            target = self.gap_exit_px(ex, side, top, avg, now)
+            a = P["asks"].get(sub)
+            if a is None:
+                px = target if target is not None else self.gap_floor(top, avg)   # at the fill: max(floor, target), the floor without one
+            else:
+                px = self.gap_keep(("paper", sub), a["px"], target, self.gap_floor(top, avg), now)
+                if abs(a["px"] - px) < 1e-9:
+                    continue
+            fb = self.fmm_paper_book(ex)
+            ahead = 0.0
+            if fb is not None:
+                lv = fb[1] if side == "yes" else [(round(1 - p_, 3), q_) for p_, q_ in fb[0]]
+                ahead = sum(q_ for p_, q_ in lv if abs(p_ - px) < 1e-9)
+            sold = a["sold"] if a else 0.0
+            P["asks"][sub] = dict(ex=ex, side=side, px=px, qty=(a["qty"] if a else q), cost=avg, ahead=ahead, cum=0.0, sold=sold, placed=now)
+        for sub in [s_ for s_, a in P["asks"].items() if s_ not in live_subs and a["sold"] < a["qty"] - 1]:
+            P["asks"].pop(sub, None)                         # the lot left FMM (sold or locked): no paper ask without a lot
+
+    def gapmm_paper_print(self, ex, ts, p, q):
+        P = self.gap_paper
+        for sub, a in P["asks"].items():
+            if a["ex"] != ex or ts < a["placed"] or a["sold"] >= a["qty"] - 1e-9:
+                continue
+            ps = p if a["side"] == "yes" else 1 - p
+            if ps >= a["px"] - 1e-9:
+                a["cum"] += q
+                new = min(a["qty"], max(0.0, a["cum"] - a["ahead"]) * 0.5) - a["sold"]
+                if new >= 1:
+                    a["sold"] += new; P["fills"] += 1; P["realized"] += new * (a["px"] - a["cost"])
+                    if a["sold"] >= a["qty"] - 1:
+                        P["done"] += 1
+                    try:
+                        self.intel_write(f"paper/gapmm-{time.strftime('%Y-%m-%d')}.jsonl", dict(t=stamp(), ev="exit", ex=ex, name=self.name(ex), side=a["side"], px=a["px"],
+                                                                                              qty=round(new), cost=a["cost"], realized=round(new * (a["px"] - a["cost"]), 2)))
+                    except Exception:
+                        pass
+
+    def gapmm_gate(self, now):
+        """10:00: live on FMM exits if the replay passed (docs/gapmm.md) and paper realized >= 0; logged once."""
+        st = self.controls.d.setdefault("fmm", {})
+        g = st.setdefault("gapmm", {})
+        if g.get("decided") or not GAPMM.get("on") or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) < GAPMM["live_at"]:
+            return
+        P = self.gap_paper
+        ok = bool(GAPMM.get("replay_ok")) and P["realized"] >= -1e-9 and self.fmm_mode(now) == "live"
+        with self.controls.lock:
+            g.update(decided=stamp(), live=ok, paper=dict(realized=round(P["realized"], 2), fills=P["fills"], done=P["done"])); self.controls.save()
+        msg = (f"GAPMM GATE {time.strftime('%H:%M', time.localtime(now))}: {'LIVE on FMM exits' if ok else 'stays on paper'} — {GAPMM['replay_note']}; "
+               f"paper 06:00-10:00: {P['fills']} fills, {P['done']} lots out, realized {P['realized']:+,.1f}" + ("" if self.fmm_mode(now) == "live" else f"; FMM is {self.fmm_mode(now)}"))
+        self.event("FMM", msg); self.night.line(msg)
+
+    def gapmm_line(self, now):
+        P = self.gap_paper
+        mode = "live" if self.gapmm_live() else "paper" if self.gapmm_paper_on(now) else "off"
+        return f"GAPMM ({mode}) exits at max(fill + 0.5c, fair + 6-h median gap): paper asks {len(P['asks'])}, fills {P['fills']}, lots out {P['done']}, paper realized {P['realized']:+,.1f}"
 
     def fmm_note_guard(self, msg):
         k = ("guard", msg[:40], int(time.time() // 300))
@@ -8736,6 +8906,23 @@ class Engine:
                     return float(t_.get("avg") or ((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
                 subs_iter.sort(key=_avg)
             fresh_inv = now - self.inv_new_t.get(str(ex), 0.0) < 600   # C95c: maybe Piero's own trade, its fill record still coming
+            anc = self.sale_anchor.get(str(ex)) if (str(ex) in fund_left or str(ex) in self.carry_sell) else None
+            if anc is not None and anc.get("side") != side:
+                anc = None; self.sale_anchor.pop(str(ex), None)
+            if anc is not None:                              # Piero 01:05 item 4: re-peg only after the others' best ask sat below ours >= 5 min
+                oa = self.fmm_others_ask(str(ex), side)
+                if oa is not None and oa < anc["px"] - 1e-9:
+                    anc.setdefault("below", now)
+                    if now - anc["below"] >= SALE_REPEG_S:
+                        old_px = anc["px"]
+                        anc.update(px=round(oa, 3), t=now); anc.pop("below", None)
+                        self.sale_stats[str(ex)]["repegs"] += 1
+                        msg = f"SALE REPEG {self.name(ex)} {side.upper()}: the best ask sat at {oa:.3f} < our {old_px:.3f} for {SALE_REPEG_S // 60} min: down to max(lot avg + 0.5c, {oa:.3f})"
+                        self.event("RELEASE", msg); self.night.line(msg)
+                else:
+                    anc.pop("below", None)
+            bidsell = (NIGHT_SELL.get("on") and NIGHT_SELL["since"] <= time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) < NIGHT_SELL["until"]
+                       and self.fmm_mode(now) == "live" and self.fmm_free() < float(NIGHT_SELL["fmm_free_target"]) and self.night_sold() < float(NIGHT_SELL["cap"]))
             for sub, v in subs_iter:
                 if sub == "inventory" and fresh_inv:
                     continue
@@ -8763,10 +8950,16 @@ class Engine:
                     if str(ex) not in self.carry_sell:
                         continue                            # C98: a carry lot is held to settlement unless the carry rule sells it
                     px, reason = max(ask, floor_), "carry sale"
+                    px, reason = self.sale_price(ex, side, px, floor_, bid, reason, anc, bidsell)
+                    if px is None:
+                        continue
                 elif str(ex) in fund_left:
                     if sub.startswith("rot:"):
                         continue                            # C97 item 1: rotation lots are not the fund's
                     px, reason = max(ask, floor_), "fund sale"   # C97 item 1 (Piero 15:55 Oct 17): every lot that clears rule 0, core included
+                    px, reason = self.sale_price(ex, side, px, floor_, bid, reason, anc, bidsell)
+                    if px is None:
+                        continue
                 elif str(ex) in rot_left and not sub.startswith("rot:"):
                     px, reason = max(ask, floor_), "rotation sale"   # C94 item 1: the favourites Piero named, whatever their return left or core status
                 elif key in forced:
@@ -8789,8 +8982,10 @@ class Engine:
                     take = min(take, int(shortfall[ex]))
                 if reason == "rotation sale":
                     take = min(take, int(rot_left[str(ex)]))
-                if reason == "fund sale":
+                if reason.startswith("fund sale"):
                     take = min(take, int(fund_left[str(ex)]))
+                if reason.endswith("at the bid"):
+                    take = min(take, int(max(0.0, float(NIGHT_SELL["cap"]) - self.night_sold()) / max(px, 0.01)))
                 if take >= MIN_QTY:
                     if px_sale is not None and abs(px - px_sale) > 1e-9:
                         continue                            # one price per market per loop (the other lot waits for the next)
@@ -8800,10 +8995,12 @@ class Engine:
                         shortfall[ex] -= take               # C93e: the market's shortfall is shared by its sub-books (Oct 13 03:15: two dump lots each took the whole 2,505 -> 4,891 sold)
                     if reason == "rotation sale":
                         rot_left[str(ex)] -= take           # C94: the market's target is shared by its sub-books
-                    if reason == "fund sale":
+                    if reason.startswith("fund sale"):
                         fund_left[str(ex)] -= take          # C97: the market's fund target is shared by its sub-books
             if not split:
                 continue
+            if why in ("fund sale", "carry sale") and str(ex) not in self.sale_anchor:
+                self.sale_anchor[str(ex)] = dict(px=px_sale, side=side, t=now)   # posted once: this price is kept (item 4)
             n = sum(split.values())
             left = fs - px_sale
             plan[ex] = dict(side=side, px=px_sale, cost=round(left, 4), subs=split, why=why, tier=0, ev=round(max(left, 0.0) * n, 2))
@@ -8812,6 +9009,8 @@ class Engine:
             listing.append(f"{self.name(ex)} {side.upper()} {n:,} @ {px_sale:.3f} ({(left / px_sale):.1%} left)")
             if self.rotation_logged.get(ex) == key:
                 continue
+            if ex in self.rotation_logged:
+                self.sale_stats[str(ex)]["reposts"] += 1         # the hourly churn count (item 4)
             self.rotation_logged[ex] = key
             msg = (f"POSTED {why.upper()} ask {self.name(ex)} {side.upper()} {n:,} at {px_sale:.3f} ({'touch' if abs(px_sale - ask) < 1e-9 else 'lot average + 0.5c' if why != 'h1 shortfall' else 'the bid'}): "
                    f"{left / px_sale:.1%} return left to settlement ({left * 100:.1f}c), would free {n * px_sale:,.0f}; lots " + ", ".join(f"{k.split(':')[0]} {v:,}" for k, v in split.items()))
@@ -9018,6 +9217,11 @@ class Engine:
         if self.fmm_paper["orders"] or self.fmm_paper["asks"]:
             try:
                 self.fmm_paper_print(ex, float(ts), float(p), float(q or 0))
+            except Exception:
+                pass
+        if self.gap_paper["asks"]:
+            try:
+                self.gapmm_paper_print(ex, float(ts), float(p), float(q or 0))
             except Exception:
                 pass
 
@@ -10101,7 +10305,7 @@ class Engine:
                     continue
             else:
                 cap_left = self.carry_cap(c["race"]) - race_cost[c["race"]] + (have[0] * have[1] if have else 0.0)
-                q = int(min(cap_left, room) / px)
+                q = int(min(min(cap_left, room) / px, float(CARRY.get("max_bid_sh") or 1e12)))
                 if q < CARRY["min_clip"] or not self.carry_party_ok(ex, side, q * px, party):
                     continue
                 room -= q * px; race_cost[c["race"]] += q * px
@@ -10130,6 +10334,50 @@ class Engine:
             self.event("CARRY", msg); self.night.line(msg)
         if len(self.carry_seen) > 5000:
             self.carry_seen = set(list(self.carry_seen)[-2000:])
+
+    def sale_price(self, ex, side, px, floor_, bid, reason, anc, bidsell):
+        """Piero 01:05 Oct 18: tonight a fund / carry lot sells at the bid when the bid >= lot avg + 0.5c (item 3); otherwise its ask keeps the
+        anchored price (item 4) — a lot whose floor is above the anchor waits (None)."""
+        if bidsell and bid is not None and bid >= floor_ - 1e-9:
+            return bid, reason + " at the bid"
+        if anc is not None:
+            if anc["px"] < floor_ - 1e-9:
+                return None, reason
+            return anc["px"], reason
+        return px, reason
+
+    def night_sold(self):
+        """Cash sold tonight by the release layer (fund and carry sales and the rest) since NIGHT_SELL['since']."""
+        key = len(self.ledger.fills)
+        if getattr(self, "_night_key", None) == key:
+            return self._night_sold
+        tot = sum(f["qty"] * (1 - f["price"]) for f in self.ledger.fills[-2000:]
+                  if f.get("layer") == "release" and f.get("action") == "buy" and str(f.get("t", "")) >= NIGHT_SELL["since"])
+        self._night_key, self._night_sold = key, tot
+        return tot
+
+    def sale_churn_line(self):
+        st = {ex: c for ex, c in self.sale_stats.items() if sum(c.values())}
+        line = "SALES churn (fund / carry asks, since the last line): " + (", ".join(f"{self.name(ex)} reposts {c['reposts']} re-pegs {c['repegs']}" for ex, c in sorted(st.items(), key=lambda kv: -sum(kv[1].values()))[:8]) or "none")
+        line += f"; resting anchors {len(self.sale_anchor)}; sold tonight {self.night_sold():,.0f} of {NIGHT_SELL['cap']:,.0f} at the bid / touch"
+        self.sale_stats.clear()
+        return line
+
+    def manual_line(self):
+        """Piero 01:05 item 7: his manual tickets, next to the party line — SIG's position vs the manual sub-book."""
+        rows = []
+        for ex, books in self.ledger.subbooks.items():
+            m = float(books.get("manual", 0.0) or 0.0)
+            if abs(m) < 1:
+                continue
+            pos = float((self.book.get(str(ex)) or {}).get("pos") or 0)
+            side = "yes" if pos >= 0 else "no"
+            fs = self.side_fair(str(ex), side)
+            avg = float(((self.book.get(str(ex)) or {}).get("row") or {}).get("avgCost") or 0)
+            tag = "R ticket" if self.party_dir(str(ex), side) == "R" else "D ticket" if self.party_dir(str(ex), side) == "D" else "ticket"
+            note = "" if abs(abs(pos) - abs(m)) < 1 else f" (manual sub-book {m:+,.0f}: off SIG's {pos:+,.0f})"
+            rows.append(f"{self.name(ex)} {side.upper()} SIG {abs(pos):,.0f} @ {avg:.3f} = {abs(pos) * avg:,.0f} at cost, fair {fs if fs is None else round(fs, 3)} [{tag}]{note}")
+        return "MANUAL (Piero's tickets): " + ("; ".join(rows) if rows else "none")
 
     def carry_party_ok(self, ex, side, notional, party):
         """alpha_spec §5.5: a carry buy on a close-race side (0.20-0.80) may not raise |net party exposure| above the cap."""
