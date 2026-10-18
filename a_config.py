@@ -510,6 +510,7 @@ FMM = dict(on=True, fav_min=0.75, edge=0.02, levels=(0, 1, 2, 3), level_step=0.0
            k_live=3.0, k_step=5.0, k5_ok=True, inv_cap_live=30_000.0, inv_cap_step=30_000.0, cap_tol=250.0,   # Piero 15:55 Oct 17 item 2: 30k now (Sunday's step brought forward)
            exit_c=0.005, exit_ring_c=0.01, ring=(("07:00", "08:00"), ("12:00", "15:00"), ("19:30", "21:00")),
            refill_s=60.0, take_ttl_s=120, fast_writes=5, lock_cost=0.985, lock_cap_sh=10_000, hedge=True,   # item 4b: locks only at a walked cost <= 0.985
+           nset_skip=("Alaska Senate",),                   # Piero 01:05 Oct 18 item 6: no Alaska all-NO set
            paper_from="2026-10-17 06:00:00", live_at="2026-10-17 10:00:00", step_at="2026-10-18 10:00:00",
            manual_reserve_live=2_000.0, rot_cap_live=30_000.0, stop_fair=-150.0, replay_ok=True,
            replay_note="replay v2 Oct 8-16, docs/fmm.md: realized > 0 on 7-9 of 9 days in every config; touch-3 / best-ask exits / K 3 / 15k +855 on 7 of 9 days; "
@@ -525,7 +526,7 @@ ALLOC = dict(on=True, since="2026-10-17 15:55:00",
              catcher_mark_c=0.03,              # item 4a: L0 / L1 only, >= 3c under the 6-h VWAP mark and below PM fair
              lock_cap=10_000.0)                # item 4b: all locks (pair sets + hedge locks) <= 10k at cost, from idle cash only
 FUND = dict(on=True, since="2026-10-17 15:55:00",  # item 1: GTC asks at max(lot avg + 0.5c, touch), place kept, core lots included; the cash is not the rotation's
-            sells={"1075": 1_000_000, "1072": 3_904, "986": 2_172, "980": 2_000, "964": 2_008, "1045": 1_355, "894": 974, "896": 1_030},
+            sells={"1075": 1_000_000, "1072": 3_904, "986": 2_172, "980": 2_000, "964": 2_008},   # Piero 01:05 Oct 18 item 5: Kansas D NO, CO-03 D NO, CO-04 D NO dropped (R-side; the party cap)
             sell_all_subs=("1075",))           # Delaware Senate R NO: every lot (its reservoir is retired, swing sub included)
 # ---- C98 (alpha_spec §2, Piero 16:35 Oct 17): the CARRY book — the favourites in the holdings bucket, held to settlement (no +0.5c exits),
 # rebalanced every 30 min: sell EV/$ held <= 6.5% (rule 0 holds), buy resting bids on EV/$ >= 11% favourites

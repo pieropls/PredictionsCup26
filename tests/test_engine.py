@@ -6059,6 +6059,19 @@ class FMMTests(EngineCase):
         keep_c, _ = eng.repeg_grace(eng.owner[a], [o], [dict(layer="fmmexit", sub=sub, side="no", action="buy")], time.time())
         self.assertEqual([x["id"] for x in keep_c], ["990003"], "an FMM exit re-pegs at once")
 
+    def test_fmm_restart_control_clears_the_stop_with_cap_and_k(self):
+        fake, eng, mk = self.rig()
+        self.live(eng)
+        eng.controls.d["fmm"]["stopped"] = dict(t="x", why="cash 546 under the 5,000 floor")
+        self.assertEqual(eng.fmm_mode(time.time()), "stopped")
+        msg = f_engine.EngineControls(eng).apply("fmm_restart", dict(inv_cap=30_000, K=3))
+        self.assertIn("RESTARTED", msg)
+        st = eng.controls.d["fmm"]
+        self.assertEqual(eng.fmm_mode(time.time()), "live")
+        self.assertEqual((st["inv_cap"], st["K"]), (30_000.0, 3.0))
+        with self.assertRaises(ValueError):
+            f_engine.EngineControls(eng).apply("fmm_restart", dict(inv_cap=99_000, K=3))
+
     def test_fmm_paper_mode_sends_zero_orders(self):
         fake, eng, mk = self.rig()
         a, c = mk[:2]

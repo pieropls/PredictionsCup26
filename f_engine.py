@@ -10246,7 +10246,7 @@ class Engine:
         cands = []
         for pb in self.pairs:
             n = len(pb.legs)
-            if n < 2 or len(set(pb.parties)) != n or now - getattr(pb, "last_nset", -1e9) < PAIR_COOLDOWN_S:
+            if n < 2 or len(set(pb.parties)) != n or now - getattr(pb, "last_nset", -1e9) < PAIR_COOLDOWN_S or pb.race in (FMM.get("nset_skip") or ()):
                 continue
             if not all(self.controls.allows(ex, "pairs") for ex in pb.legs) or any(self.ex.is_frozen(ex) for ex in pb.legs):
                 continue
@@ -11782,6 +11782,24 @@ class EngineControls:
                 clean[k] = v
             c.set_caps(layer, clean, by="dashboard")
             return f"{layer} caps {clean}"
+        if action == "fmm_restart":                        # Piero 01:05 Oct 18 item 2: FMM back on after a stop (cap / K as given)
+            st = c.d.setdefault("fmm", {})
+            if st.get("decision") != "live":
+                raise ValueError("FMM is not live (no gate decision yet): nothing to restart")
+            cap = float(args.get("inv_cap") or st.get("inv_cap") or FMM["inv_cap_live"])
+            k = float(args.get("K") or st.get("K") or FMM["k_live"])
+            if not (0 < cap <= 60_000 and 1 <= k <= 5):
+                raise ValueError("inv_cap must be in (0, 60k] and K in [1, 5]")
+            with c.lock:
+                was = st.pop("stopped", None)
+                st["inv_cap"], st["K"] = cap, k
+                st.setdefault("restarts", []).append(dict(t=stamp(), was=was, inv_cap=cap, K=k, by="dashboard"))
+                st["trims0"] = sum(v for k_, v in self.eng.ex.trims.items() if k_ in ("fmm", "fmmtake", "fmmexit", "fmmhedge"))
+                c.d["layers"].setdefault("fmm", dict(state="off", since=time.time(), caps={}, killed=None))["state"] = "full"
+                c.save()
+            msg = f"FMM RESTARTED by control (Piero): inventory cap {cap:,.0f}, K {k:g}; was stopped: {(was or {}).get('why', 'not stopped')}"
+            self.eng.event("FMM", msg); self.eng.night.line(msg)
+            return msg
         if action == "market":
             ex = str(args.get("ex"))
             if ex not in self.eng.owner:
