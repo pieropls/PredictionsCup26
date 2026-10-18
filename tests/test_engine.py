@@ -6425,6 +6425,20 @@ class C97Tests(EngineCase):
         rel = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, now + 960)
         self.assertNotEqual(rel.get(a, {}).get("why"), "fund sale at the bid", "never at the bid under SIG's position average + 0.5c")
 
+    def test_an_inventory_lot_never_sells_under_sigs_position_average_plus_half_a_cent(self):
+        fake, eng, favs = C94Tests.rig(self)
+        a = favs[0]
+        C93Tests.lot(self, eng, fake, a, "inventory", 3000, 0.80, (0.88, 0.885, 0.8825), 0.99)
+        loop(eng, fake); loop(eng, fake)
+        eng.ledger.subbooks[a] = {"inventory": 3000.0}; eng.lots_cache = (None, {})
+        eng.ledger.tranches["inventory"] = dict(ex="x", side="yes", kind="x", state="open", ts=time.time(), t="x", avg=0.80)   # a shared, wrong record
+        eng.book[a]["row"] = dict(eng.book[a].get("row") or {}, avgCost=0.891)
+        f_engine.FUND = dict(a_config.FUND, on=True, sells={a: 3000}, sell_all_subs=())
+        eng.controls.d["fund"] = dict(since=a_config.FUND["since"], sell_left={a: 3000}, cash_freed=0.0)
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        if a in plan:
+            self.assertGreaterEqual(plan[a]["px"], 0.896 - 1e-9, "never under SIG's average 0.891 + 0.5c")
+
     def test_a_foreign_sale_is_booked_as_a_sale_from_sigs_order_record(self):
         fake, eng, mk = FMMTests.rig(self)
         a = mk[0]

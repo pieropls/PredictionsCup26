@@ -8946,6 +8946,8 @@ class Engine:
                     self.event("RELEASE", f"LOT AVG CHECK {self.name(ex)} {side.upper()} {abs(v):,.0f} ({sub}): the ledger's lots average {float(avg):.3f}, SIG's position average {sig_avg:.3f} "
                                           f"(SIG averages every buy and lets a sale reduce the quantity at that average; the lots are what rule 0 holds): the ask floors at {float(avg) + RULE0_MARGIN:.3f}")
                 floor_ = bots.tick_up(round(float(avg) + RULE0_MARGIN, 6))
+                if sub == "inventory" and sig_avg:
+                    floor_ = max(floor_, bots.tick_up(round(sig_avg + RULE0_MARGIN, 6)))   # C99e: 'inventory' has no lots of its own (its tranche key is shared): never under SIG's position average + 0.5c (Delaware 02:2x)
                 if sub.startswith("carry:"):
                     if str(ex) not in self.carry_sell:
                         continue                            # C98: a carry lot is held to settlement unless the carry rule sells it
