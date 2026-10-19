@@ -73,7 +73,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, CASH_FLOOR_RESUME, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
-                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM,
+                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM, SELL_HOLD, SELL_KEEP_LAYERS, CARRY_BIDSELL,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -430,6 +430,7 @@ class Engine:
         self.fmm_cash_seen, self.rot_seen_fills = set(), set()               # each fill once (the loop re-hands an order's earlier fills)
         self.carry_now, self.carry_sell, self.carry_t, self.carry_seen, self.carry_view = {}, {}, 0.0, set(), {}   # C98: the carry book
         self.sale_anchor, self.sale_stats, self.foreign_actions = {}, collections.defaultdict(collections.Counter), {}   # C99: sale asks keep their place; foreign fills' direction
+        self.sell_undercut, self.fmm_hour_prev, self.churn_t = {}, None, stamp()   # C100: per sell order, since when the others' best ask sits below ours; the FMM hour; churn window
         self.gap_paper = dict(asks={}, realized=0.0, fills=0, done=0)                                 # C99c: the gap-median exit on paper
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
@@ -812,6 +813,7 @@ class Engine:
         try:
             self.foreign_fill_actions()                     # C99: SIG's fills carry no buy / sell; a foreign order's direction comes from its record
             self.manual_book(now)                           # C95c: Piero's own fills -> the 'manual' sub-book (never sold by the engine)
+            self.az06_audit()                               # C100 item 2: once, SIG's record of Piero's four Oct 17 AZ-06 orders
         except Exception as err:
             self.event("ERR", f"manual book: {err!r}")
         self.ex.update(pos, self.open, as_of=now)
@@ -990,6 +992,10 @@ class Engine:
         for p in self.ex.pending():
             mine.setdefault(p["bot"], []).append(dict(p, id=None, price=p["price"]))
         plans = []
+        try:
+            self.sell_undercut_update(now)                  # C100 item 3: keep-place clocks for every sell order
+        except Exception as err:
+            self.event("ERR", f"sell keep-place: {err!r}")
         self.ladder_quota = int(LADDER_CAPACITY_SHARE * self.ex.capacity * max(LOOP_S, self.t.get("read", 0) + 5) / 60)
         tier_a = self.fat_tiers() if self.fat_now else set()
         for b in sorted(self.bots, key=lambda b: (b.kind != "position", b.ex not in tier_a, -self.sweep_rank.get(b.ex, (0, 0))[0],
@@ -1012,6 +1018,9 @@ class Engine:
                         if w.get("qmax") is not None:
                             w["qmax"] = min(w["qmax"], w["qty"])
                 wants = [w for w in wants if w["qty"] >= MIN_QTY]
+                hold = SELL_HOLD.get(str(b.ex))
+                if hold:                                    # C100 item 1: no layer sells (or nets with a buy of the other side) the held side
+                    wants = [w for w in wants if not ((w["action"] == "buy" and w["side"] != hold) or (w["action"] == "sell" and w["side"] == hold))]
             if self.drift_since:                            # C93: a timer only lives while its order rests
                 open_ids = {o["id"] for o in self.open}
                 for oid in list(self.drift_since):
@@ -3782,7 +3791,7 @@ class Engine:
                 self.event("ERR", f"carry status: {err!r}")
             try:
                 if self.fmm_mode(now) in ("paper", "live", "stopped"):
-                    self.night.line(self.fmm_status(now))  # fmm_spec §4: the hourly FMM line
+                    self.night.line(self.fmm_status(now, hourly=True))  # fmm_spec §4: the hourly FMM line (C100 item 4: + the last hour)
                 if GAPMM.get("on") and (self.gapmm_paper_on(time.time()) or self.gapmm_live() or self.gap_paper["fills"]):
                     self.night.line(self.gapmm_line(time.time()))
             except Exception as err:
@@ -4828,8 +4837,8 @@ class Engine:
                 else:
                     px = self.gap_keep(("live", sub), have, gpx, gfl, now)
             elif have is not None and have >= floor_ - 1e-9:
-                px = max(floor_, oa) if oa is not None and oa < have - 1e-9 else have
-            else:
+                px = min(have, max(first, oa)) if oa is not None and oa < have - 1e-9 else have   # C100: down to what a new post would take (ring hours: fill + 1c),
+            else:                                            # never up: IA-01 07:18-08:01 Oct 18 flipped 0.825 (new) <-> 0.820 (re-peg) each loop, 166 cancels
                 px = max(first, oa) if oa is not None else first
             self.fmm_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg))
 
@@ -5345,7 +5354,7 @@ class Engine:
     def fmm_unread_since_live(self):
         return bool(self.fmm_unread) or bool(self.fmm_bids())
 
-    def fmm_status(self, now):
+    def fmm_status(self, now, hourly=False):
         mode = self.fmm_mode(now)
         lat = sorted(self.fmm_lat)
         p50 = lat[len(lat) // 2] if lat else None; p90 = lat[int(len(lat) * 0.9)] if lat else None
@@ -5363,9 +5372,18 @@ class Engine:
         bids = self.fmm_bids()
         inv = sum(v[2] * v[3] for v in self.fmm_lots().values())
         lsh, lpr = self.fmm_locks_view()
+        hour = ""
+        if hourly:                                          # C100 item 4 (Piero 17:15 Oct 18): realized / round trips per hour and the inventory change
+            cur = (now, float(lv.get("realized") or 0), int(lv.get("rt") or 0), inv)
+            pv = self.fmm_hour_prev
+            if pv and now - pv[0] >= 600:
+                h = (now - pv[0]) / 3600
+                hour = (f"; last {h:.1f} h: realized {(cur[1] - pv[1]) / h:+,.1f}/h, round trips {(cur[2] - pv[2]) / h:,.1f}/h, inventory {cur[3] - pv[3]:+,.0f} "
+                        f"(resting {sum(o['qty'] * o['price'] for o in bids):,.0f})")
+            self.fmm_hour_prev = cur
         return (f"FMM ({mode}) quotes {len(bids)} / {sum(o['qty'] * o['price'] for o in bids):,.0f}; fills {lv.get('fills', 0)}, round trips {lv.get('rt', 0)}, "
                 f"realized {float(lv.get('realized') or 0):+,.0f}, P&L at fair {self.fmm_pnl_fair():+,.0f}; inventory at cost {inv:,.0f} of {self.fmm_inv_cap():,.0f}; "
-                f"locks {lsh:,.0f} shares / +{lpr:,.0f} locked; {cov}; {latx}; funds events {len(self.fmm_state().get('funds') or [])}")
+                f"locks {lsh:,.0f} shares / +{lpr:,.0f} locked; {cov}; {latx}; funds events {len(self.fmm_state().get('funds') or [])}{hour}")
 
     def track_rot(self, now):
         """C95 item 5: each rotation lot rests an ask at max(entry + 0.5c, PM fair - 1.5c) (GTC); it sells at the touch instead (a swap)
@@ -8896,11 +8914,13 @@ class Engine:
             res_subs = self.reservoir_subs(ex) if ex in self.reservoirs() else set()
             allow_all = (str(ex) in rot_left and str(ex) in (ROTATION.get("sell_all_subs") or ())) or (str(ex) in fund_left and str(ex) in (FUND.get("sell_all_subs") or ()))   # C95 / C97: the whole holding (swing sub included)
             side = "yes" if q > 0 else "no"
+            if SELL_HOLD.get(str(ex)) == side:
+                continue                                    # C100 item 1: held out of every sale rule (R-side, the party cap)
             bid, ask = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[:2]
             fs = self.side_fair(ex, side)
             if ask is None or fs is None:
                 continue
-            split, why, px_sale = {}, None, None
+            split, why, px_sale, anc_wait = {}, None, None, False
             subs_iter = list(self.ledger.subbooks.get(ex, {}).items())
             if str(ex) in rot_left or str(ex) in fund_left:   # C95b: a funding sale lists its lots lowest floor first, so the one-price-per-loop rule never starves the touch-priced lots
                 def _avg(kv):
@@ -8908,7 +8928,7 @@ class Engine:
                     return float(t_.get("avg") or ((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
                 subs_iter.sort(key=_avg)
             fresh_inv = now - self.inv_new_t.get(str(ex), 0.0) < 600   # C95c: maybe Piero's own trade, its fill record still coming
-            anc = self.sale_anchor.get(str(ex)) if (str(ex) in fund_left or str(ex) in self.carry_sell) else None
+            anc = self.sale_anchor.get(str(ex))            # C100 item 3: every sale rule keeps its place (was fund / carry only)
             if anc is not None and anc.get("side") != side:
                 anc = None; self.sale_anchor.pop(str(ex), None)
             if anc is not None:                              # Piero 01:05 item 4: re-peg only after the others' best ask sat below ours >= 5 min
@@ -8925,6 +8945,8 @@ class Engine:
                     anc.pop("below", None)
             bidsell = (NIGHT_SELL.get("on") and NIGHT_SELL["since"] <= time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) < NIGHT_SELL["until"]
                        and self.fmm_mode(now) == "live" and self.fmm_free() < float(NIGHT_SELL["fmm_free_target"]) and self.night_sold() < float(NIGHT_SELL["cap"]))
+            cbs = (not bidsell and self.carry_bidsell_on(now) and str(ex) not in (CARRY_BIDSELL.get("exclude") or ())
+                   and (self.carry_ev_held(ex, side) if self.carry_ev_held(ex, side) is not None else 1.0) <= CARRY_BIDSELL["ev_max"] + 1e-9)   # C100 item 4
             for sub, v in subs_iter:
                 if sub == "inventory" and fresh_inv:
                     continue
@@ -8951,23 +8973,37 @@ class Engine:
                 if sub == "inventory" and sig_avg:
                     floor_ = max(floor_, bots.tick_up(round(sig_avg + RULE0_MARGIN, 6)))   # C99e: 'inventory' has no lots of its own (its tranche key is shared): never under SIG's position average + 0.5c (Delaware 02:2x)
                 if sub.startswith("carry:"):
-                    if str(ex) not in self.carry_sell:
+                    if str(ex) not in self.carry_sell and not cbs:
                         continue                            # C98: a carry lot is held to settlement unless the carry rule sells it
-                    px, reason = max(ask, floor_), "carry sale"
-                    px, reason = self.sale_price(ex, side, px, floor_, bid, reason, anc, bidsell)
-                    if px is None:
-                        continue
+                    if str(ex) not in self.carry_sell:        # C100 item 4: EV/$ held <= 8% while FMM free < 15k: at the bid or not at all
+                        sig_fl = max(floor_, bots.tick_up(round(sig_avg + RULE0_MARGIN, 6))) if sig_avg else floor_
+                        if bid is None or bid < sig_fl - 1e-9:
+                            continue
+                        px, reason = bid, "carry sale at the bid"
+                    else:
+                        px, reason = max(ask, floor_), "carry sale"
+                        px, reason = self.sale_price(ex, side, px, floor_, bid, reason, anc, bidsell or cbs)
+                        if px is None:
+                            anc_wait = anc is not None
+                            continue
                 elif str(ex) in fund_left:
                     if sub.startswith("rot:"):
                         continue                            # C97 item 1: rotation lots are not the fund's
                     px, reason = max(ask, floor_), "fund sale"   # C97 item 1 (Piero 15:55 Oct 17): every lot that clears rule 0, core included
                     px, reason = self.sale_price(ex, side, px, floor_, bid, reason, anc, bidsell)
                     if px is None:
+                        anc_wait = anc is not None
                         continue
                 elif str(ex) in rot_left and not sub.startswith("rot:"):
-                    px, reason = max(ask, floor_), "rotation sale"   # C94 item 1: the favourites Piero named, whatever their return left or core status
+                    px, reason = self.sale_price(ex, side, max(ask, floor_), floor_, bid, "rotation sale", anc, False)   # C94 item 1; C100: keeps its place
+                    if px is None:
+                        anc_wait = anc is not None
+                        continue
                 elif key in forced:
-                    px, reason = max(ask, floor_), "core lock"
+                    px, reason = self.sale_price(ex, side, max(ask, floor_), floor_, bid, "core lock", anc, False)   # C100 item 3: VA-01's core-lock ask keeps its place
+                    if px is None:
+                        anc_wait = anc is not None
+                        continue
                 elif ex in shortfall and bid is not None and bid >= floor_ - 1e-9:
                     px, reason = bid, "h1 shortfall"      # item 4: at the best bid, >= lot average + 0.5c
                 else:
@@ -8976,7 +9012,10 @@ class Engine:
                     if sub.startswith("rot:") and ret >= ROTATION["release_exempt_ret"] - 1e-9:
                         continue                            # C94 item 3: a rotation lot has its own exit; the no-edge release takes it only under 2% left
                     if ret < NOEDGE["ret"] - 1e-9 or (fs < NOEDGE["low_fair"] - 1e-9 and fs - px < NOEDGE["low_edge_c"] - 1e-9):
-                        reason = "no-edge"
+                        px, reason = self.sale_price(ex, side, px, floor_, bid, "no-edge", anc, False)   # C100 item 3: keeps its place
+                        if px is None:
+                            anc_wait = anc is not None
+                            continue
                     else:
                         continue                            # item 1: >= 6% return left -> HOLD
                 if sub.startswith(self.OWN_EXIT_SUBS) and self.own_exit_resting(ex, sub):
@@ -8989,7 +9028,8 @@ class Engine:
                 if reason.startswith("fund sale"):
                     take = min(take, int(fund_left[str(ex)]))
                 if reason.endswith("at the bid"):
-                    take = min(take, int(max(0.0, float(NIGHT_SELL["cap"]) - self.night_sold()) / max(px, 0.01)))
+                    left_ = (float(NIGHT_SELL["cap"]) - self.night_sold()) if bidsell else (float(CARRY_BIDSELL["day_cap"]) - self.carry_bid_sold_today(now))
+                    take = min(take, int(max(0.0, left_) / max(px, 0.01)))
                 if take >= MIN_QTY:
                     if px_sale is not None and abs(px - px_sale) > 1e-9:
                         continue                            # one price per market per loop (the other lot waits for the next)
@@ -9001,26 +9041,31 @@ class Engine:
                         rot_left[str(ex)] -= take           # C94: the market's target is shared by its sub-books
                     if reason.startswith("fund sale"):
                         fund_left[str(ex)] -= take          # C97: the market's fund target is shared by its sub-books
+                    if reason.endswith("at the bid") and not bidsell:
+                        self.carry_bid_sent(now, ex, px)     # C100 item 4: the day's 7.5k counts these orders' fills
             if not split:
+                if anc_wait and not any(str(o["ex"]) == str(ex) and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "release" for o in self.open):
+                    self.sale_anchor.pop(str(ex), None)      # C100: no lot clears the kept price and nothing rests: the next post starts a new anchor
                 continue
-            if why in ("fund sale", "carry sale") and str(ex) not in self.sale_anchor:
-                self.sale_anchor[str(ex)] = dict(px=px_sale, side=side, t=now)   # posted once: this price is kept (item 4)
+            if why != "h1 shortfall" and not why.endswith("at the bid") and str(ex) not in self.sale_anchor:
+                self.sale_anchor[str(ex)] = dict(px=px_sale, side=side, t=now)   # posted once: this price is kept (item 4; C100: every sale rule)
             n = sum(split.values())
             left = fs - px_sale
             plan[ex] = dict(side=side, px=px_sale, cost=round(left, 4), subs=split, why=why, tier=0, ev=round(max(left, 0.0) * n, 2))
             self.release_why[ex] = (now, why)
-            key = (ex, round(px_sale, 3), n)
+            key = (ex, round(px_sale, 3))                    # C100 item 3: logged when the price changes, not when a fill shrinks it
             listing.append(f"{self.name(ex)} {side.upper()} {n:,} @ {px_sale:.3f} ({(left / px_sale):.1%} left)")
             if self.rotation_logged.get(ex) == key:
                 continue
-            if ex in self.rotation_logged:
-                self.sale_stats[str(ex)]["reposts"] += 1         # the hourly churn count (item 4)
             self.rotation_logged[ex] = key
             msg = (f"POSTED {why.upper()} ask {self.name(ex)} {side.upper()} {n:,} at {px_sale:.3f} ({'touch' if abs(px_sale - ask) < 1e-9 else 'lot average + 0.5c' if why != 'h1 shortfall' else 'the bid'}): "
                    f"{left / px_sale:.1%} return left to settlement ({left * 100:.1f}c), would free {n * px_sale:,.0f}; lots " + ", ".join(f"{k.split(':')[0]} {v:,}" for k, v in split.items()))
             self.rotation_log.append((now, msg))
             self.event("RELEASE", msg)
             self.night.line(msg)
+        live_rel = {str(o["ex"]) for o in self.open if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "release"}
+        for ex_ in [e for e in self.sale_anchor if e not in {str(k) for k in plan} and e not in live_rel]:
+            self.sale_anchor.pop(ex_, None)                  # C100: sold out (or no longer for sale) and nothing rests: the old kept price goes
         if listing and not getattr(self, "noedge_listed", False):
             self.noedge_listed = True
             self.night.line(f"NO-EDGE ASKS (Piero 15:30 item 2), {len(listing)} markets, {sum(p['px'] * sum(p['subs'].values()) for p in plan.values()):,.0f} at those prices: " + "; ".join(listing))
@@ -10370,11 +10415,107 @@ class Engine:
         return tot
 
     def sale_churn_line(self):
-        st = {ex: c for ex, c in self.sale_stats.items() if sum(c.values())}
-        line = "SALES churn (fund / carry asks, since the last line): " + (", ".join(f"{self.name(ex)} reposts {c['reposts']} re-pegs {c['repegs']}" for ex, c in sorted(st.items(), key=lambda kv: -sum(kv[1].values()))[:8]) or "none")
-        line += f"; resting anchors {len(self.sale_anchor)}; sold tonight {self.night_sold():,.0f} of {NIGHT_SELL['cap']:,.0f} at the bid / touch"
+        """C100 item 3: SIG cancels / posts per market of every sell rule (release, rotation exits) and of the FMM exits since the last line
+        (from the order records, not the log), the anchored re-pegs, and the carry bid-sales today."""
+        t0, t1 = self.churn_t, stamp()
+        self.churn_t = t1
+        canc, post = collections.Counter(), collections.Counter()
+        for rec in list(self.ledger.orders.values()):
+            lay = rec.get("layer")
+            if lay not in SELL_KEEP_LAYERS and lay != "fmmexit":
+                continue
+            k = ("FMM exits" if lay == "fmmexit" else str(rec.get("ex")))
+            if t0 <= str(rec.get("placed") or "") < t1:
+                post[k] += 1
+            if rec.get("status") == "cancelled" and t0 <= str(rec.get("closed") or "") < t1:
+                canc[k] += 1
+        keys = sorted(set(canc) | set(post), key=lambda k_: (-canc[k_], -post[k_]))
+        rows = [f"{k_ if k_ == 'FMM exits' else self.name(k_)} cancels {canc[k_]} posts {post[k_]}" + ("" if k_ == "FMM exits" else f" re-pegs {self.sale_stats[k_]['repegs']}")
+                for k_ in keys[:8]]
+        line = f"SALES churn (every sell rule; SIG cancels / posts since {t0[11:16]}): " + (", ".join(rows) or "none")
+        line += (f"; resting anchors {len(self.sale_anchor)}; carry bid-sales today {self.carry_bid_sold_today(time.time()):,.0f} of {CARRY_BIDSELL['day_cap']:,.0f}"
+                 f" (on while FMM free < {CARRY_BIDSELL['fmm_free_target']:,.0f}: FMM free {self.fmm_free():,.0f})")
         self.sale_stats.clear()
         return line
+
+    def sell_undercut_update(self, now):
+        """C100 item 3: for every resting sell order of the keep-place layers, since when the others' best ask has sat below ours (none:
+        it hasn't); repeg_grace lets a re-peg down through only after SALE_REPEG_S of it, never a re-peg up."""
+        live = set()
+        for o in self.open:
+            rec = self.ledger.orders.get(o["id"]) or {}
+            if rec.get("layer") not in SELL_KEEP_LAYERS or o["action"] != "buy" or not self.ex.owned(o["id"]):
+                continue
+            live.add(o["id"])
+            held = "no" if o["side"] == "yes" else "yes"
+            oa = self.fmm_others_ask(str(o["ex"]), held)
+            if oa is not None and oa < round(1 - o["price"], 3) - 1e-9:
+                self.sell_undercut.setdefault(o["id"], now)
+            else:
+                self.sell_undercut.pop(o["id"], None)
+        for oid in [k for k in self.sell_undercut if k not in live]:
+            self.sell_undercut.pop(oid, None)
+
+    def carry_bidsell_on(self, now):
+        """C100 item 4: carry lots with EV/$ held <= 8% sell at the bid while FMM is live with free cash < 15k, up to 7.5k a day."""
+        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+        return bool(CARRY_BIDSELL.get("on") and t >= CARRY_BIDSELL["since"] and self.fmm_mode(now) == "live"
+                    and self.fmm_free() < float(CARRY_BIDSELL["fmm_free_target"]) and self.carry_bid_sold_today(now) < float(CARRY_BIDSELL["day_cap"]))
+
+    def carry_bid_sent(self, now, ex, px):
+        """The (market, price) of a carry bid-sale order, kept for the day (its fills count toward the 7.5k)."""
+        day = time.strftime("%Y-%m-%d", time.localtime(now))
+        c = self.controls
+        d = c.d.get("cbs") or {}
+        if d.get("day") != day:
+            d = dict(day=day, px=[])
+        k = [str(ex), round(1 - float(px), 3)]
+        if k not in d["px"]:
+            with c.lock:
+                d["px"] = d["px"] + [k]
+                c.d["cbs"] = d
+                c.save()
+
+    def carry_bid_sold_today(self, now):
+        """Cash of today's release fills at a carry bid-sale's price on a carry sub-book (C100 item 4's daily 7.5k)."""
+        day = time.strftime("%Y-%m-%d", time.localtime(now))
+        d = self.controls.d.get("cbs") or {}
+        if d.get("day") != day or not d.get("px"):
+            return 0.0
+        sent = {(a, round(float(b), 3)) for a, b in d["px"]}
+        key = (len(self.ledger.fills), len(sent), day)
+        if getattr(self, "_cbs_key", None) == key:
+            return self._cbs_sold
+        tot = 0.0
+        for f in self.ledger.fills[-3000:]:
+            if f.get("layer") != "release" or not str(f.get("t", "")).startswith(day) or (str(f.get("ex")), round(float(f["price"]), 3)) not in sent:
+                continue
+            if str((self.ledger.orders.get(str(f.get("order") or "")) or {}).get("sub") or "").startswith("carry:"):
+                tot += f["qty"] * (1 - f["price"])
+        self._cbs_key, self._cbs_sold = key, tot
+        return tot
+
+    AZ06_ORDERS = ("46303780", "46306401", "46313591", "46315471")
+
+    def az06_audit(self):
+        """C100 item 2, once: SIG's own record (action / side / quantity / price) of Piero's four AZ-06 orders of Oct 17 15:54-15:57."""
+        c = self.controls
+        if (c.d.get("c100_az06") or {}).get("done") or not api.spare_reads(20):
+            return
+        out = []
+        for oid in self.AZ06_ORDERS:
+            try:
+                r = api.order(oid) or {}
+            except Exception as err:
+                self.event("ERR", f"AZ-06 order {oid} read: {err!r}")
+                return
+            out.append(f"{oid} {str(r.get('action') or '?').lower()} {str(r.get('side') or '?').upper()} {r.get('quantity')} at {r.get('price')} "
+                       f"(filled {r.get('filledQuantity', r.get('filled', '?'))}, {r.get('status') or ('open' if r.get('open') else 'closed')})")
+        msg = "AUDIT AZ-06 House race R (Piero's Oct 17 15:54-15:57 orders, SIG's records): " + "; ".join(out)
+        self.event("AUDIT", msg); self.night.line(msg)
+        with c.lock:
+            c.d["c100_az06"] = dict(done=stamp(), orders=out)
+            c.save()
 
     def manual_line(self):
         """Piero 01:05 item 7: his manual tickets, next to the party line — SIG's position vs the manual sub-book."""
@@ -10679,6 +10820,17 @@ class Engine:
         keep_c, deferred = [], collections.Counter()
         for o in cancels:
             k = key(o)
+            if o.get("layer") in SELL_KEEP_LAYERS and o.get("id") and want_keys.get(k):   # C100 item 3 (Piero 17:15 Oct 18): post once and keep place
+                w = next((w for w in places if key(w) == k), None)
+                old_ask, new_ask = 1 - float(o["price"]), 1 - float(w["px"])
+                if abs(new_ask - old_ask) >= 1e-9:
+                    t_u = self.sell_undercut.get(o["id"])
+                    if new_ask > old_ask or t_u is None or now - t_u < SALE_REPEG_S:
+                        want_keys[k] -= 1
+                        deferred[k] += 1
+                        continue                            # never up; down only after the others' best ask sat below ours >= 5 min
+                    keep_c.append(o)
+                    continue
             if o.get("layer") == "fmmexit":                 # fmm_spec v2 §2.3: an FMM exit follows the best ask at once
                 keep_c.append(o)
                 continue

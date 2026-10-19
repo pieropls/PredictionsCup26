@@ -4963,7 +4963,7 @@ class C93Tests(EngineCase):
         self.assertTrue(any(e["text"].startswith("POSTED NO-EDGE ask") for e in eng.events))
         self.assertFalse(any("TRADING SALE" in e["text"] or "H3 SWAP" in e["text"] for e in eng.events))
 
-    def test_release_asks_are_gtc_and_a_repeg_waits_ten_minutes(self):
+    def test_release_asks_are_gtc_keep_their_place_and_repeg_down_only_after_5_min_undercut(self):
         fake, eng, favs = self.rig()
         eng.controls.d["layers"].setdefault("release", dict(state="off", caps={}, killed=None))   # the release asks are reducing orders: they pass with the layer off, as live
         b = favs[0]
@@ -4982,8 +4982,18 @@ class C93Tests(EngineCase):
         eng.drift_since[oid] = time.time() - a_config.REPEG_AWAY_S - 1
         loop(eng, fake); loop(eng, fake)
         rel3 = [o for o in fake.open_orders() if o["ex"] == b and (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "release"]
-        self.assertEqual(len(rel3), 1); self.assertNotEqual(rel3[0]["id"], oid, "re-pegged after 10 min")
-        self.assertAlmostEqual(1 - rel3[0]["price"], 0.915, places=3)
+        self.assertEqual([o["id"] for o in rel3], [oid], "C100 item 3: never re-pegged up (post once, keep place)")
+        fake.px[b] = eng.px[b] = (0.885, 0.895, 0.89)        # another seller asks 0.895, 2 ticks under our 0.905 (a tick keeps its place: C90)
+        loop(eng, fake); loop(eng, fake)
+        rel4 = [o for o in fake.open_orders() if o["ex"] == b and (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "release"]
+        self.assertEqual([o["id"] for o in rel4], [oid], "undercut < 5 min: kept")
+        self.assertIn(oid, eng.sell_undercut)
+        eng.sell_undercut[oid] = time.time() - a_config.SALE_REPEG_S - 1
+        eng.sale_anchor[str(b)]["below"] = time.time() - a_config.SALE_REPEG_S - 1
+        loop(eng, fake); loop(eng, fake)
+        rel5 = [o for o in fake.open_orders() if o["ex"] == b and (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "release"]
+        self.assertEqual(len(rel5), 1); self.assertNotEqual(rel5[0]["id"], oid, "undercut >= 5 min: re-pegged down")
+        self.assertAlmostEqual(1 - rel5[0]["price"], 0.895, places=3, msg="to max(lot avg + 0.5c, the others' best ask)")
 
     def test_h1_test_window_sleeve_stop_and_shortfall(self):
         fake, eng, favs = self.rig()
@@ -5032,6 +5042,7 @@ class C93Tests(EngineCase):
         plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
         self.assertIn(a, plan); self.assertAlmostEqual(plan[a]["px"], 0.335, places=3, msg="max(SIG avg 0.33 + 0.5c, touch 0.32)")
         eng.ledger.subbooks[a] = {f"sm:{a}": 200.0, "inventory": 292.0}     # the lot is less than the position: the tranche average stands
+        eng.sale_anchor.clear()                                              # (a new post: C100's kept price is another test)
         plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
         self.assertIn(a, plan); self.assertAlmostEqual(plan[a]["px"], 0.55, places=3)
 
@@ -6457,7 +6468,7 @@ class C97Tests(EngineCase):
         eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 6_000.0
         self.assertAlmostEqual(eng.fmm_priority(), 6_000.0, places=0, msg="free 6,000 < 10k: all FMM's")
         eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 25_000.0
-        self.assertAlmostEqual(eng.fmm_priority(), 10_000.0, places=0, msg="the first 10k only")
+        self.assertAlmostEqual(eng.fmm_priority(), 15_000.0, places=0, msg="the first 15k only (C100 item 4; was 10k)")
         eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 3_113.0
         eng.pnl_read_t = time.time() - 30; eng.fmm_unread = [(time.time(), 1_967.0)]   # FMM fills since the last cash read (07:58 Oct 18)
         self.assertAlmostEqual(eng.fmm_free(), 1_146.0 + eng.fmm_reserve_release(), places=0)
@@ -6495,8 +6506,8 @@ class C97Tests(EngineCase):
     def test_locks_take_at_most_10k_and_only_idle_cash(self):
         fake, eng, mk = FMMTests.rig(self)
         self.on(eng)
-        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 12_000.0
-        self.assertAlmostEqual(eng.fmm_lock_room(), 2_000.0, places=0, msg="free above FMM's first 10k")
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 17_000.0
+        self.assertAlmostEqual(eng.fmm_lock_room(), 2_000.0, places=0, msg="free above FMM's first 15k (C100; was 10k)")
         eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 40_000.0
         self.assertAlmostEqual(eng.fmm_lock_room(), 10_000.0, places=0, msg="the 10k cap")
         eng.ledger.baskets.append(dict(id="fl9", t="x", ts=time.time(), race="RZ", side="no", qty=7000, margin=0.015, legs=2, orders=[], repaired=False, state="held", h4=True, fmm=True))
@@ -6601,6 +6612,124 @@ class AlphaTests(EngineCase):
         eng.carry_room = lambda signed=False: 0.0
         kept = eng.carry_plan(time.time())
         self.assertEqual(kept[c][0]["qty"], 2000, "covered exactly: it keeps its place and size")
+
+
+
+class C100Tests(EngineCase):
+    """C100 (Piero 17:15 Oct 18): item 1 the held R-side lots (no sale rule, no layer); item 3 keep-place for every sell rule and the
+    FMM ring-hour flap; item 4 FMM's 15k and the carry bid-sales (EV/$ held <= 8%, 7.5k a day); the hourly FMM deltas; the AZ-06 audit."""
+
+    def test_held_lots_are_out_of_every_sale_rule_and_their_resting_ask_is_pulled(self):
+        fake, eng, favs = C93Tests.rig(self)
+        b = favs[0]
+        C93Tests.lot(self, eng, fake, b, f"dump:{b}:yes:1", 2000, 0.85, (0.90, 0.905, 0.9025), 0.94)   # a no-edge release lot
+        loop(eng, fake); loop(eng, fake)
+        eng.ledger.subbooks[b] = {f"dump:{b}:yes:1": 2000.0}; eng.lots_cache = (None, {})
+        loop(eng, fake); loop(eng, fake)
+        rel = lambda: [o for o in fake.open_orders() if o["ex"] == b and o["side"] == "no"]
+        self.assertTrue(rel(), "released before the hold")
+        f_engine.SELL_HOLD = {str(b): "yes"}
+        self.assertNotIn(b, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time()), "no sale rule lists it")
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(rel(), [], "its resting ask is pulled, and no layer buys the other side")
+        f_engine.SELL_HOLD = {}
+
+    def test_rotation_exits_never_repeg_up_and_go_down_only_after_5_min_undercut(self):
+        fake, eng, favs = C93Tests.rig(self)
+        b = eng.bots[0]
+        o = dict(id="880001", ex=b.ex, side="no", action="buy", price=0.45, qty=1000.0, layer="rotexit", sub=f"rot:{b.ex}:yes")   # ask 0.550
+        up = dict(side="no", action="buy", px=0.44, qty=1000, layer="rotexit", sub=f"rot:{b.ex}:yes")                             # ask 0.560
+        down = dict(up, px=0.47)                                                                                                    # ask 0.530
+        now = time.time()
+        self.assertEqual(eng.repeg_grace(b, [o], [up], now), ([], []), "never up: keeps its place")
+        self.assertEqual(eng.repeg_grace(b, [o], [down], now), ([], []), "down: not before the others' ask sat below ours")
+        eng.sell_undercut["880001"] = now - a_config.SALE_REPEG_S + 30
+        self.assertEqual(eng.repeg_grace(b, [o], [down], now), ([], []), "4.5 min: still kept")
+        eng.sell_undercut["880001"] = now - a_config.SALE_REPEG_S - 1
+        self.assertEqual(eng.repeg_grace(b, [o], [down], now), ([o], [down]), ">= 5 min: re-pegged down")
+        self.assertEqual(eng.repeg_grace(b, [o], [], now), ([o], []), "a pull goes at once")
+
+    def test_fmm_ring_exit_does_not_flip_between_fill_plus_1c_and_the_others_ask(self):
+        fake, eng, mk = FMMTests.rig(self)
+        a = mk[0]
+        C94Tests.c95_market(self, eng, fake, a, 0.90, (0.81, 0.82, 0.815), race="RX")   # the others ask 0.820 = fill + 0.5c
+        FMMTests.live(self, eng)
+        f_engine.FMM = dict(f_engine.FMM, ring=(("00:00", "23:59:59"),))
+        sub = f"fmm:{a}:yes:0.815"
+        eng.ledger.subbooks.setdefault(a, {})[sub] = 500.0
+        eng.ledger.tranches[sub] = dict(ex=a, side="yes", kind="fmm", state="open", ts=time.time(), t="x", avg=0.815, qty=500.0)
+        eng.track_fmm(time.time())
+        self.assertAlmostEqual(eng.fmm_view[a][0]["px"], 0.825, places=3, msg="new: fill + 1c in the ring")
+        eng.open.append(dict(id="990101", ex=a, side="no", action="buy", price=0.175, qty=500.0, status="open", filled=0))
+        eng.ledger.orders["990101"] = dict(id="990101", ex=a, side="no", action="buy", price=0.175, qty=500.0, layer="fmmexit", sub=sub, status="open", bot=f"MKT {a}", filled=0)
+        eng.fmm_others_ask = lambda ex, side: 0.82
+        for _ in range(3):
+            eng.track_fmm(time.time())
+            self.assertAlmostEqual(eng.fmm_view[a][0]["px"], 0.825, places=3, msg="resting: kept (IA-01 flipped 0.825 <-> 0.820 each loop)")
+        f_engine.FMM = dict(f_engine.FMM, ring=())
+
+    def test_fmm_priority_is_15k_and_carry_lots_under_8_pct_sell_at_the_bid_up_to_7_5k_a_day(self):
+        fake, eng, favs = AlphaTests.rig(self)
+        a = favs[0]
+        C93Tests.lot(self, eng, fake, a, f"carry:{a}:yes", 3000, 0.85, (0.88, 0.885, 0.8825), 0.95)   # EV/$ held at the bid 0.88: 7.95%
+        loop(eng, fake); loop(eng, fake)
+        eng.ledger.subbooks[a] = {f"carry:{a}:yes": 3000.0}; eng.lots_cache = (None, {})
+        eng.ledger.tranches[f"carry:{a}:yes"] = dict(ex=a, side="yes", kind="carry", state="open", ts=time.time(), t="x", avg=0.85)
+        fake.avg_cost[a] = 0.85
+        eng.book[a]["row"] = dict(eng.book[a].get("row") or {}, avgCost=0.85)
+        self.assertEqual(a_config.ALLOC["fmm_priority_free"], 15_000.0)
+        f_engine.CARRY_BIDSELL = dict(a_config.CARRY_BIDSELL, since="2000-01-01 00:00:00", exclude=())
+        FMMTests.live(self, eng)
+        eng.fmm_free = lambda: 6_000.0
+        eng.carry_sell = {}
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertIn(a, plan)
+        self.assertEqual((plan[a]["why"], plan[a]["px"]), ("carry sale at the bid", 0.88))
+        self.assertEqual(sum(plan[a]["subs"].values()), 3000)
+        self.assertIn([str(a), 0.12], eng.controls.d["cbs"]["px"], "its fills count toward the day's 7.5k")
+        # the fills count; the cap trims the next sale
+        eng.ledger.orders["771001"] = dict(id="771001", ex=a, side="no", action="buy", price=0.12, qty=3000, layer="release", sub=f"carry:{a}:yes", status="done", bot=f"MKT {a}")
+        eng.ledger.fills.append(dict(key="z:771001", order="771001", ex=a, side="no", action="buy", qty=3000.0, price=0.12, layer="release", t=time.strftime("%Y-%m-%d %H:%M:%S")))
+        self.assertAlmostEqual(eng.carry_bid_sold_today(time.time()), 2_640.0, places=0)
+        eng.ledger.fills.append(dict(key="z:771002", order="771001", ex=a, side="no", action="buy", qty=6000.0, price=0.12, layer="release", t=time.strftime("%Y-%m-%d %H:%M:%S")))
+        self.assertFalse(eng.carry_bidsell_on(time.time()), "7,920 >= 7,500 today: off")
+        eng.ledger.fills = eng.ledger.fills[:-2]; eng._cbs_key = None
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertIn(a, plan)
+        eng.fmm_free = lambda: 15_500.0
+        self.assertNotIn(a, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time()), "FMM free >= 15k: held again")
+        eng.fmm_free = lambda: 6_000.0
+        f_engine.CARRY_BIDSELL = dict(f_engine.CARRY_BIDSELL, exclude=(str(a),))
+        self.assertNotIn(a, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time()), "excluded (RI Senate R NO)")
+        f_engine.CARRY_BIDSELL = dict(f_engine.CARRY_BIDSELL, exclude=())
+        eng.px[a] = fake.px[a] = (0.85, 0.86, 0.855)                  # the bid 0.850 < lot avg + 0.5c: no sale (and no GTC ask: EV 11.8%)
+        self.assertNotIn(a, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time()), "under lot avg + 0.5c: never")
+
+    def test_hourly_fmm_line_adds_the_last_hour_and_the_az06_audit_runs_once(self):
+        fake, eng, mk = FMMTests.rig(self)
+        FMMTests.live(self, eng)
+        now = time.time()
+        eng.controls.d["fmm"]["live"] = dict(fills=10, realized=100.0, rt=4)
+        self.assertNotIn("last", eng.fmm_status(now, hourly=True), "the first hour has no previous line")
+        eng.controls.d["fmm"]["live"] = dict(fills=20, realized=130.0, rt=10)
+        line = eng.fmm_status(now + 3600, hourly=True)
+        self.assertIn("last 1.0 h: realized +30.0/h, round trips 6.0/h", line)
+        self.assertNotIn("last", eng.fmm_status(now + 3700), "the other reports stay as they were")
+        eng.churn_t = "2000-01-01 00:00:00"
+        for i, st in enumerate(("cancelled", "cancelled", "done")):
+            eng.ledger.orders[f"66000{i}"] = dict(id=f"66000{i}", ex=mk[0], layer="rotexit", side="no", action="buy", price=0.4, qty=100, status=st,
+                                                  placed=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 5)),
+                                                  closed=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 5)))
+        line = eng.sale_churn_line()
+        self.assertTrue(line.startswith("SALES churn (every sell rule"), line)
+        self.assertIn("cancels 2 posts 3", line)
+        reads = []
+        fake.order = lambda oid: reads.append(oid) or dict(id=int(oid), action="sell", side="yes", quantity=20000, price=0.21, open=False)
+        fake.spare_reads = lambda keep=30: True
+        eng.controls.d.pop("c100_az06", None)                     # (the rig's loops already ran it once against the fake)
+        eng.az06_audit(); eng.az06_audit()
+        self.assertEqual(reads, list(eng.AZ06_ORDERS), "four reads, once")
+        self.assertTrue(any(e["text"].startswith("AUDIT AZ-06") and "46313591 sell YES 20000" in e["text"] for e in eng.events))
 
 
 if __name__ == "__main__":

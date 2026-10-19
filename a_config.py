@@ -521,7 +521,7 @@ FMM_RACE_CAP = FMM["race_cap"]
 # ---- C97 (Piero 15:55 Oct 17): CAPITAL ALLOCATION — ~30k market making (FMM), ~30k coin flips (rotation), ~20k other (catcher 10k slice,
 # locks <= 10k at cost), holdings only what can't be sold at >= lot avg + 0.5c
 ALLOC = dict(on=True, since="2026-10-17 15:55:00",
-             fmm_priority_free=10_000.0,       # item 2: freed cash goes to FMM first, until FMM's free cash reaches 10k (the other layers see free above it)
+             fmm_priority_free=15_000.0,       # item 2: freed cash goes to FMM first, until FMM's free cash reaches 15k (C100, Piero 17:15 Oct 18 item 4; was 10k)
              catcher_slice=10_000.0,           # item 4a: the catcher's new lots (since `since`) at cost + its resting bids <= 10k
              catcher_mark_c=0.03,              # item 4a: L0 / L1 only, >= 3c under the 6-h VWAP mark and below PM fair
              lock_cap=10_000.0)                # item 4b: all locks (pair sets + hedge locks) <= 10k at cost, from idle cash only
@@ -533,6 +533,13 @@ FUND = dict(on=True, since="2026-10-17 15:55:00",  # item 1: GTC asks at max(lot
 # ask has sat below it >= 5 min, never below lot avg + 0.5c, never chasing up.
 NIGHT_SELL = dict(on=True, since="2026-10-18 01:05:00", until="2026-10-18 08:00:00", cap=15_000.0, fmm_free_target=10_000.0)
 SALE_REPEG_S = 300
+# C100 (Piero 17:15 Oct 18)
+SELL_HOLD = {"894": "no", "1045": "no"}   # item 1: CO-03 House race D NO and Kansas Senate D NO (R-side, the party cap) — out of every sale rule, no layer sells or nets them
+SELL_KEEP_LAYERS = ("release", "rotexit")   # item 3: every sell rule (fund, carry, core lock, no-edge, rotation sales / exits) posts once; re-pegs down only after the others' best
+                                            # ask has sat below ours >= SALE_REPEG_S (never up, never below lot avg + 0.5c: the plans' floor)
+CARRY_BIDSELL = dict(on=True, since="2026-10-18 17:15:00", ev_max=0.08, day_cap=7_500.0, fmm_free_target=15_000.0,
+                     exclude=("1077",))     # item 4: carry lots with EV/$ held <= 8% sell at the bid (bid >= lot avg + 0.5c and SIG avg + 0.5c), max 7.5k a day, until FMM free 15k;
+                                            # RI Senate R NO excluded (rotation / lock / pairset / manual lots are not carry lots)
 # Piero 01:05 Oct 18 item 8 (alpha_spec §3): the gap-median exit (docs/gapmm.md F1: +2,143 vs +1,698, 6 of 8 days at 6 h; 7 of 8 at 12 h) —
 # paper 06:00-10:00 on the live FMM lots, then live on FMM exits at 10:00 with the FMM gate: an FMM exit rests at
 # max(fill + 0.5c, lot avg + 0.5c, side fair + the book's 6-h median gap), the median gap = median of (print - PM fair at the print).
