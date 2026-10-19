@@ -10399,10 +10399,8 @@ class Engine:
         if bidsell and bid is not None and bid >= max(floor_, bots.tick_up(round(sig_avg + RULE0_MARGIN, 6)) if sig_avg else floor_) - 1e-9:
             return bid, reason + " at the bid"                  # C99d: at the bid only when it also clears SIG's position average + 0.5c (Delaware 01:55: -38 realized)
         if anc is not None:
-            if anc["px"] < floor_ - 1e-9:
-                return None, reason
-            return anc["px"], reason
-        return px, reason
+            return max(anc["px"], floor_), reason              # C100b: a kept price under this lot's floor rests at the floor (it was None: the ask was pulled and
+        return px, reason                                     # re-posted every 5 min after the anchor re-pegged under it, Alaska / PA-10 17:44-18:07 Oct 18)
 
     def night_sold(self):
         """Cash sold tonight by the release layer (fund and carry sales and the rest) since NIGHT_SELL['since']."""

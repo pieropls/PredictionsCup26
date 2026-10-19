@@ -6634,6 +6634,22 @@ class C100Tests(EngineCase):
         self.assertEqual(rel(), [], "its resting ask is pulled, and no layer buys the other side")
         f_engine.SELL_HOLD = {}
 
+    def test_an_ask_at_its_floor_above_the_touch_stays_when_the_kept_price_repegs_under_it(self):
+        fake, eng, favs = C93Tests.rig(self)
+        eng.controls.d["layers"].setdefault("release", dict(state="off", caps={}, killed=None))
+        b = favs[0]
+        C93Tests.lot(self, eng, fake, b, f"dump:{b}:yes:1", 2000, 0.92, (0.90, 0.905, 0.9025), 0.94)   # floor 0.925 > the touch 0.905
+        loop(eng, fake); loop(eng, fake)
+        eng.ledger.subbooks[b] = {f"dump:{b}:yes:1": 2000.0}; eng.lots_cache = (None, {})
+        loop(eng, fake); loop(eng, fake)
+        rel = lambda: [o for o in fake.open_orders() if o["ex"] == b and (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "release"]
+        self.assertEqual(len(rel()), 1); oid = rel()[0]["id"]
+        self.assertAlmostEqual(1 - rel()[0]["price"], 0.925, places=3)
+        eng.sale_anchor[str(b)]["below"] = time.time() - a_config.SALE_REPEG_S - 1   # the others' 0.905 sat under our 0.925 for 5 min
+        for _ in range(4):
+            loop(eng, fake)
+            self.assertEqual([o["id"] for o in rel()], [oid], "kept at its floor: never pulled and re-posted (Alaska 17:44-18:07)")
+
     def test_rotation_exits_never_repeg_up_and_go_down_only_after_5_min_undercut(self):
         fake, eng, favs = C93Tests.rig(self)
         b = eng.bots[0]
