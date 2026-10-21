@@ -435,6 +435,19 @@ class MarketBot:
             q = abs(subs.get(x["sub"], 0))
             if q >= MIN_QTY:
                 reduce_buy(x["side"], x["px"], int(q), "fmmexit", x["sub"], 86400, band=0.0, a2=False)
+        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], QTY_TOL, "drift", sub=x["sub"], ttl=x.get("ttl") or 120)   # C102: the night drift's takes
+                for x in (s.get("drift") or [])]
+        for x in s.get("callexit") or []:                    # C102 (C17, Piero's §5.4 YES): a lot a strict call says loses rests a sell at the best bid
+            q = abs(subs.get(x["sub"], 0))
+            if q >= MIN_QTY:
+                n0 = len(out)
+                reduce_buy(x["side"], x["px"], int(q), "callexit", x["sub"], 86400, band=0.0, a2=False)
+                for w in out[n0:]:
+                    w["rule0_margin"] = -1.0                 # RULE0-CALLED: may sell under lot avg + 0.5c (logged as such)
+        for x in s.get("drift_exits") or []:                 # C102: a drift lot's exit at max(fair - 1c, lot avg + 0.5c)
+            q = abs(subs.get(x["sub"], 0))
+            if q >= MIN_QTY:
+                reduce_buy(x["side"], x["px"], int(q), "driftexit", x["sub"], 86400, band=0.0, a2=False)
         for x in s.get("sm") or []:                          # turnover_plan §1: the spread maker's two quotes at the touch (the reducing side is an exit under rule 0)
             if x.get("reduce"):
                 reduce_buy(x["held"], x["sell_px"], int(x["qty"]), "smexit", x["sub"], x["ttl"], band=0.0, a2=False)

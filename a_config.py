@@ -537,6 +537,12 @@ SALE_REPEG_S = 300
 SELL_HOLD = {"894": "no", "1045": "no"}   # item 1: CO-03 House race D NO and Kansas Senate D NO (R-side, the party cap) — out of every sale rule, no layer sells or nets them
 SELL_KEEP_LAYERS = ("release", "rotexit")   # item 3: every sell rule (fund, carry, core lock, no-edge, rotation sales / exits) posts once; re-pegs down only after the others' best
                                             # ask has sat below ours >= SALE_REPEG_S (never up, never below lot avg + 0.5c: the plans' floor)
+# C102 (Piero 15:15 Oct 21 item A): election night, docs/night_reconcile.md §4 items 1-5 + 9 (n_election v2, C1-C21 constants there).
+# mode: the `election_mode` control (off / shadow / live) wins; otherwise shadow from `shadow_from` (zero orders: would-be orders and
+# cancels to data/election/shadow.jsonl, the detector's rows to data/election/calls.jsonl); live only by control.
+ELECTION = dict(on=True, shadow_from="2026-10-22 06:00:00", election_day="2026-11-03", precall_dry=True, drift_shadow=True,
+                drift_gap=0.03, drift_exit_gap=0.01, drift_ttl_s=120, drift_cap_mult=2.0, drift_every_s=1800, drift_clip=2_000,
+                recycle_bid=0.98, recycle_target=20_000.0)   # item 8 (C7): a strict-called winner sells into bids >= max(0.98, lot avg + 0.5c) while usable < 20k
 # C101 (Piero 15:15 Oct 21)
 SELL_EV_MAX = 0.05            # item C: no fire sale — every sale rule (fund, carry, no-edge, core lock, rotation sales) sells only a lot with EV/$ held <= 5% at its
                               # sale price; never a leg of a lock / pairset (those subs are out of every seller); rotation exits keep their own rule

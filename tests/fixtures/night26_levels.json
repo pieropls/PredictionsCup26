@@ -1,0 +1,4460 @@
+{
+"snapshot": "2026-10-21 14:36:07",
+"note": "PM fair and SIG bid/ask per book from data/state.json (read-only copy)",
+"books": {
+"1057": {
+"fair": 0.7879999999999999,
+"sig_bid": 0.77,
+"sig_ask": 0.775,
+"title": "Will the Democratic Party win the Alaska Governor?",
+"manual": true
+},
+"1073": {
+"fair": 0.9624999999999998,
+"sig_bid": 0.885,
+"sig_ask": 0.89,
+"title": "Will the Democratic Party win the Rhode Island Governor?",
+"manual": true
+},
+"1077": {
+"fair": 0.014999999999999998,
+"sig_bid": 0.15,
+"sig_ask": 0.155,
+"title": "Will the Republican Party win the Rhode Island Senate?",
+"manual": false
+},
+"1076": {
+"fair": 0.9800021778553396,
+"sig_bid": 0.85,
+"sig_ask": 0.855,
+"title": "Will the Democratic Party win the Rhode Island Senate?",
+"manual": false
+},
+"1075": {
+"fair": 0.021500000000000005,
+"sig_bid": 0.11,
+"sig_ask": 0.115,
+"title": "Will the Republican Party win the Delaware Senate?",
+"manual": false
+},
+"1074": {
+"fair": 0.015999999999999997,
+"sig_bid": 0.12,
+"sig_ask": 0.125,
+"title": "Will the Republican Party win the Rhode Island Governor?",
+"manual": false
+},
+"1072": {
+"fair": 0.020999999999999998,
+"sig_bid": 0.105,
+"sig_ask": 0.11,
+"title": "Will the Democratic Party win the Oklahoma Senate?",
+"manual": false
+},
+"1071": {
+"fair": 0.095,
+"sig_bid": 0.15,
+"sig_ask": 0.155,
+"title": "Will the Republican Party win the New Hampshire Senate?",
+"manual": false
+},
+"1070": {
+"fair": 0.905,
+"sig_bid": 0.81,
+"sig_ask": 0.815,
+"title": "Will the Democratic Party win the New Hampshire Senate?",
+"manual": false
+},
+"1069": {
+"fair": 0.014499999999999997,
+"sig_bid": 0.08,
+"sig_ask": 0.085,
+"title": "Will the Republican Party win the Massachusetts Senate?",
+"manual": false
+},
+"1068": {
+"fair": 0.982,
+"sig_bid": 0.9,
+"sig_ask": 0.905,
+"title": "Will the Democratic Party win the Massachusetts Senate?",
+"manual": false
+},
+"1065": {
+"fair": 0.0355,
+"sig_bid": 0.13,
+"sig_ask": 0.135,
+"title": "Will the Republican Party win the NH-01 House race?",
+"manual": false
+},
+"1064": {
+"fair": 0.965394084058776,
+"sig_bid": 0.875,
+"sig_ask": 0.88,
+"title": "Will the Democratic Party win the NH-01 House race?",
+"manual": false
+},
+"1063": {
+"fair": 0.91,
+"sig_bid": 0.855,
+"sig_ask": 0.86,
+"title": "Will the Republican Party win the Oklahoma Governor?",
+"manual": false
+},
+"1062": {
+"fair": 0.9379999999999998,
+"sig_bid": 0.885,
+"sig_ask": 0.89,
+"title": "Will the Republican Party win the New Hampshire Governor?",
+"manual": false
+},
+"1061": {
+"fair": 0.04950690414802323,
+"sig_bid": 0.11,
+"sig_ask": 0.115,
+"title": "Will the Democratic Party win the New Hampshire Governor?",
+"manual": false
+},
+"1060": {
+"fair": 0.0365,
+"sig_bid": 0.07,
+"sig_ask": 0.075,
+"title": "Will the Republican Party win the Massachusetts Governor?",
+"manual": false
+},
+"1059": {
+"fair": 0.9640000000000001,
+"sig_bid": 0.895,
+"sig_ask": 0.9,
+"title": "Will the Democratic Party win the Massachusetts Governor?",
+"manual": false
+},
+"1055": {
+"fair": 0.9830120370483743,
+"sig_bid": 0.94,
+"sig_ask": 0.945,
+"title": "Will the Republican Party win the Wyoming Senate?",
+"manual": false
+},
+"1054": {
+"fair": 0.01399993970404961,
+"sig_bid": 0.045,
+"sig_ask": 0.055,
+"title": "Will the Democratic Party win the Wyoming Senate?",
+"manual": false
+},
+"1053": {
+"fair": 0.019500000000000003,
+"sig_bid": 0.07,
+"sig_ask": 0.08,
+"title": "Will the Republican Party win the Virginia Senate?",
+"manual": false
+},
+"1052": {
+"fair": 0.9590000000000001,
+"sig_bid": 0.875,
+"sig_ask": 0.88,
+"title": "Will the Republican Party win the Tennessee Senate?",
+"manual": false
+},
+"1051": {
+"fair": 0.04,
+"sig_bid": 0.125,
+"sig_ask": 0.135,
+"title": "Will the Democratic Party win the Tennessee Senate?",
+"manual": false
+},
+"1050": {
+"fair": 0.12500000000000003,
+"sig_bid": 0.15,
+"sig_ask": 0.155,
+"title": "Will the Republican Party win the Minnesota Senate?",
+"manual": false
+},
+"1049": {
+"fair": 0.8749999999999999,
+"sig_bid": 0.87,
+"sig_ask": 0.875,
+"title": "Will the Democratic Party win the Minnesota Senate?",
+"manual": false
+},
+"1048": {
+"fair": 0.30492023025950143,
+"sig_bid": 0.36,
+"sig_ask": 0.365,
+"title": "Will the Republican Party win the Michigan Senate?",
+"manual": false
+},
+"1047": {
+"fair": 0.6950797697443768,
+"sig_bid": 0.67,
+"sig_ask": 0.675,
+"title": "Will the Democratic Party win the Michigan Senate?",
+"manual": false
+},
+"1046": {
+"fair": 0.6198638899100665,
+"sig_bid": 0.63,
+"sig_ask": 0.635,
+"title": "Will the Republican Party win the Kansas Senate?",
+"manual": false
+},
+"1045": {
+"fair": 0.385,
+"sig_bid": 0.395,
+"sig_ask": 0.4,
+"title": "Will the Democratic Party win the Kansas Senate?",
+"manual": false
+},
+"1044": {
+"fair": 0.9050000000000001,
+"sig_bid": 0.84,
+"sig_ask": 0.85,
+"title": "Will the Republican Party win the Florida Senate?",
+"manual": false
+},
+"1043": {
+"fair": 0.09499999999999999,
+"sig_bid": 0.175,
+"sig_ask": 0.18,
+"title": "Will the Democratic Party win the Florida Senate?",
+"manual": false
+},
+"1042": {
+"fair": 0.9770136972615179,
+"sig_bid": 0.915,
+"sig_ask": 0.925,
+"title": "Will the Democratic Party win the Delaware Senate?",
+"manual": false
+},
+"1041": {
+"fair": 0.23500000000000001,
+"sig_bid": 0.245,
+"sig_ask": 0.255,
+"title": "Will the Republican Party win the WI-03 House race?",
+"manual": false
+},
+"1040": {
+"fair": 0.7649999860704454,
+"sig_bid": 0.77,
+"sig_ask": 0.775,
+"title": "Will the Democratic Party win the WI-03 House race?",
+"manual": false
+},
+"1039": {
+"fair": 0.57,
+"sig_bid": 0.56,
+"sig_ask": 0.565,
+"title": "Will the Republican Party win the WI-01 House race?",
+"manual": false
+},
+"1038": {
+"fair": 0.42999999999999994,
+"sig_bid": 0.44,
+"sig_ask": 0.445,
+"title": "Will the Democratic Party win the WI-01 House race?",
+"manual": false
+},
+"1037": {
+"fair": 0.08999999999999998,
+"sig_bid": 0.135,
+"sig_ask": 0.145,
+"title": "Will the Republican Party win the WA-03 House race?",
+"manual": false
+},
+"1036": {
+"fair": 0.9099999999999999,
+"sig_bid": 0.895,
+"sig_ask": 0.9,
+"title": "Will the Democratic Party win the WA-03 House race?",
+"manual": false
+},
+"1035": {
+"fair": 0.024000000000000004,
+"sig_bid": 0.055,
+"sig_ask": 0.06,
+"title": "Will the Republican Party win the VA-07 House race?",
+"manual": false
+},
+"1034": {
+"fair": 0.66,
+"sig_bid": 0.655,
+"sig_ask": 0.66,
+"title": "Will the Republican Party win the VA-05 House race?",
+"manual": false
+},
+"1033": {
+"fair": 0.3499999999999999,
+"sig_bid": 0.365,
+"sig_ask": 0.37,
+"title": "Will the Democratic Party win the VA-05 House race?",
+"manual": false
+},
+"1032": {
+"fair": 0.885,
+"sig_bid": 0.855,
+"sig_ask": 0.86,
+"title": "Will the Democratic Party win the VA-02 House race?",
+"manual": false
+},
+"1031": {
+"fair": 0.6200000000000001,
+"sig_bid": 0.585,
+"sig_ask": 0.59,
+"title": "Will the Democratic Party win the VA-01 House race?",
+"manual": false
+},
+"1030": {
+"fair": 0.9100000000000001,
+"sig_bid": 0.885,
+"sig_ask": 0.89,
+"title": "Will the Republican Party win the TN-05 House race?",
+"manual": false
+},
+"1029": {
+"fair": 0.08699999999999998,
+"sig_bid": 0.12,
+"sig_ask": 0.125,
+"title": "Will the Democratic Party win the TN-05 House race?",
+"manual": false
+},
+"1028": {
+"fair": 0.046994017805954205,
+"sig_bid": 0.115,
+"sig_ask": 0.12,
+"title": "Will the Republican Party win the MN-05 House race?",
+"manual": false
+},
+"1027": {
+"fair": 0.9415003649248262,
+"sig_bid": 0.89,
+"sig_ask": 0.895,
+"title": "Will the Democratic Party win the MN-05 House race?",
+"manual": false
+},
+"1026": {
+"fair": 0.03649601162353437,
+"sig_bid": 0.115,
+"sig_ask": 0.12,
+"title": "Will the Republican Party win the MN-02 House race?",
+"manual": false
+},
+"1025": {
+"fair": 0.9525,
+"sig_bid": 0.905,
+"sig_ask": 0.915,
+"title": "Will the Democratic Party win the MN-02 House race?",
+"manual": false
+},
+"1024": {
+"fair": 0.745,
+"sig_bid": 0.73,
+"sig_ask": 0.735,
+"title": "Will the Republican Party win the MN-01 House race?",
+"manual": false
+},
+"1023": {
+"fair": 0.255,
+"sig_bid": 0.275,
+"sig_ask": 0.28,
+"title": "Will the Democratic Party win the MN-01 House race?",
+"manual": false
+},
+"1022": {
+"fair": 0.32500000000000007,
+"sig_bid": 0.325,
+"sig_ask": 0.33,
+"title": "Will the Republican Party win the MI-10 House race?",
+"manual": false
+},
+"1021": {
+"fair": 0.675,
+"sig_bid": 0.675,
+"sig_ask": 0.685,
+"title": "Will the Democratic Party win the MI-10 House race?",
+"manual": false
+},
+"1020": {
+"fair": 0.35000000000000003,
+"sig_bid": 0.39,
+"sig_ask": 0.395,
+"title": "Will the Republican Party win the MI-07 House race?",
+"manual": false
+},
+"1019": {
+"fair": 0.6399999999999999,
+"sig_bid": 0.595,
+"sig_ask": 0.6,
+"title": "Will the Democratic Party win the MI-07 House race?",
+"manual": false
+},
+"1018": {
+"fair": 0.445,
+"sig_bid": 0.455,
+"sig_ask": 0.46,
+"title": "Will the Republican Party win the FL-22 House race?",
+"manual": false
+},
+"1017": {
+"fair": 0.545,
+"sig_bid": 0.565,
+"sig_ask": 0.57,
+"title": "Will the Democratic Party win the FL-22 House race?",
+"manual": false
+},
+"1016": {
+"fair": 0.0095,
+"sig_bid": 0.045,
+"sig_ask": 0.05,
+"title": "Will the Republican Party win the FL-20 House race?",
+"manual": false
+},
+"1015": {
+"fair": 0.9810000086954807,
+"sig_bid": 0.93,
+"sig_ask": 0.935,
+"title": "Will the Democratic Party win the FL-20 House race?",
+"manual": false
+},
+"1014": {
+"fair": 0.8,
+"sig_bid": 0.79,
+"sig_ask": 0.795,
+"title": "Will the Republican Party win the FL-16 House race?",
+"manual": false
+},
+"1013": {
+"fair": 0.185,
+"sig_bid": 0.21,
+"sig_ask": 0.215,
+"title": "Will the Democratic Party win the FL-16 House race?",
+"manual": false
+},
+"1012": {
+"fair": 0.22000000000000003,
+"sig_bid": 0.25,
+"sig_ask": 0.255,
+"title": "Will the Democratic Party win the FL-13 House race?",
+"manual": false
+},
+"1011": {
+"fair": 0.695,
+"sig_bid": 0.655,
+"sig_ask": 0.66,
+"title": "Will the Republican Party win the FL-09 House race?",
+"manual": false
+},
+"1010": {
+"fair": 0.735,
+"sig_bid": 0.69,
+"sig_ask": 0.695,
+"title": "Will the Republican Party win the FL-07 House race?",
+"manual": false
+},
+"1009": {
+"fair": 0.265,
+"sig_bid": 0.29,
+"sig_ask": 0.295,
+"title": "Will the Democratic Party win the FL-07 House race?",
+"manual": false
+},
+"1008": {
+"fair": 0.6849999927188981,
+"sig_bid": 0.695,
+"sig_ask": 0.7,
+"title": "Will the Republican Party win the AL-02 House race?",
+"manual": false
+},
+"1007": {
+"fair": 0.31500000000000006,
+"sig_bid": 0.31,
+"sig_ask": 0.315,
+"title": "Will the Democratic Party win the AL-02 House race?",
+"manual": false
+},
+"1006": {
+"fair": 0.9784999999999999,
+"sig_bid": 0.95,
+"sig_ask": 0.96,
+"title": "Will the Republican Party win the Wyoming Governor?",
+"manual": false
+},
+"1005": {
+"fair": 0.011000000000000001,
+"sig_bid": 0.045,
+"sig_ask": 0.055,
+"title": "Will the Democratic Party win the Wyoming Governor?",
+"manual": false
+},
+"1004": {
+"fair": 0.19499999999999998,
+"sig_bid": 0.21,
+"sig_ask": 0.22,
+"title": "Will the Republican Party win the Wisconsin Governor?",
+"manual": false
+},
+"1003": {
+"fair": 0.805,
+"sig_bid": 0.765,
+"sig_ask": 0.77,
+"title": "Will the Democratic Party win the Wisconsin Governor?",
+"manual": false
+},
+"1002": {
+"fair": 0.7599999999999999,
+"sig_bid": 0.775,
+"sig_ask": 0.78,
+"title": "Will the Republican Party win the Vermont Governor?",
+"manual": false
+},
+"1001": {
+"fair": 0.24050000000000002,
+"sig_bid": 0.24,
+"sig_ask": 0.245,
+"title": "Will the Democratic Party win the Vermont Governor?",
+"manual": false
+},
+"1000": {
+"fair": 0.9374999999999999,
+"sig_bid": 0.865,
+"sig_ask": 0.87,
+"title": "Will the Republican Party win the Tennessee Governor?",
+"manual": false
+},
+"999": {
+"fair": 0.04750000000000001,
+"sig_bid": 0.1,
+"sig_ask": 0.11,
+"title": "Will the Democratic Party win the Tennessee Governor?",
+"manual": false
+},
+"998": {
+"fair": 0.9725,
+"sig_bid": 0.945,
+"sig_ask": 0.95,
+"title": "Will the Republican Party win the South Dakota Governor?",
+"manual": false
+},
+"997": {
+"fair": 0.047509995751876206,
+"sig_bid": 0.095,
+"sig_ask": 0.105,
+"title": "Will the Republican Party win the Minnesota Governor?",
+"manual": false
+},
+"996": {
+"fair": 0.9500199515828125,
+"sig_bid": 0.92,
+"sig_ask": 0.93,
+"title": "Will the Democratic Party win the Minnesota Governor?",
+"manual": false
+},
+"995": {
+"fair": 0.0684814226890838,
+"sig_bid": 0.095,
+"sig_ask": 0.1,
+"title": "Will the Republican Party win the Michigan Governor?",
+"manual": false
+},
+"994": {
+"fair": 0.9315103391961959,
+"sig_bid": 0.9,
+"sig_ask": 0.905,
+"title": "Will the Democratic Party win the Michigan Governor?",
+"manual": false
+},
+"993": {
+"fair": 0.735,
+"sig_bid": 0.76,
+"sig_ask": 0.765,
+"title": "Will the Republican Party win the Kansas Governor?",
+"manual": false
+},
+"992": {
+"fair": 0.25499999999999995,
+"sig_bid": 0.245,
+"sig_ask": 0.25,
+"title": "Will the Democratic Party win the Kansas Governor?",
+"manual": false
+},
+"991": {
+"fair": 0.006022220440648658,
+"sig_bid": 0.065,
+"sig_ask": 0.07,
+"title": "Will the Republican Party win the Hawaii Governor?",
+"manual": false
+},
+"990": {
+"fair": 0.986,
+"sig_bid": 0.935,
+"sig_ask": 0.94,
+"title": "Will the Democratic Party win the Hawaii Governor?",
+"manual": false
+},
+"989": {
+"fair": 0.7950000000000002,
+"sig_bid": 0.8,
+"sig_ask": 0.805,
+"title": "Will the Republican Party win the Florida Governor?",
+"manual": false
+},
+"988": {
+"fair": 0.205,
+"sig_bid": 0.215,
+"sig_ask": 0.22,
+"title": "Will the Democratic Party win the Florida Governor?",
+"manual": false
+},
+"987": {
+"fair": 0.9689999999999999,
+"sig_bid": 0.9,
+"sig_ask": 0.91,
+"title": "Will the Democratic Party win the Connecticut Governor?",
+"manual": false
+},
+"986": {
+"fair": 0.9770000000000001,
+"sig_bid": 0.925,
+"sig_ask": 0.93,
+"title": "Will the Republican Party win the West Virginia Senate?",
+"manual": false
+},
+"985": {
+"fair": 0.013000000331170514,
+"sig_bid": 0.05,
+"sig_ask": 0.06,
+"title": "Will the Democratic Party win the West Virginia Senate?",
+"manual": false
+},
+"984": {
+"fair": 0.978,
+"sig_bid": 0.935,
+"sig_ask": 0.94,
+"title": "Will the Democratic Party win the Virginia Senate?",
+"manual": false
+},
+"983": {
+"fair": 0.32500000000000007,
+"sig_bid": 0.38,
+"sig_ask": 0.385,
+"title": "Will the Republican Party win the Texas Senate?",
+"manual": false
+},
+"982": {
+"fair": 0.6749999977922179,
+"sig_bid": 0.625,
+"sig_ask": 0.63,
+"title": "Will the Democratic Party win the Texas Senate?",
+"manual": false
+},
+"981": {
+"fair": 0.9315009929147755,
+"sig_bid": 0.92,
+"sig_ask": 0.925,
+"title": "Will the Republican Party win the South Dakota Senate?",
+"manual": false
+},
+"980": {
+"fair": 0.0015,
+"sig_bid": 0.06,
+"sig_ask": 0.065,
+"title": "Will the Democratic Party win the South Dakota Senate?",
+"manual": false
+},
+"979": {
+"fair": 0.815,
+"sig_bid": 0.78,
+"sig_ask": 0.785,
+"title": "Will the Republican Party win the South Carolina Senate?",
+"manual": false
+},
+"978": {
+"fair": 0.185,
+"sig_bid": 0.22,
+"sig_ask": 0.225,
+"title": "Will the Democratic Party win the South Carolina Senate?",
+"manual": false
+},
+"977": {
+"fair": 0.017,
+"sig_bid": 0.06,
+"sig_ask": 0.065,
+"title": "Will the Republican Party win the Oregon Senate?",
+"manual": false
+},
+"976": {
+"fair": 0.9795000000000001,
+"sig_bid": 0.925,
+"sig_ask": 0.935,
+"title": "Will the Democratic Party win the Oregon Senate?",
+"manual": false
+},
+"975": {
+"fair": 0.9720000000000001,
+"sig_bid": 0.915,
+"sig_ask": 0.925,
+"title": "Will the Republican Party win the Oklahoma Senate?",
+"manual": false
+},
+"974": {
+"fair": 0.034999999999999996,
+"sig_bid": 0.06,
+"sig_ask": 0.07,
+"title": "Will the Republican Party win the New Mexico Senate?",
+"manual": false
+},
+"973": {
+"fair": 0.9649726333405273,
+"sig_bid": 0.95,
+"sig_ask": 0.955,
+"title": "Will the Democratic Party win the New Mexico Senate?",
+"manual": false
+},
+"972": {
+"fair": 0.02849601173365543,
+"sig_bid": 0.065,
+"sig_ask": 0.07,
+"title": "Will the Republican Party win the New Jersey Senate?",
+"manual": false
+},
+"971": {
+"fair": 0.9724999999999945,
+"sig_bid": 0.935,
+"sig_ask": 0.945,
+"title": "Will the Democratic Party win the New Jersey Senate?",
+"manual": false
+},
+"970": {
+"fair": 0.705,
+"sig_bid": 0.7,
+"sig_ask": 0.705,
+"title": "Will the Republican Party win the Nebraska Senate?",
+"manual": false
+},
+"968": {
+"fair": 0.0005,
+"sig_bid": 0.045,
+"sig_ask": 0.05,
+"title": "Will the Democratic Party win the Nebraska Senate?",
+"manual": false
+},
+"967": {
+"fair": 0.034999999999999996,
+"sig_bid": 0.1,
+"sig_ask": 0.105,
+"title": "Will the Republican Party win the North Carolina Senate?",
+"manual": false
+},
+"966": {
+"fair": 0.9649999998896108,
+"sig_bid": 0.915,
+"sig_ask": 0.925,
+"title": "Will the Democratic Party win the North Carolina Senate?",
+"manual": false
+},
+"965": {
+"fair": 0.07746877035529366,
+"sig_bid": 0.105,
+"sig_ask": 0.115,
+"title": "Will the Independent Party win the Montana Senate?",
+"manual": false
+},
+"964": {
+"fair": 0.9150000000000001,
+"sig_bid": 0.88,
+"sig_ask": 0.885,
+"title": "Will the Republican Party win the Montana Senate?",
+"manual": false
+},
+"963": {
+"fair": 0.0015,
+"sig_bid": 0.08,
+"sig_ask": 0.085,
+"title": "Will the Democratic Party win the Montana Senate?",
+"manual": false
+},
+"962": {
+"fair": 0.885,
+"sig_bid": 0.795,
+"sig_ask": 0.8,
+"title": "Will the Republican Party win the Mississippi Senate?",
+"manual": false
+},
+"961": {
+"fair": 0.11499999999999999,
+"sig_bid": 0.2,
+"sig_ask": 0.205,
+"title": "Will the Democratic Party win the Mississippi Senate?",
+"manual": false
+},
+"960": {
+"fair": 0.34500000000000003,
+"sig_bid": 0.37,
+"sig_ask": 0.375,
+"title": "Will the Republican Party win the Maine Senate?",
+"manual": false
+},
+"959": {
+"fair": 0.6450000022077844,
+"sig_bid": 0.635,
+"sig_ask": 0.64,
+"title": "Will the Democratic Party win the Maine Senate?",
+"manual": false
+},
+"958": {
+"fair": 0.925,
+"sig_bid": 0.92,
+"sig_ask": 0.925,
+"title": "Will the Republican Party win the Louisiana Senate?",
+"manual": false
+},
+"957": {
+"fair": 0.07500000000000002,
+"sig_bid": 0.075,
+"sig_ask": 0.08,
+"title": "Will the Democratic Party win the Louisiana Senate?",
+"manual": false
+},
+"956": {
+"fair": 0.9754999999999999,
+"sig_bid": 0.935,
+"sig_ask": 0.945,
+"title": "Will the Republican Party win the Kentucky Senate?",
+"manual": false
+},
+"955": {
+"fair": 0.025490828651528255,
+"sig_bid": 0.045,
+"sig_ask": 0.05,
+"title": "Will the Democratic Party win the Kentucky Senate?",
+"manual": false
+},
+"954": {
+"fair": 0.013500000000000003,
+"sig_bid": 0.085,
+"sig_ask": 0.095,
+"title": "Will the Republican Party win the Illinois Senate?",
+"manual": false
+},
+"953": {
+"fair": 0.9840000000000001,
+"sig_bid": 0.94,
+"sig_ask": 0.95,
+"title": "Will the Democratic Party win the Illinois Senate?",
+"manual": false
+},
+"952": {
+"fair": 0.9549999999999998,
+"sig_bid": 0.92,
+"sig_ask": 0.925,
+"title": "Will the Republican Party win the Idaho Senate?",
+"manual": false
+},
+"951": {
+"fair": 0.0005,
+"sig_bid": 0.065,
+"sig_ask": 0.07,
+"title": "Will the Democratic Party win the Idaho Senate?",
+"manual": false
+},
+"950": {
+"fair": 0.5650000000000001,
+"sig_bid": 0.555,
+"sig_ask": 0.56,
+"title": "Will the Republican Party win the Iowa Senate?",
+"manual": false
+},
+"949": {
+"fair": 0.43499999999999994,
+"sig_bid": 0.45,
+"sig_ask": 0.455,
+"title": "Will the Democratic Party win the Iowa Senate?",
+"manual": false
+},
+"948": {
+"fair": 0.039499999999997266,
+"sig_bid": 0.125,
+"sig_ask": 0.135,
+"title": "Will the Republican Party win the Georgia Senate?",
+"manual": false
+},
+"947": {
+"fair": 0.9609999999999972,
+"sig_bid": 0.865,
+"sig_ask": 0.875,
+"title": "Will the Democratic Party win the Georgia Senate?",
+"manual": false
+},
+"946": {
+"fair": 0.011496011513073627,
+"sig_bid": 0.09,
+"sig_ask": 0.095,
+"title": "Will the Republican Party win the Colorado Senate?",
+"manual": false
+},
+"945": {
+"fair": 0.9894999999999999,
+"sig_bid": 0.93,
+"sig_ask": 0.935,
+"title": "Will the Democratic Party win the Colorado Senate?",
+"manual": false
+},
+"944": {
+"fair": 0.9540000000000001,
+"sig_bid": 0.94,
+"sig_ask": 0.95,
+"title": "Will the Republican Party win the Arkansas Senate?",
+"manual": false
+},
+"943": {
+"fair": 0.047499999999999994,
+"sig_bid": 0.05,
+"sig_ask": 0.055,
+"title": "Will the Democratic Party win the Arkansas Senate?",
+"manual": false
+},
+"942": {
+"fair": 0.9869999999999999,
+"sig_bid": 0.95,
+"sig_ask": 0.955,
+"title": "Will the Republican Party win the Alabama Senate?",
+"manual": false
+},
+"941": {
+"fair": 0.013500000000000002,
+"sig_bid": 0.065,
+"sig_ask": 0.08,
+"title": "Will the Democratic Party win the Alabama Senate?",
+"manual": false
+},
+"940": {
+"fair": 0.9695099956414838,
+"sig_bid": 0.96,
+"sig_ask": 0.965,
+"title": "Will the Democratic Party win the VA-07 House race?",
+"manual": false
+},
+"939": {
+"fair": 0.11499999999999999,
+"sig_bid": 0.135,
+"sig_ask": 0.145,
+"title": "Will the Republican Party win the VA-02 House race?",
+"manual": false
+},
+"938": {
+"fair": 0.38000000000000006,
+"sig_bid": 0.42,
+"sig_ask": 0.425,
+"title": "Will the Republican Party win the VA-01 House race?",
+"manual": false
+},
+"937": {
+"fair": 0.08000000000002723,
+"sig_bid": 0.12,
+"sig_ask": 0.13,
+"title": "Will the Republican Party win the TX-28 House race?",
+"manual": false
+},
+"936": {
+"fair": 0.9150000000000001,
+"sig_bid": 0.865,
+"sig_ask": 0.87,
+"title": "Will the Democratic Party win the TX-28 House race?",
+"manual": false
+},
+"935": {
+"fair": 0.6750000000000002,
+"sig_bid": 0.665,
+"sig_ask": 0.67,
+"title": "Will the Republican Party win the TX-23 House race?",
+"manual": false
+},
+"934": {
+"fair": 0.32499999999999996,
+"sig_bid": 0.34,
+"sig_ask": 0.345,
+"title": "Will the Democratic Party win the TX-23 House race?",
+"manual": false
+},
+"933": {
+"fair": 0.13500000000000004,
+"sig_bid": 0.175,
+"sig_ask": 0.18,
+"title": "Will the Republican Party win the TX-15 House race?",
+"manual": false
+},
+"932": {
+"fair": 0.864999992718898,
+"sig_bid": 0.815,
+"sig_ask": 0.82,
+"title": "Will the Democratic Party win the TX-15 House race?",
+"manual": false
+},
+"931": {
+"fair": 0.6449999927188981,
+"sig_bid": 0.65,
+"sig_ask": 0.655,
+"title": "Will the Republican Party win the SC-01 House race?",
+"manual": false
+},
+"930": {
+"fair": 0.35000000000000003,
+"sig_bid": 0.345,
+"sig_ask": 0.35,
+"title": "Will the Democratic Party win the SC-01 House race?",
+"manual": false
+},
+"929": {
+"fair": 0.18999999999999997,
+"sig_bid": 0.205,
+"sig_ask": 0.21,
+"title": "Will the Republican Party win the PA-10 House race?",
+"manual": false
+},
+"928": {
+"fair": 0.8049999999999999,
+"sig_bid": 0.795,
+"sig_ask": 0.805,
+"title": "Will the Democratic Party win the PA-10 House race?",
+"manual": false
+},
+"927": {
+"fair": 0.2900000000000001,
+"sig_bid": 0.31,
+"sig_ask": 0.315,
+"title": "Will the Republican Party win the PA-08 House race?",
+"manual": false
+},
+"926": {
+"fair": 0.71,
+"sig_bid": 0.69,
+"sig_ask": 0.695,
+"title": "Will the Democratic Party win the PA-08 House race?",
+"manual": false
+},
+"925": {
+"fair": 0.135,
+"sig_bid": 0.17,
+"sig_ask": 0.175,
+"title": "Will the Republican Party win the PA-07 House race?",
+"manual": false
+},
+"924": {
+"fair": 0.865,
+"sig_bid": 0.835,
+"sig_ask": 0.84,
+"title": "Will the Democratic Party win the PA-07 House race?",
+"manual": false
+},
+"923": {
+"fair": 0.5949999999999999,
+"sig_bid": 0.6,
+"sig_ask": 0.605,
+"title": "Will the Republican Party win the PA-01 House race?",
+"manual": false
+},
+"922": {
+"fair": 0.4050000000000001,
+"sig_bid": 0.41,
+"sig_ask": 0.415,
+"title": "Will the Democratic Party win the PA-01 House race?",
+"manual": false
+},
+"921": {
+"fair": 0.39000000000000007,
+"sig_bid": 0.39,
+"sig_ask": 0.395,
+"title": "Will the Republican Party win the NY-17 House race?",
+"manual": false
+},
+"920": {
+"fair": 0.6049999999999999,
+"sig_bid": 0.615,
+"sig_ask": 0.62,
+"title": "Will the Democratic Party win the NY-17 House race?",
+"manual": false
+},
+"919": {
+"fair": 0.032996011885565696,
+"sig_bid": 0.095,
+"sig_ask": 0.1,
+"title": "Will the Republican Party win the NY-13 House race?",
+"manual": false
+},
+"918": {
+"fair": 0.962999999944536,
+"sig_bid": 0.92,
+"sig_ask": 0.925,
+"title": "Will the Democratic Party win the NY-13 House race?",
+"manual": false
+},
+"917": {
+"fair": 0.07000000000000002,
+"sig_bid": 0.095,
+"sig_ask": 0.1,
+"title": "Will the Republican Party win the NJ-07 House race?",
+"manual": false
+},
+"916": {
+"fair": 0.9249999999999999,
+"sig_bid": 0.895,
+"sig_ask": 0.9,
+"title": "Will the Democratic Party win the NJ-07 House race?",
+"manual": false
+},
+"915": {
+"fair": 0.04886453599842434,
+"sig_bid": 0.09,
+"sig_ask": 0.095,
+"title": "Will the Republican Party win the NE-02 House race?",
+"manual": false
+},
+"914": {
+"fair": 0.9450999612956398,
+"sig_bid": 0.905,
+"sig_ask": 0.91,
+"title": "Will the Democratic Party win the NE-02 House race?",
+"manual": false
+},
+"913": {
+"fair": 0.6049999948646283,
+"sig_bid": 0.62,
+"sig_ask": 0.625,
+"title": "Will the Republican Party win the MT-01 House race?",
+"manual": false
+},
+"912": {
+"fair": 0.39982306546757246,
+"sig_bid": 0.385,
+"sig_ask": 0.39,
+"title": "Will the Democratic Party win the MT-01 House race?",
+"manual": false
+},
+"911": {
+"fair": 0.5550000000000002,
+"sig_bid": 0.555,
+"sig_ask": 0.56,
+"title": "Will the Republican Party win the ME-02 House race?",
+"manual": false
+},
+"910": {
+"fair": 0.43999999999999995,
+"sig_bid": 0.445,
+"sig_ask": 0.45,
+"title": "Will the Democratic Party win the ME-02 House race?",
+"manual": false
+},
+"909": {
+"fair": 0.96,
+"sig_bid": 0.92,
+"sig_ask": 0.925,
+"title": "Will the Republican Party win the KY-04 House race?",
+"manual": false
+},
+"908": {
+"fair": 0.03950000000000001,
+"sig_bid": 0.085,
+"sig_ask": 0.09,
+"title": "Will the Democratic Party win the KY-04 House race?",
+"manual": false
+},
+"907": {
+"fair": 0.18000000000000002,
+"sig_bid": 0.19,
+"sig_ask": 0.195,
+"title": "Will the Republican Party win the IA-03 House race?",
+"manual": false
+},
+"906": {
+"fair": 0.8150000000000001,
+"sig_bid": 0.815,
+"sig_ask": 0.82,
+"title": "Will the Democratic Party win the IA-03 House race?",
+"manual": false
+},
+"905": {
+"fair": 0.4000000000000001,
+"sig_bid": 0.395,
+"sig_ask": 0.4,
+"title": "Will the Republican Party win the IA-02 House race?",
+"manual": false
+},
+"904": {
+"fair": 0.6000001337059901,
+"sig_bid": 0.59,
+"sig_ask": 0.595,
+"title": "Will the Democratic Party win the IA-02 House race?",
+"manual": false
+},
+"903": {
+"fair": 0.08000000000000002,
+"sig_bid": 0.135,
+"sig_ask": 0.145,
+"title": "Will the Republican Party win the IA-01 House race?",
+"manual": false
+},
+"902": {
+"fair": 0.9199999999999999,
+"sig_bid": 0.86,
+"sig_ask": 0.865,
+"title": "Will the Democratic Party win the IA-01 House race?",
+"manual": false
+},
+"901": {
+"fair": 0.7699999999999999,
+"sig_bid": 0.76,
+"sig_ask": 0.765,
+"title": "Will the Republican Party win the FL-13 House race?",
+"manual": false
+},
+"900": {
+"fair": 0.295,
+"sig_bid": 0.31,
+"sig_ask": 0.315,
+"title": "Will the Democratic Party win the FL-09 House race?",
+"manual": false
+},
+"899": {
+"fair": 0.16,
+"sig_bid": 0.21,
+"sig_ask": 0.215,
+"title": "Will the Republican Party win the CO-08 House race?",
+"manual": false
+},
+"898": {
+"fair": 0.84,
+"sig_bid": 0.815,
+"sig_ask": 0.82,
+"title": "Will the Democratic Party win the CO-08 House race?",
+"manual": false
+},
+"897": {
+"fair": 0.7200000000000001,
+"sig_bid": 0.705,
+"sig_ask": 0.71,
+"title": "Will the Republican Party win the CO-04 House race?",
+"manual": false
+},
+"896": {
+"fair": 0.27999999999999997,
+"sig_bid": 0.315,
+"sig_ask": 0.32,
+"title": "Will the Democratic Party win the CO-04 House race?",
+"manual": false
+},
+"895": {
+"fair": 0.68,
+"sig_bid": 0.67,
+"sig_ask": 0.675,
+"title": "Will the Republican Party win the CO-03 House race?",
+"manual": false
+},
+"894": {
+"fair": 0.30999999999999994,
+"sig_bid": 0.345,
+"sig_ask": 0.35,
+"title": "Will the Democratic Party win the CO-03 House race?",
+"manual": false
+},
+"893": {
+"fair": 0.06499999999999999,
+"sig_bid": 0.135,
+"sig_ask": 0.14,
+"title": "Will the Republican Party win the CA-48 House race?",
+"manual": false
+},
+"892": {
+"fair": 0.935,
+"sig_bid": 0.885,
+"sig_ask": 0.895,
+"title": "Will the Democratic Party win the CA-48 House race?",
+"manual": false
+},
+"891": {
+"fair": 0.10500000000000002,
+"sig_bid": 0.125,
+"sig_ask": 0.13,
+"title": "Will the Republican Party win the CA-22 House race?",
+"manual": false
+},
+"890": {
+"fair": 0.8999999999999999,
+"sig_bid": 0.89,
+"sig_ask": 0.895,
+"title": "Will the Democratic Party win the CA-22 House race?",
+"manual": false
+},
+"889": {
+"fair": 0.115,
+"sig_bid": 0.165,
+"sig_ask": 0.17,
+"title": "Will the Republican Party win the AZ-06 House race?",
+"manual": false
+},
+"888": {
+"fair": 0.8799999999999999,
+"sig_bid": 0.845,
+"sig_ask": 0.85,
+"title": "Will the Democratic Party win the AZ-06 House race?",
+"manual": false
+},
+"887": {
+"fair": 0.16987689347096274,
+"sig_bid": 0.205,
+"sig_ask": 0.22,
+"title": "Will the Republican Party win the AZ-01 House race?",
+"manual": false
+},
+"886": {
+"fair": 0.8300000000000001,
+"sig_bid": 0.805,
+"sig_ask": 0.81,
+"title": "Will the Democratic Party win the AZ-01 House race?",
+"manual": false
+},
+"885": {
+"fair": 0.685502003470046,
+"sig_bid": 0.68,
+"sig_ask": 0.685,
+"title": "Will the Republican Party win the Texas Governor?",
+"manual": false
+},
+"884": {
+"fair": 0.31499999999999995,
+"sig_bid": 0.325,
+"sig_ask": 0.33,
+"title": "Will the Democratic Party win the Texas Governor?",
+"manual": false
+},
+"883": {
+"fair": 0.020484292532039997,
+"sig_bid": 0.045,
+"sig_ask": 0.05,
+"title": "Will the Democratic Party win the South Dakota Governor?",
+"manual": false
+},
+"882": {
+"fair": 0.925,
+"sig_bid": 0.88,
+"sig_ask": 0.89,
+"title": "Will the Republican Party win the South Carolina Governor?",
+"manual": false
+},
+"881": {
+"fair": 0.0670138515084447,
+"sig_bid": 0.085,
+"sig_ask": 0.095,
+"title": "Will the Democratic Party win the South Carolina Governor?",
+"manual": false
+},
+"879": {
+"fair": 0.023499997105199257,
+"sig_bid": 0.06,
+"sig_ask": 0.07,
+"title": "Will the Republican Party win the Pennsylvania Governor?",
+"manual": false
+},
+"878": {
+"fair": 0.9764997863797745,
+"sig_bid": 0.94,
+"sig_ask": 0.95,
+"title": "Will the Democratic Party win the Pennsylvania Governor?",
+"manual": false
+},
+"877": {
+"fair": 0.16,
+"sig_bid": 0.2,
+"sig_ask": 0.205,
+"title": "Will the Republican Party win the Oregon Governor?",
+"manual": false
+},
+"876": {
+"fair": 0.84,
+"sig_bid": 0.8,
+"sig_ask": 0.805,
+"title": "Will the Democratic Party win the Oregon Governor?",
+"manual": false
+},
+"875": {
+"fair": 0.09000000000000001,
+"sig_bid": 0.15,
+"sig_ask": 0.16,
+"title": "Will the Democratic Party win the Oklahoma Governor?",
+"manual": false
+},
+"874": {
+"fair": 0.04699999999999999,
+"sig_bid": 0.08,
+"sig_ask": 0.085,
+"title": "Will the Republican Party win the New York Governor?",
+"manual": false
+},
+"873": {
+"fair": 0.9540000000000001,
+"sig_bid": 0.935,
+"sig_ask": 0.945,
+"title": "Will the Democratic Party win the New York Governor?",
+"manual": false
+},
+"872": {
+"fair": 0.3449999999999864,
+"sig_bid": 0.345,
+"sig_ask": 0.35,
+"title": "Will the Republican Party win the Nevada Governor?",
+"manual": false
+},
+"871": {
+"fair": 0.6550000000000001,
+"sig_bid": 0.655,
+"sig_ask": 0.66,
+"title": "Will the Democratic Party win the Nevada Governor?",
+"manual": false
+},
+"870": {
+"fair": 0.05986325171319456,
+"sig_bid": 0.1,
+"sig_ask": 0.11,
+"title": "Will the Republican Party win the New Mexico Governor?",
+"manual": false
+},
+"869": {
+"fair": 0.9400019941375557,
+"sig_bid": 0.9,
+"sig_ask": 0.91,
+"title": "Will the Democratic Party win the New Mexico Governor?",
+"manual": false
+},
+"868": {
+"fair": 0.89,
+"sig_bid": 0.865,
+"sig_ask": 0.87,
+"title": "Will the Republican Party win the Nebraska Governor?",
+"manual": false
+},
+"867": {
+"fair": 0.10500000000000001,
+"sig_bid": 0.14,
+"sig_ask": 0.145,
+"title": "Will the Democratic Party win the Nebraska Governor?",
+"manual": false
+},
+"866": {
+"fair": 0.037656326878845355,
+"sig_bid": 0.095,
+"sig_ask": 0.105,
+"title": "Will the Republican Party win the Maine Governor?",
+"manual": false
+},
+"865": {
+"fair": 0.9525,
+"sig_bid": 0.865,
+"sig_ask": 0.87,
+"title": "Will the Democratic Party win the Maine Governor?",
+"manual": false
+},
+"864": {
+"fair": 0.02099999329778714,
+"sig_bid": 0.065,
+"sig_ask": 0.07,
+"title": "Will the Republican Party win the Maryland Governor?",
+"manual": false
+},
+"863": {
+"fair": 0.9755000000000001,
+"sig_bid": 0.96,
+"sig_ask": 0.965,
+"title": "Will the Democratic Party win the Maryland Governor?",
+"manual": false
+},
+"862": {
+"fair": 0.030006751701364204,
+"sig_bid": 0.055,
+"sig_ask": 0.065,
+"title": "Will the Republican Party win the Illinois Governor?",
+"manual": false
+},
+"861": {
+"fair": 0.9679779805744675,
+"sig_bid": 0.945,
+"sig_ask": 0.955,
+"title": "Will the Democratic Party win the Illinois Governor?",
+"manual": false
+},
+"860": {
+"fair": 0.9769999999999999,
+"sig_bid": 0.96,
+"sig_ask": 0.965,
+"title": "Will the Republican Party win the Idaho Governor?",
+"manual": false
+},
+"859": {
+"fair": 0.01999720183115929,
+"sig_bid": 0.04,
+"sig_ask": 0.045,
+"title": "Will the Democratic Party win the Idaho Governor?",
+"manual": false
+},
+"858": {
+"fair": 0.115,
+"sig_bid": 0.155,
+"sig_ask": 0.16,
+"title": "Will the Republican Party win the Iowa Governor?",
+"manual": false
+},
+"857": {
+"fair": 0.8850000000000001,
+"sig_bid": 0.84,
+"sig_ask": 0.845,
+"title": "Will the Democratic Party win the Iowa Governor?",
+"manual": false
+},
+"856": {
+"fair": 0.45001994027722336,
+"sig_bid": 0.46,
+"sig_ask": 0.465,
+"title": "Will the Republican Party win the Georgia Governor?",
+"manual": false
+},
+"855": {
+"fair": 0.5449601194455264,
+"sig_bid": 0.54,
+"sig_ask": 0.545,
+"title": "Will the Democratic Party win the Georgia Governor?",
+"manual": false
+},
+"854": {
+"fair": 0.03150000000000001,
+"sig_bid": 0.1,
+"sig_ask": 0.105,
+"title": "Will the Republican Party win the Connecticut Governor?",
+"manual": false
+},
+"853": {
+"fair": 0.021999999999999995,
+"sig_bid": 0.045,
+"sig_ask": 0.05,
+"title": "Will the Republican Party win the Colorado Governor?",
+"manual": false
+},
+"852": {
+"fair": 0.9679999999999999,
+"sig_bid": 0.95,
+"sig_ask": 0.955,
+"title": "Will the Democratic Party win the Colorado Governor?",
+"manual": false
+},
+"849": {
+"fair": 0.0699800580045517,
+"sig_bid": 0.125,
+"sig_ask": 0.13,
+"title": "Will the Republican Party win the Arizona Governor?",
+"manual": false
+},
+"848": {
+"fair": 0.9250398839908966,
+"sig_bid": 0.9,
+"sig_ask": 0.905,
+"title": "Will the Democratic Party win the Arizona Governor?",
+"manual": false
+},
+"847": {
+"fair": 0.9699999451180275,
+"sig_bid": 0.92,
+"sig_ask": 0.93,
+"title": "Will the Republican Party win the Arkansas Governor?",
+"manual": false
+},
+"846": {
+"fair": 0.025000000055417013,
+"sig_bid": 0.1,
+"sig_ask": 0.11,
+"title": "Will the Democratic Party win the Arkansas Governor?",
+"manual": false
+},
+"845": {
+"fair": 0.955501994137257,
+"sig_bid": 0.935,
+"sig_ask": 0.94,
+"title": "Will the Republican Party win the Alabama Governor?",
+"manual": false
+},
+"844": {
+"fair": 0.04050000005541784,
+"sig_bid": 0.05,
+"sig_ask": 0.06,
+"title": "Will the Democratic Party win the Alabama Governor?",
+"manual": false
+},
+"843": {
+"fair": 0.3350000000000001,
+"sig_bid": 0.355,
+"sig_ask": 0.36,
+"title": "Will the Republican Party win the U.S. Senate?",
+"manual": false
+},
+"842": {
+"fair": 0.6649999999999999,
+"sig_bid": 0.67,
+"sig_ask": 0.675,
+"title": "Will the Democratic Party win the U.S. Senate?",
+"manual": false
+},
+"841": {
+"fair": 0.08499999999999999,
+"sig_bid": 0.145,
+"sig_ask": 0.15,
+"title": "Will the Republican Party win the U.S. House?",
+"manual": false
+},
+"840": {
+"fair": 0.915,
+"sig_bid": 0.875,
+"sig_ask": 0.88,
+"title": "Will the Democratic Party win the U.S. House?",
+"manual": false
+},
+"1067": {
+"fair": 0.255,
+"sig_bid": 0.31,
+"sig_ask": 0.315,
+"title": "Will the Republican Party win the Alaska Senate?",
+"manual": false
+},
+"1066": {
+"fair": 0.745,
+"sig_bid": 0.71,
+"sig_ask": 0.715,
+"title": "Will the Democratic Party win the Alaska Senate?",
+"manual": false
+},
+"1058": {
+"fair": 0.18999999999999997,
+"sig_bid": 0.25,
+"sig_ask": 0.255,
+"title": "Will the Republican Party win the Alaska Governor?",
+"manual": false
+},
+"969": {
+"fair": 0.29999999999999993,
+"sig_bid": 0.305,
+"sig_ask": 0.31,
+"title": "Will the Independent Party win the Nebraska Senate?",
+"manual": false
+}
+},
+"poll_close": {
+"generated": "2026-10-07 18:07:36 PT",
+"election_day": "2026-11-03",
+"note": "Poll closing times typed from state statutes (sources per row); times in ET on Nov 3 ('+1' = after midnight ET, Nov 4); PT = ET - 3 h. Piero spot-checks 10 rows.",
+"markets": [
+{
+"ex": "1057",
+"title": "Will the Democratic Party win the Alaska Governor?",
+"state": "Alaska",
+"race": "Governor",
+"party": "D",
+"first_close_et": "00:00+1",
+"last_close_et": "01:00+1",
+"source": "AS 15.15.090: 8 pm local (AKST; Aleutians HST)",
+"first_close_pt": "21:00",
+"last_close_pt": "22:00"
+},
+{
+"ex": "1073",
+"title": "Will the Democratic Party win the Rhode Island Governor?",
+"state": "Rhode Island",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "RIGL 17-18-11: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1077",
+"title": "Will the Republican Party win the Rhode Island Senate?",
+"state": "Rhode Island",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "RIGL 17-18-11: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1076",
+"title": "Will the Democratic Party win the Rhode Island Senate?",
+"state": "Rhode Island",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "RIGL 17-18-11: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1075",
+"title": "Will the Republican Party win the Delaware Senate?",
+"state": "Delaware",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "15 Del. C. \u00a74902: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1074",
+"title": "Will the Republican Party win the Rhode Island Governor?",
+"state": "Rhode Island",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "RIGL 17-18-11: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1072",
+"title": "Will the Democratic Party win the Oklahoma Senate?",
+"state": "Oklahoma",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "26 OS \u00a77-104: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1071",
+"title": "Will the Republican Party win the New Hampshire Senate?",
+"state": "New Hampshire",
+"race": "Senate",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "RSA 659:4: towns close 7-8 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1070",
+"title": "Will the Democratic Party win the New Hampshire Senate?",
+"state": "New Hampshire",
+"race": "Senate",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "RSA 659:4: towns close 7-8 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1069",
+"title": "Will the Republican Party win the Massachusetts Senate?",
+"state": "Massachusetts",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "MGL c.54 \u00a764: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1068",
+"title": "Will the Democratic Party win the Massachusetts Senate?",
+"state": "Massachusetts",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "MGL c.54 \u00a764: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1065",
+"title": "Will the Republican Party win the NH-01 House race?",
+"state": "New Hampshire",
+"race": "House district",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "RSA 659:4: towns close 7-8 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1064",
+"title": "Will the Democratic Party win the NH-01 House race?",
+"state": "New Hampshire",
+"race": "House district",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "RSA 659:4: towns close 7-8 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1063",
+"title": "Will the Republican Party win the Oklahoma Governor?",
+"state": "Oklahoma",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "26 OS \u00a77-104: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1062",
+"title": "Will the Republican Party win the New Hampshire Governor?",
+"state": "New Hampshire",
+"race": "Governor",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "RSA 659:4: towns close 7-8 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1061",
+"title": "Will the Democratic Party win the New Hampshire Governor?",
+"state": "New Hampshire",
+"race": "Governor",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "RSA 659:4: towns close 7-8 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1060",
+"title": "Will the Republican Party win the Massachusetts Governor?",
+"state": "Massachusetts",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "MGL c.54 \u00a764: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1059",
+"title": "Will the Democratic Party win the Massachusetts Governor?",
+"state": "Massachusetts",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "MGL c.54 \u00a764: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1055",
+"title": "Will the Republican Party win the Wyoming Senate?",
+"state": "Wyoming",
+"race": "Senate",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "WS 22-13-101: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1054",
+"title": "Will the Democratic Party win the Wyoming Senate?",
+"state": "Wyoming",
+"race": "Senate",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "WS 22-13-101: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1053",
+"title": "Will the Republican Party win the Virginia Senate?",
+"state": "Virginia",
+"race": "Senate",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "Va. Code \u00a724.2-603: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "1052",
+"title": "Will the Republican Party win the Tennessee Senate?",
+"state": "Tennessee",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "TCA 2-3-104: 8 pm ET / 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1051",
+"title": "Will the Democratic Party win the Tennessee Senate?",
+"state": "Tennessee",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "TCA 2-3-104: 8 pm ET / 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1050",
+"title": "Will the Republican Party win the Minnesota Senate?",
+"state": "Minnesota",
+"race": "Senate",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "MS 204C.05: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1049",
+"title": "Will the Democratic Party win the Minnesota Senate?",
+"state": "Minnesota",
+"race": "Senate",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "MS 204C.05: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1048",
+"title": "Will the Republican Party win the Michigan Senate?",
+"state": "Michigan",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "MCL 168.720: 8 pm local (ET / 4 UP counties CT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1047",
+"title": "Will the Democratic Party win the Michigan Senate?",
+"state": "Michigan",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "MCL 168.720: 8 pm local (ET / 4 UP counties CT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1046",
+"title": "Will the Republican Party win the Kansas Senate?",
+"state": "Kansas",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "KSA 25-106: 7 pm local (CT / 4 MT counties)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1045",
+"title": "Will the Democratic Party win the Kansas Senate?",
+"state": "Kansas",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "KSA 25-106: 7 pm local (CT / 4 MT counties)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1044",
+"title": "Will the Republican Party win the Florida Senate?",
+"state": "Florida",
+"race": "Senate",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1043",
+"title": "Will the Democratic Party win the Florida Senate?",
+"state": "Florida",
+"race": "Senate",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1042",
+"title": "Will the Democratic Party win the Delaware Senate?",
+"state": "Delaware",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "15 Del. C. \u00a74902: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1041",
+"title": "Will the Republican Party win the WI-03 House race?",
+"state": "Wisconsin",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Wis. Stat. 6.78: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1040",
+"title": "Will the Democratic Party win the WI-03 House race?",
+"state": "Wisconsin",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Wis. Stat. 6.78: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1039",
+"title": "Will the Republican Party win the WI-01 House race?",
+"state": "Wisconsin",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Wis. Stat. 6.78: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1038",
+"title": "Will the Democratic Party win the WI-01 House race?",
+"state": "Wisconsin",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Wis. Stat. 6.78: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1037",
+"title": "Will the Republican Party win the WA-03 House race?",
+"state": "Washington",
+"race": "House district",
+"party": "R",
+"first_close_et": "23:00",
+"last_close_et": "23:00",
+"source": "RCW 29A.40.110: 8 pm PT",
+"first_close_pt": "20:00",
+"last_close_pt": "20:00"
+},
+{
+"ex": "1036",
+"title": "Will the Democratic Party win the WA-03 House race?",
+"state": "Washington",
+"race": "House district",
+"party": "D",
+"first_close_et": "23:00",
+"last_close_et": "23:00",
+"source": "RCW 29A.40.110: 8 pm PT",
+"first_close_pt": "20:00",
+"last_close_pt": "20:00"
+},
+{
+"ex": "1035",
+"title": "Will the Republican Party win the VA-07 House race?",
+"state": "Virginia",
+"race": "House district",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "Va. Code \u00a724.2-603: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "1034",
+"title": "Will the Republican Party win the VA-05 House race?",
+"state": "Virginia",
+"race": "House district",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "Va. Code \u00a724.2-603: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "1033",
+"title": "Will the Democratic Party win the VA-05 House race?",
+"state": "Virginia",
+"race": "House district",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "Va. Code \u00a724.2-603: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "1032",
+"title": "Will the Democratic Party win the VA-02 House race?",
+"state": "Virginia",
+"race": "House district",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "Va. Code \u00a724.2-603: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "1031",
+"title": "Will the Democratic Party win the VA-01 House race?",
+"state": "Virginia",
+"race": "House district",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "Va. Code \u00a724.2-603: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "1030",
+"title": "Will the Republican Party win the TN-05 House race?",
+"state": "Tennessee",
+"race": "House district",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "TCA 2-3-104: 8 pm ET / 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1029",
+"title": "Will the Democratic Party win the TN-05 House race?",
+"state": "Tennessee",
+"race": "House district",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "TCA 2-3-104: 8 pm ET / 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1028",
+"title": "Will the Republican Party win the MN-05 House race?",
+"state": "Minnesota",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "MS 204C.05: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1027",
+"title": "Will the Democratic Party win the MN-05 House race?",
+"state": "Minnesota",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "MS 204C.05: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1026",
+"title": "Will the Republican Party win the MN-02 House race?",
+"state": "Minnesota",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "MS 204C.05: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1025",
+"title": "Will the Democratic Party win the MN-02 House race?",
+"state": "Minnesota",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "MS 204C.05: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1024",
+"title": "Will the Republican Party win the MN-01 House race?",
+"state": "Minnesota",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "MS 204C.05: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1023",
+"title": "Will the Democratic Party win the MN-01 House race?",
+"state": "Minnesota",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "MS 204C.05: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1022",
+"title": "Will the Republican Party win the MI-10 House race?",
+"state": "Michigan",
+"race": "House district",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "MCL 168.720: 8 pm local (ET / 4 UP counties CT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1021",
+"title": "Will the Democratic Party win the MI-10 House race?",
+"state": "Michigan",
+"race": "House district",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "MCL 168.720: 8 pm local (ET / 4 UP counties CT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1020",
+"title": "Will the Republican Party win the MI-07 House race?",
+"state": "Michigan",
+"race": "House district",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "MCL 168.720: 8 pm local (ET / 4 UP counties CT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1019",
+"title": "Will the Democratic Party win the MI-07 House race?",
+"state": "Michigan",
+"race": "House district",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "MCL 168.720: 8 pm local (ET / 4 UP counties CT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1018",
+"title": "Will the Republican Party win the FL-22 House race?",
+"state": "Florida",
+"race": "House district",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1017",
+"title": "Will the Democratic Party win the FL-22 House race?",
+"state": "Florida",
+"race": "House district",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1016",
+"title": "Will the Republican Party win the FL-20 House race?",
+"state": "Florida",
+"race": "House district",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1015",
+"title": "Will the Democratic Party win the FL-20 House race?",
+"state": "Florida",
+"race": "House district",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1014",
+"title": "Will the Republican Party win the FL-16 House race?",
+"state": "Florida",
+"race": "House district",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1013",
+"title": "Will the Democratic Party win the FL-16 House race?",
+"state": "Florida",
+"race": "House district",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1012",
+"title": "Will the Democratic Party win the FL-13 House race?",
+"state": "Florida",
+"race": "House district",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1011",
+"title": "Will the Republican Party win the FL-09 House race?",
+"state": "Florida",
+"race": "House district",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1010",
+"title": "Will the Republican Party win the FL-07 House race?",
+"state": "Florida",
+"race": "House district",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1009",
+"title": "Will the Democratic Party win the FL-07 House race?",
+"state": "Florida",
+"race": "House district",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1008",
+"title": "Will the Republican Party win the AL-02 House race?",
+"state": "Alabama",
+"race": "House district",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "AL Code \u00a717-9-6: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1007",
+"title": "Will the Democratic Party win the AL-02 House race?",
+"state": "Alabama",
+"race": "House district",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "AL Code \u00a717-9-6: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "1006",
+"title": "Will the Republican Party win the Wyoming Governor?",
+"state": "Wyoming",
+"race": "Governor",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "WS 22-13-101: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1005",
+"title": "Will the Democratic Party win the Wyoming Governor?",
+"state": "Wyoming",
+"race": "Governor",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "WS 22-13-101: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1004",
+"title": "Will the Republican Party win the Wisconsin Governor?",
+"state": "Wisconsin",
+"race": "Governor",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Wis. Stat. 6.78: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1003",
+"title": "Will the Democratic Party win the Wisconsin Governor?",
+"state": "Wisconsin",
+"race": "Governor",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Wis. Stat. 6.78: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "1002",
+"title": "Will the Republican Party win the Vermont Governor?",
+"state": "Vermont",
+"race": "Governor",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "17 VSA \u00a72561: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "1001",
+"title": "Will the Democratic Party win the Vermont Governor?",
+"state": "Vermont",
+"race": "Governor",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "17 VSA \u00a72561: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "1000",
+"title": "Will the Republican Party win the Tennessee Governor?",
+"state": "Tennessee",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "TCA 2-3-104: 8 pm ET / 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "999",
+"title": "Will the Democratic Party win the Tennessee Governor?",
+"state": "Tennessee",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "TCA 2-3-104: 8 pm ET / 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "998",
+"title": "Will the Republican Party win the South Dakota Governor?",
+"state": "South Dakota",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "SDCL 12-2-3: 7 pm local (CT / MT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "997",
+"title": "Will the Republican Party win the Minnesota Governor?",
+"state": "Minnesota",
+"race": "Governor",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "MS 204C.05: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "996",
+"title": "Will the Democratic Party win the Minnesota Governor?",
+"state": "Minnesota",
+"race": "Governor",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "MS 204C.05: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "995",
+"title": "Will the Republican Party win the Michigan Governor?",
+"state": "Michigan",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "MCL 168.720: 8 pm local (ET / 4 UP counties CT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "994",
+"title": "Will the Democratic Party win the Michigan Governor?",
+"state": "Michigan",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "MCL 168.720: 8 pm local (ET / 4 UP counties CT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "993",
+"title": "Will the Republican Party win the Kansas Governor?",
+"state": "Kansas",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "KSA 25-106: 7 pm local (CT / 4 MT counties)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "992",
+"title": "Will the Democratic Party win the Kansas Governor?",
+"state": "Kansas",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "KSA 25-106: 7 pm local (CT / 4 MT counties)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "991",
+"title": "Will the Republican Party win the Hawaii Governor?",
+"state": "Hawaii",
+"race": "Governor",
+"party": "R",
+"first_close_et": "00:00+1",
+"last_close_et": "00:00+1",
+"source": "HRS \u00a711-131: 7 pm HST",
+"first_close_pt": "21:00",
+"last_close_pt": "21:00"
+},
+{
+"ex": "990",
+"title": "Will the Democratic Party win the Hawaii Governor?",
+"state": "Hawaii",
+"race": "Governor",
+"party": "D",
+"first_close_et": "00:00+1",
+"last_close_et": "00:00+1",
+"source": "HRS \u00a711-131: 7 pm HST",
+"first_close_pt": "21:00",
+"last_close_pt": "21:00"
+},
+{
+"ex": "989",
+"title": "Will the Republican Party win the Florida Governor?",
+"state": "Florida",
+"race": "Governor",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "988",
+"title": "Will the Democratic Party win the Florida Governor?",
+"state": "Florida",
+"race": "Governor",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "987",
+"title": "Will the Democratic Party win the Connecticut Governor?",
+"state": "Connecticut",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "CGS \u00a79-174: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "986",
+"title": "Will the Republican Party win the West Virginia Senate?",
+"state": "West Virginia",
+"race": "Senate",
+"party": "R",
+"first_close_et": "19:30",
+"last_close_et": "19:30",
+"source": "WV Code \u00a73-1-31: 7:30 pm ET",
+"first_close_pt": "16:30",
+"last_close_pt": "16:30"
+},
+{
+"ex": "985",
+"title": "Will the Democratic Party win the West Virginia Senate?",
+"state": "West Virginia",
+"race": "Senate",
+"party": "D",
+"first_close_et": "19:30",
+"last_close_et": "19:30",
+"source": "WV Code \u00a73-1-31: 7:30 pm ET",
+"first_close_pt": "16:30",
+"last_close_pt": "16:30"
+},
+{
+"ex": "984",
+"title": "Will the Democratic Party win the Virginia Senate?",
+"state": "Virginia",
+"race": "Senate",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "Va. Code \u00a724.2-603: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "983",
+"title": "Will the Republican Party win the Texas Senate?",
+"state": "Texas",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "Elec. Code \u00a741.031: 7 pm local (CT / El Paso MT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "982",
+"title": "Will the Democratic Party win the Texas Senate?",
+"state": "Texas",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "Elec. Code \u00a741.031: 7 pm local (CT / El Paso MT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "981",
+"title": "Will the Republican Party win the South Dakota Senate?",
+"state": "South Dakota",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "SDCL 12-2-3: 7 pm local (CT / MT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "980",
+"title": "Will the Democratic Party win the South Dakota Senate?",
+"state": "South Dakota",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "SDCL 12-2-3: 7 pm local (CT / MT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "979",
+"title": "Will the Republican Party win the South Carolina Senate?",
+"state": "South Carolina",
+"race": "Senate",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "SC Code 7-13-60: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "978",
+"title": "Will the Democratic Party win the South Carolina Senate?",
+"state": "South Carolina",
+"race": "Senate",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "SC Code 7-13-60: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "977",
+"title": "Will the Republican Party win the Oregon Senate?",
+"state": "Oregon",
+"race": "Senate",
+"party": "R",
+"first_close_et": "23:00",
+"last_close_et": "23:00",
+"source": "ORS 254.470: 8 pm PT",
+"first_close_pt": "20:00",
+"last_close_pt": "20:00"
+},
+{
+"ex": "976",
+"title": "Will the Democratic Party win the Oregon Senate?",
+"state": "Oregon",
+"race": "Senate",
+"party": "D",
+"first_close_et": "23:00",
+"last_close_et": "23:00",
+"source": "ORS 254.470: 8 pm PT",
+"first_close_pt": "20:00",
+"last_close_pt": "20:00"
+},
+{
+"ex": "975",
+"title": "Will the Republican Party win the Oklahoma Senate?",
+"state": "Oklahoma",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "26 OS \u00a77-104: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "974",
+"title": "Will the Republican Party win the New Mexico Senate?",
+"state": "New Mexico",
+"race": "Senate",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "NMSA 1-12-1: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "973",
+"title": "Will the Democratic Party win the New Mexico Senate?",
+"state": "New Mexico",
+"race": "Senate",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "NMSA 1-12-1: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "972",
+"title": "Will the Republican Party win the New Jersey Senate?",
+"state": "New Jersey",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "NJSA 19:15-2: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "971",
+"title": "Will the Democratic Party win the New Jersey Senate?",
+"state": "New Jersey",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "NJSA 19:15-2: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "970",
+"title": "Will the Republican Party win the Nebraska Senate?",
+"state": "Nebraska",
+"race": "Senate",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "NRS 32-908: 8 pm CT / 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "968",
+"title": "Will the Democratic Party win the Nebraska Senate?",
+"state": "Nebraska",
+"race": "Senate",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "NRS 32-908: 8 pm CT / 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "967",
+"title": "Will the Republican Party win the North Carolina Senate?",
+"state": "North Carolina",
+"race": "Senate",
+"party": "R",
+"first_close_et": "19:30",
+"last_close_et": "19:30",
+"source": "GS 163-166.01: 7:30 pm ET",
+"first_close_pt": "16:30",
+"last_close_pt": "16:30"
+},
+{
+"ex": "966",
+"title": "Will the Democratic Party win the North Carolina Senate?",
+"state": "North Carolina",
+"race": "Senate",
+"party": "D",
+"first_close_et": "19:30",
+"last_close_et": "19:30",
+"source": "GS 163-166.01: 7:30 pm ET",
+"first_close_pt": "16:30",
+"last_close_pt": "16:30"
+},
+{
+"ex": "965",
+"title": "Will the Independent Party win the Montana Senate?",
+"state": "Montana",
+"race": "Senate",
+"party": "I",
+"first_close_et": "22:00",
+"last_close_et": "22:00",
+"source": "MCA 13-1-106: 8 pm MT",
+"first_close_pt": "19:00",
+"last_close_pt": "19:00"
+},
+{
+"ex": "964",
+"title": "Will the Republican Party win the Montana Senate?",
+"state": "Montana",
+"race": "Senate",
+"party": "R",
+"first_close_et": "22:00",
+"last_close_et": "22:00",
+"source": "MCA 13-1-106: 8 pm MT",
+"first_close_pt": "19:00",
+"last_close_pt": "19:00"
+},
+{
+"ex": "963",
+"title": "Will the Democratic Party win the Montana Senate?",
+"state": "Montana",
+"race": "Senate",
+"party": "D",
+"first_close_et": "22:00",
+"last_close_et": "22:00",
+"source": "MCA 13-1-106: 8 pm MT",
+"first_close_pt": "19:00",
+"last_close_pt": "19:00"
+},
+{
+"ex": "962",
+"title": "Will the Republican Party win the Mississippi Senate?",
+"state": "Mississippi",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "MS Code \u00a723-15-541: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "961",
+"title": "Will the Democratic Party win the Mississippi Senate?",
+"state": "Mississippi",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "MS Code \u00a723-15-541: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "960",
+"title": "Will the Republican Party win the Maine Senate?",
+"state": "Maine",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "21-A MRSA \u00a7626: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "959",
+"title": "Will the Democratic Party win the Maine Senate?",
+"state": "Maine",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "21-A MRSA \u00a7626: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "958",
+"title": "Will the Republican Party win the Louisiana Senate?",
+"state": "Louisiana",
+"race": "Senate",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "RS 18:541: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "957",
+"title": "Will the Democratic Party win the Louisiana Senate?",
+"state": "Louisiana",
+"race": "Senate",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "RS 18:541: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "956",
+"title": "Will the Republican Party win the Kentucky Senate?",
+"state": "Kentucky",
+"race": "Senate",
+"party": "R",
+"first_close_et": "18:00",
+"last_close_et": "19:00",
+"source": "KRS 118.025: 6 pm local (ET / CT)",
+"first_close_pt": "15:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "955",
+"title": "Will the Democratic Party win the Kentucky Senate?",
+"state": "Kentucky",
+"race": "Senate",
+"party": "D",
+"first_close_et": "18:00",
+"last_close_et": "19:00",
+"source": "KRS 118.025: 6 pm local (ET / CT)",
+"first_close_pt": "15:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "954",
+"title": "Will the Republican Party win the Illinois Senate?",
+"state": "Illinois",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "10 ILCS 5/17-1: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "953",
+"title": "Will the Democratic Party win the Illinois Senate?",
+"state": "Illinois",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "10 ILCS 5/17-1: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "952",
+"title": "Will the Republican Party win the Idaho Senate?",
+"state": "Idaho",
+"race": "Senate",
+"party": "R",
+"first_close_et": "22:00",
+"last_close_et": "23:00",
+"source": "IC 34-1101: 8 pm local (MT / PT panhandle)",
+"first_close_pt": "19:00",
+"last_close_pt": "20:00"
+},
+{
+"ex": "951",
+"title": "Will the Democratic Party win the Idaho Senate?",
+"state": "Idaho",
+"race": "Senate",
+"party": "D",
+"first_close_et": "22:00",
+"last_close_et": "23:00",
+"source": "IC 34-1101: 8 pm local (MT / PT panhandle)",
+"first_close_pt": "19:00",
+"last_close_pt": "20:00"
+},
+{
+"ex": "950",
+"title": "Will the Republican Party win the Iowa Senate?",
+"state": "Iowa",
+"race": "Senate",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Iowa Code 49.73: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "949",
+"title": "Will the Democratic Party win the Iowa Senate?",
+"state": "Iowa",
+"race": "Senate",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Iowa Code 49.73: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "948",
+"title": "Will the Republican Party win the Georgia Senate?",
+"state": "Georgia",
+"race": "Senate",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "OCGA 21-2-403: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "947",
+"title": "Will the Democratic Party win the Georgia Senate?",
+"state": "Georgia",
+"race": "Senate",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "OCGA 21-2-403: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "946",
+"title": "Will the Republican Party win the Colorado Senate?",
+"state": "Colorado",
+"race": "Senate",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "CRS 1-7-101: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "945",
+"title": "Will the Democratic Party win the Colorado Senate?",
+"state": "Colorado",
+"race": "Senate",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "CRS 1-7-101: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "944",
+"title": "Will the Republican Party win the Arkansas Senate?",
+"state": "Arkansas",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:30",
+"last_close_et": "20:30",
+"source": "ACA 7-5-304: 7:30 pm CT",
+"first_close_pt": "17:30",
+"last_close_pt": "17:30"
+},
+{
+"ex": "943",
+"title": "Will the Democratic Party win the Arkansas Senate?",
+"state": "Arkansas",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:30",
+"last_close_et": "20:30",
+"source": "ACA 7-5-304: 7:30 pm CT",
+"first_close_pt": "17:30",
+"last_close_pt": "17:30"
+},
+{
+"ex": "942",
+"title": "Will the Republican Party win the Alabama Senate?",
+"state": "Alabama",
+"race": "Senate",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "AL Code \u00a717-9-6: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "941",
+"title": "Will the Democratic Party win the Alabama Senate?",
+"state": "Alabama",
+"race": "Senate",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "AL Code \u00a717-9-6: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "940",
+"title": "Will the Democratic Party win the VA-07 House race?",
+"state": "Virginia",
+"race": "House district",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "Va. Code \u00a724.2-603: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "939",
+"title": "Will the Republican Party win the VA-02 House race?",
+"state": "Virginia",
+"race": "House district",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "Va. Code \u00a724.2-603: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "938",
+"title": "Will the Republican Party win the VA-01 House race?",
+"state": "Virginia",
+"race": "House district",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "Va. Code \u00a724.2-603: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "937",
+"title": "Will the Republican Party win the TX-28 House race?",
+"state": "Texas",
+"race": "House district",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "Elec. Code \u00a741.031: 7 pm local (CT / El Paso MT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "936",
+"title": "Will the Democratic Party win the TX-28 House race?",
+"state": "Texas",
+"race": "House district",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "Elec. Code \u00a741.031: 7 pm local (CT / El Paso MT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "935",
+"title": "Will the Republican Party win the TX-23 House race?",
+"state": "Texas",
+"race": "House district",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "Elec. Code \u00a741.031: 7 pm local (CT / El Paso MT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "934",
+"title": "Will the Democratic Party win the TX-23 House race?",
+"state": "Texas",
+"race": "House district",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "Elec. Code \u00a741.031: 7 pm local (CT / El Paso MT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "933",
+"title": "Will the Republican Party win the TX-15 House race?",
+"state": "Texas",
+"race": "House district",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "Elec. Code \u00a741.031: 7 pm local (CT / El Paso MT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "932",
+"title": "Will the Democratic Party win the TX-15 House race?",
+"state": "Texas",
+"race": "House district",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "Elec. Code \u00a741.031: 7 pm local (CT / El Paso MT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "931",
+"title": "Will the Republican Party win the SC-01 House race?",
+"state": "South Carolina",
+"race": "House district",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "SC Code 7-13-60: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "930",
+"title": "Will the Democratic Party win the SC-01 House race?",
+"state": "South Carolina",
+"race": "House district",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "SC Code 7-13-60: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "929",
+"title": "Will the Republican Party win the PA-10 House race?",
+"state": "Pennsylvania",
+"race": "House district",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "25 PS \u00a73045: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "928",
+"title": "Will the Democratic Party win the PA-10 House race?",
+"state": "Pennsylvania",
+"race": "House district",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "25 PS \u00a73045: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "927",
+"title": "Will the Republican Party win the PA-08 House race?",
+"state": "Pennsylvania",
+"race": "House district",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "25 PS \u00a73045: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "926",
+"title": "Will the Democratic Party win the PA-08 House race?",
+"state": "Pennsylvania",
+"race": "House district",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "25 PS \u00a73045: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "925",
+"title": "Will the Republican Party win the PA-07 House race?",
+"state": "Pennsylvania",
+"race": "House district",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "25 PS \u00a73045: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "924",
+"title": "Will the Democratic Party win the PA-07 House race?",
+"state": "Pennsylvania",
+"race": "House district",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "25 PS \u00a73045: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "923",
+"title": "Will the Republican Party win the PA-01 House race?",
+"state": "Pennsylvania",
+"race": "House district",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "25 PS \u00a73045: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "922",
+"title": "Will the Democratic Party win the PA-01 House race?",
+"state": "Pennsylvania",
+"race": "House district",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "25 PS \u00a73045: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "921",
+"title": "Will the Republican Party win the NY-17 House race?",
+"state": "New York",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Elec. Law \u00a78-100: 9 pm ET",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "920",
+"title": "Will the Democratic Party win the NY-17 House race?",
+"state": "New York",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Elec. Law \u00a78-100: 9 pm ET",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "919",
+"title": "Will the Republican Party win the NY-13 House race?",
+"state": "New York",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Elec. Law \u00a78-100: 9 pm ET",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "918",
+"title": "Will the Democratic Party win the NY-13 House race?",
+"state": "New York",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Elec. Law \u00a78-100: 9 pm ET",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "917",
+"title": "Will the Republican Party win the NJ-07 House race?",
+"state": "New Jersey",
+"race": "House district",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "NJSA 19:15-2: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "916",
+"title": "Will the Democratic Party win the NJ-07 House race?",
+"state": "New Jersey",
+"race": "House district",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "NJSA 19:15-2: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "915",
+"title": "Will the Republican Party win the NE-02 House race?",
+"state": "Nebraska",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "NRS 32-908: 8 pm CT / 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "914",
+"title": "Will the Democratic Party win the NE-02 House race?",
+"state": "Nebraska",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "NRS 32-908: 8 pm CT / 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "913",
+"title": "Will the Republican Party win the MT-01 House race?",
+"state": "Montana",
+"race": "House district",
+"party": "R",
+"first_close_et": "22:00",
+"last_close_et": "22:00",
+"source": "MCA 13-1-106: 8 pm MT",
+"first_close_pt": "19:00",
+"last_close_pt": "19:00"
+},
+{
+"ex": "912",
+"title": "Will the Democratic Party win the MT-01 House race?",
+"state": "Montana",
+"race": "House district",
+"party": "D",
+"first_close_et": "22:00",
+"last_close_et": "22:00",
+"source": "MCA 13-1-106: 8 pm MT",
+"first_close_pt": "19:00",
+"last_close_pt": "19:00"
+},
+{
+"ex": "911",
+"title": "Will the Republican Party win the ME-02 House race?",
+"state": "Maine",
+"race": "House district",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "21-A MRSA \u00a7626: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "910",
+"title": "Will the Democratic Party win the ME-02 House race?",
+"state": "Maine",
+"race": "House district",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "21-A MRSA \u00a7626: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "909",
+"title": "Will the Republican Party win the KY-04 House race?",
+"state": "Kentucky",
+"race": "House district",
+"party": "R",
+"first_close_et": "18:00",
+"last_close_et": "19:00",
+"source": "KRS 118.025: 6 pm local (ET / CT)",
+"first_close_pt": "15:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "908",
+"title": "Will the Democratic Party win the KY-04 House race?",
+"state": "Kentucky",
+"race": "House district",
+"party": "D",
+"first_close_et": "18:00",
+"last_close_et": "19:00",
+"source": "KRS 118.025: 6 pm local (ET / CT)",
+"first_close_pt": "15:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "907",
+"title": "Will the Republican Party win the IA-03 House race?",
+"state": "Iowa",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Iowa Code 49.73: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "906",
+"title": "Will the Democratic Party win the IA-03 House race?",
+"state": "Iowa",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Iowa Code 49.73: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "905",
+"title": "Will the Republican Party win the IA-02 House race?",
+"state": "Iowa",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Iowa Code 49.73: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "904",
+"title": "Will the Democratic Party win the IA-02 House race?",
+"state": "Iowa",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Iowa Code 49.73: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "903",
+"title": "Will the Republican Party win the IA-01 House race?",
+"state": "Iowa",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Iowa Code 49.73: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "902",
+"title": "Will the Democratic Party win the IA-01 House race?",
+"state": "Iowa",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Iowa Code 49.73: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "901",
+"title": "Will the Republican Party win the FL-13 House race?",
+"state": "Florida",
+"race": "House district",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "900",
+"title": "Will the Democratic Party win the FL-09 House race?",
+"state": "Florida",
+"race": "House district",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "20:00",
+"source": "FS 100.011: 7 pm local (ET / panhandle CT)",
+"first_close_pt": "16:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "899",
+"title": "Will the Republican Party win the CO-08 House race?",
+"state": "Colorado",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "CRS 1-7-101: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "898",
+"title": "Will the Democratic Party win the CO-08 House race?",
+"state": "Colorado",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "CRS 1-7-101: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "897",
+"title": "Will the Republican Party win the CO-04 House race?",
+"state": "Colorado",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "CRS 1-7-101: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "896",
+"title": "Will the Democratic Party win the CO-04 House race?",
+"state": "Colorado",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "CRS 1-7-101: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "895",
+"title": "Will the Republican Party win the CO-03 House race?",
+"state": "Colorado",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "CRS 1-7-101: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "894",
+"title": "Will the Democratic Party win the CO-03 House race?",
+"state": "Colorado",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "CRS 1-7-101: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "893",
+"title": "Will the Republican Party win the CA-48 House race?",
+"state": "California",
+"race": "House district",
+"party": "R",
+"first_close_et": "23:00",
+"last_close_et": "23:00",
+"source": "Elec. Code \u00a714212: 8 pm PT",
+"first_close_pt": "20:00",
+"last_close_pt": "20:00"
+},
+{
+"ex": "892",
+"title": "Will the Democratic Party win the CA-48 House race?",
+"state": "California",
+"race": "House district",
+"party": "D",
+"first_close_et": "23:00",
+"last_close_et": "23:00",
+"source": "Elec. Code \u00a714212: 8 pm PT",
+"first_close_pt": "20:00",
+"last_close_pt": "20:00"
+},
+{
+"ex": "891",
+"title": "Will the Republican Party win the CA-22 House race?",
+"state": "California",
+"race": "House district",
+"party": "R",
+"first_close_et": "23:00",
+"last_close_et": "23:00",
+"source": "Elec. Code \u00a714212: 8 pm PT",
+"first_close_pt": "20:00",
+"last_close_pt": "20:00"
+},
+{
+"ex": "890",
+"title": "Will the Democratic Party win the CA-22 House race?",
+"state": "California",
+"race": "House district",
+"party": "D",
+"first_close_et": "23:00",
+"last_close_et": "23:00",
+"source": "Elec. Code \u00a714212: 8 pm PT",
+"first_close_pt": "20:00",
+"last_close_pt": "20:00"
+},
+{
+"ex": "889",
+"title": "Will the Republican Party win the AZ-06 House race?",
+"state": "Arizona",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "ARS 16-565: 7 pm MST",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "888",
+"title": "Will the Democratic Party win the AZ-06 House race?",
+"state": "Arizona",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "ARS 16-565: 7 pm MST",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "887",
+"title": "Will the Republican Party win the AZ-01 House race?",
+"state": "Arizona",
+"race": "House district",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "ARS 16-565: 7 pm MST",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "886",
+"title": "Will the Democratic Party win the AZ-01 House race?",
+"state": "Arizona",
+"race": "House district",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "ARS 16-565: 7 pm MST",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "885",
+"title": "Will the Republican Party win the Texas Governor?",
+"state": "Texas",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "Elec. Code \u00a741.031: 7 pm local (CT / El Paso MT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "884",
+"title": "Will the Democratic Party win the Texas Governor?",
+"state": "Texas",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "Elec. Code \u00a741.031: 7 pm local (CT / El Paso MT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "883",
+"title": "Will the Democratic Party win the South Dakota Governor?",
+"state": "South Dakota",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "21:00",
+"source": "SDCL 12-2-3: 7 pm local (CT / MT)",
+"first_close_pt": "17:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "882",
+"title": "Will the Republican Party win the South Carolina Governor?",
+"state": "South Carolina",
+"race": "Governor",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "SC Code 7-13-60: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "881",
+"title": "Will the Democratic Party win the South Carolina Governor?",
+"state": "South Carolina",
+"race": "Governor",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "SC Code 7-13-60: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "879",
+"title": "Will the Republican Party win the Pennsylvania Governor?",
+"state": "Pennsylvania",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "25 PS \u00a73045: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "878",
+"title": "Will the Democratic Party win the Pennsylvania Governor?",
+"state": "Pennsylvania",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "25 PS \u00a73045: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "877",
+"title": "Will the Republican Party win the Oregon Governor?",
+"state": "Oregon",
+"race": "Governor",
+"party": "R",
+"first_close_et": "23:00",
+"last_close_et": "23:00",
+"source": "ORS 254.470: 8 pm PT",
+"first_close_pt": "20:00",
+"last_close_pt": "20:00"
+},
+{
+"ex": "876",
+"title": "Will the Democratic Party win the Oregon Governor?",
+"state": "Oregon",
+"race": "Governor",
+"party": "D",
+"first_close_et": "23:00",
+"last_close_et": "23:00",
+"source": "ORS 254.470: 8 pm PT",
+"first_close_pt": "20:00",
+"last_close_pt": "20:00"
+},
+{
+"ex": "875",
+"title": "Will the Democratic Party win the Oklahoma Governor?",
+"state": "Oklahoma",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "26 OS \u00a77-104: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "874",
+"title": "Will the Republican Party win the New York Governor?",
+"state": "New York",
+"race": "Governor",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Elec. Law \u00a78-100: 9 pm ET",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "873",
+"title": "Will the Democratic Party win the New York Governor?",
+"state": "New York",
+"race": "Governor",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Elec. Law \u00a78-100: 9 pm ET",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "872",
+"title": "Will the Republican Party win the Nevada Governor?",
+"state": "Nevada",
+"race": "Governor",
+"party": "R",
+"first_close_et": "22:00",
+"last_close_et": "22:00",
+"source": "NRS 293.273: 7 pm PT",
+"first_close_pt": "19:00",
+"last_close_pt": "19:00"
+},
+{
+"ex": "871",
+"title": "Will the Democratic Party win the Nevada Governor?",
+"state": "Nevada",
+"race": "Governor",
+"party": "D",
+"first_close_et": "22:00",
+"last_close_et": "22:00",
+"source": "NRS 293.273: 7 pm PT",
+"first_close_pt": "19:00",
+"last_close_pt": "19:00"
+},
+{
+"ex": "870",
+"title": "Will the Republican Party win the New Mexico Governor?",
+"state": "New Mexico",
+"race": "Governor",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "NMSA 1-12-1: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "869",
+"title": "Will the Democratic Party win the New Mexico Governor?",
+"state": "New Mexico",
+"race": "Governor",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "NMSA 1-12-1: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "868",
+"title": "Will the Republican Party win the Nebraska Governor?",
+"state": "Nebraska",
+"race": "Governor",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "NRS 32-908: 8 pm CT / 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "867",
+"title": "Will the Democratic Party win the Nebraska Governor?",
+"state": "Nebraska",
+"race": "Governor",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "NRS 32-908: 8 pm CT / 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "866",
+"title": "Will the Republican Party win the Maine Governor?",
+"state": "Maine",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "21-A MRSA \u00a7626: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "865",
+"title": "Will the Democratic Party win the Maine Governor?",
+"state": "Maine",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "21-A MRSA \u00a7626: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "864",
+"title": "Will the Republican Party win the Maryland Governor?",
+"state": "Maryland",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "Elec. Law \u00a710-301: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "863",
+"title": "Will the Democratic Party win the Maryland Governor?",
+"state": "Maryland",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "Elec. Law \u00a710-301: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "862",
+"title": "Will the Republican Party win the Illinois Governor?",
+"state": "Illinois",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "10 ILCS 5/17-1: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "861",
+"title": "Will the Democratic Party win the Illinois Governor?",
+"state": "Illinois",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "10 ILCS 5/17-1: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "860",
+"title": "Will the Republican Party win the Idaho Governor?",
+"state": "Idaho",
+"race": "Governor",
+"party": "R",
+"first_close_et": "22:00",
+"last_close_et": "23:00",
+"source": "IC 34-1101: 8 pm local (MT / PT panhandle)",
+"first_close_pt": "19:00",
+"last_close_pt": "20:00"
+},
+{
+"ex": "859",
+"title": "Will the Democratic Party win the Idaho Governor?",
+"state": "Idaho",
+"race": "Governor",
+"party": "D",
+"first_close_et": "22:00",
+"last_close_et": "23:00",
+"source": "IC 34-1101: 8 pm local (MT / PT panhandle)",
+"first_close_pt": "19:00",
+"last_close_pt": "20:00"
+},
+{
+"ex": "858",
+"title": "Will the Republican Party win the Iowa Governor?",
+"state": "Iowa",
+"race": "Governor",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Iowa Code 49.73: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "857",
+"title": "Will the Democratic Party win the Iowa Governor?",
+"state": "Iowa",
+"race": "Governor",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "Iowa Code 49.73: 8 pm CT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "856",
+"title": "Will the Republican Party win the Georgia Governor?",
+"state": "Georgia",
+"race": "Governor",
+"party": "R",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "OCGA 21-2-403: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "855",
+"title": "Will the Democratic Party win the Georgia Governor?",
+"state": "Georgia",
+"race": "Governor",
+"party": "D",
+"first_close_et": "19:00",
+"last_close_et": "19:00",
+"source": "OCGA 21-2-403: 7 pm ET",
+"first_close_pt": "16:00",
+"last_close_pt": "16:00"
+},
+{
+"ex": "854",
+"title": "Will the Republican Party win the Connecticut Governor?",
+"state": "Connecticut",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "CGS \u00a79-174: 8 pm ET",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "853",
+"title": "Will the Republican Party win the Colorado Governor?",
+"state": "Colorado",
+"race": "Governor",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "CRS 1-7-101: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "852",
+"title": "Will the Democratic Party win the Colorado Governor?",
+"state": "Colorado",
+"race": "Governor",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "CRS 1-7-101: 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "849",
+"title": "Will the Republican Party win the Arizona Governor?",
+"state": "Arizona",
+"race": "Governor",
+"party": "R",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "ARS 16-565: 7 pm MST",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "848",
+"title": "Will the Democratic Party win the Arizona Governor?",
+"state": "Arizona",
+"race": "Governor",
+"party": "D",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "ARS 16-565: 7 pm MST",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+},
+{
+"ex": "847",
+"title": "Will the Republican Party win the Arkansas Governor?",
+"state": "Arkansas",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:30",
+"last_close_et": "20:30",
+"source": "ACA 7-5-304: 7:30 pm CT",
+"first_close_pt": "17:30",
+"last_close_pt": "17:30"
+},
+{
+"ex": "846",
+"title": "Will the Democratic Party win the Arkansas Governor?",
+"state": "Arkansas",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:30",
+"last_close_et": "20:30",
+"source": "ACA 7-5-304: 7:30 pm CT",
+"first_close_pt": "17:30",
+"last_close_pt": "17:30"
+},
+{
+"ex": "845",
+"title": "Will the Republican Party win the Alabama Governor?",
+"state": "Alabama",
+"race": "Governor",
+"party": "R",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "AL Code \u00a717-9-6: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "844",
+"title": "Will the Democratic Party win the Alabama Governor?",
+"state": "Alabama",
+"race": "Governor",
+"party": "D",
+"first_close_et": "20:00",
+"last_close_et": "20:00",
+"source": "AL Code \u00a717-9-6: 7 pm CT",
+"first_close_pt": "17:00",
+"last_close_pt": "17:00"
+},
+{
+"ex": "843",
+"title": "Will the Republican Party win the U.S. Senate?",
+"state": "Alaska",
+"race": "U.S. Senate control",
+"party": "R",
+"first_close_et": "00:00+1",
+"last_close_et": "01:00+1",
+"source": "control markets: the last state close (Alaska 8 pm AKST = 00:00-01:00 ET)",
+"first_close_pt": "21:00",
+"last_close_pt": "22:00"
+},
+{
+"ex": "842",
+"title": "Will the Democratic Party win the U.S. Senate?",
+"state": "Alaska",
+"race": "U.S. Senate control",
+"party": "D",
+"first_close_et": "00:00+1",
+"last_close_et": "01:00+1",
+"source": "control markets: the last state close (Alaska 8 pm AKST = 00:00-01:00 ET)",
+"first_close_pt": "21:00",
+"last_close_pt": "22:00"
+},
+{
+"ex": "841",
+"title": "Will the Republican Party win the U.S. House?",
+"state": "Alaska",
+"race": "U.S. House control",
+"party": "R",
+"first_close_et": "00:00+1",
+"last_close_et": "01:00+1",
+"source": "control markets: the last state close (Alaska 8 pm AKST = 00:00-01:00 ET)",
+"first_close_pt": "21:00",
+"last_close_pt": "22:00"
+},
+{
+"ex": "840",
+"title": "Will the Democratic Party win the U.S. House?",
+"state": "Alaska",
+"race": "U.S. House control",
+"party": "D",
+"first_close_et": "00:00+1",
+"last_close_et": "01:00+1",
+"source": "control markets: the last state close (Alaska 8 pm AKST = 00:00-01:00 ET)",
+"first_close_pt": "21:00",
+"last_close_pt": "22:00"
+},
+{
+"ex": "1067",
+"title": "Will the Republican Party win the Alaska Senate?",
+"state": "Alaska",
+"race": "Senate",
+"party": "R",
+"first_close_et": "00:00+1",
+"last_close_et": "01:00+1",
+"source": "AS 15.15.090: 8 pm local (AKST; Aleutians HST)",
+"first_close_pt": "21:00",
+"last_close_pt": "22:00"
+},
+{
+"ex": "1066",
+"title": "Will the Democratic Party win the Alaska Senate?",
+"state": "Alaska",
+"race": "Senate",
+"party": "D",
+"first_close_et": "00:00+1",
+"last_close_et": "01:00+1",
+"source": "AS 15.15.090: 8 pm local (AKST; Aleutians HST)",
+"first_close_pt": "21:00",
+"last_close_pt": "22:00"
+},
+{
+"ex": "1058",
+"title": "Will the Republican Party win the Alaska Governor?",
+"state": "Alaska",
+"race": "Governor",
+"party": "R",
+"first_close_et": "00:00+1",
+"last_close_et": "01:00+1",
+"source": "AS 15.15.090: 8 pm local (AKST; Aleutians HST)",
+"first_close_pt": "21:00",
+"last_close_pt": "22:00"
+},
+{
+"ex": "969",
+"title": "Will the Independent Party win the Nebraska Senate?",
+"state": "Nebraska",
+"race": "Senate",
+"party": "I",
+"first_close_et": "21:00",
+"last_close_et": "21:00",
+"source": "NRS 32-908: 8 pm CT / 7 pm MT",
+"first_close_pt": "18:00",
+"last_close_pt": "18:00"
+}
+],
+"unmapped": []
+}
+}

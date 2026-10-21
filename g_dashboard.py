@@ -31,8 +31,8 @@ from urllib.parse import urlsplit
 LOCALHOST = {"127.0.0.1", "localhost", "::1"}
 SSE_PERIOD_S = 0.5              # at most 2 updates a second
 SSE_KEEPALIVE_S = 15
-ACTIONS = {"pause", "resume", "pull_quotes", "layer_state", "layer_caps", "market", "kappa", "read_only", "hold_gates", "backfill", "truth_mode", "subbook_fix", "clear_decisions", "gate_free", "travel", "wall", "wall_cancel", "rollback_request", "fmm_restart"}
-DESTRUCTIVE = {"rollback_request", "pull_quotes", "layer_state", "layer_caps", "market", "kappa", "hold_gates", "backfill", "truth_mode", "subbook_fix", "clear_decisions", "gate_free", "travel", "wall", "wall_cancel"}
+ACTIONS = {"pause", "resume", "pull_quotes", "layer_state", "layer_caps", "market", "kappa", "read_only", "hold_gates", "backfill", "truth_mode", "subbook_fix", "clear_decisions", "gate_free", "travel", "wall", "wall_cancel", "rollback_request", "fmm_restart", "election_mode", "election_stop", "election_rearm"}
+DESTRUCTIVE = {"election_mode", "election_stop", "election_rearm", "rollback_request", "pull_quotes", "layer_state", "layer_caps", "market", "kappa", "hold_gates", "backfill", "truth_mode", "subbook_fix", "clear_decisions", "gate_free", "travel", "wall", "wall_cancel"}
 
 
 def _finite(x):

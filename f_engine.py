@@ -32,6 +32,7 @@ from datetime import datetime, timedelta
 
 import b_sig as api
 import c_polymarket as pm
+import n_election as el
 import e_bots as bots
 import g_dashboard as dashboard
 import i_realtime as rt
@@ -73,7 +74,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, CASH_FLOOR_RESUME, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
-                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM, SELL_HOLD, SELL_KEEP_LAYERS, CARRY_BIDSELL, SELL_EV_MAX, FMM_CF, ENGINE_ERR_EXTERNAL, ENGINE_ERR_RESUME_S,
+                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM, SELL_HOLD, SELL_KEEP_LAYERS, CARRY_BIDSELL, SELL_EV_MAX, FMM_CF, ENGINE_ERR_EXTERNAL, ENGINE_ERR_RESUME_S, ELECTION,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -430,7 +431,12 @@ class Engine:
         self.fmm_cash_seen, self.rot_seen_fills = set(), set()               # each fill once (the loop re-hands an order's earlier fills)
         self.carry_now, self.carry_sell, self.carry_t, self.carry_seen, self.carry_view = {}, {}, 0.0, set(), {}   # C98: the carry book
         self.sale_anchor, self.sale_stats, self.foreign_actions = {}, collections.defaultdict(collections.Counter), {}   # C99: sale asks keep their place; foreign fills' direction
-        self.sell_undercut, self.fmm_hour_prev, self.churn_t = {}, None, stamp()   # C100: per sell order, since when the others' best ask sits below ours; the FMM hour; churn window
+        self.sell_undercut, self.fmm_hour_prev, self.churn_t = {}, None, stamp()
+        self.election, self.el_mode_cached, self.el_snap = None, "off", dict(cash=0.0, pos={})   # C102: election night (n_election v2)
+        self.el_logq, self.el_shadowq, self.el_hour = collections.deque(maxlen=5000), collections.deque(maxlen=20000), collections.Counter()
+        self.drift_now, self.drift_view, self.drift_logged = {}, {}, {}
+        self.callexit_now, self.callexit_logged = {}, set()
+        self.el_sent, self.el_fill_seen = {}, set()   # C100: per sell order, since when the others' best ask sits below ours; the FMM hour; churn window
         self.gap_paper = dict(asks={}, realized=0.0, fills=0, done=0)                                 # C99c: the gap-median exit on paper
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
@@ -602,8 +608,9 @@ class Engine:
     MARKET_LAYERS = {"exit": "recycler", "recycle": "recycler", "take": "sniper", "mm": "mm",   # "touch" is the day-6 layer (the old MM touch quote is gone)
                      "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs",
                      "release": "release", "fatfinger": "fatfinger", "dump": "dump", "dumpexit": "dump",
-                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall", "sleeve": "sleeve", "swing": "swing", "swingsell": "swing", "fm": "fm", "fmexit": "fm", "tm": "tm", "tmexit": "tm", "rot": "rot", "rotexit": "rot", "fmm": "fmm", "fmmtake": "fmm", "fmmexit": "fmm", "fmmhedge": "fmm", "carry": "carry", "sm": "sm", "smexit": "sm"}
-    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit", "touchexit", "wallexit", "tmexit", "fmexit", "swingsell", "smexit", "rotexit", "fmmexit"}
+                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall", "sleeve": "sleeve", "swing": "swing", "swingsell": "swing", "fm": "fm", "fmexit": "fm", "tm": "tm", "tmexit": "tm", "rot": "rot", "rotexit": "rot", "fmm": "fmm", "fmmtake": "fmm", "fmmexit": "fmm", "fmmhedge": "fmm", "carry": "carry", "sm": "sm", "smexit": "sm",
+                     "callsnipe": "election", "callexit": "election", "settle": "election", "drift": "election", "driftexit": "election"}   # C102
+    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit", "touchexit", "wallexit", "tmexit", "fmexit", "swingsell", "smexit", "rotexit", "fmmexit", "callexit", "driftexit"}
 
     def gate(self, b, wants):
         """Layer flags (data/overrides.json): a want survives only if its layer is on and allowed on this market. Pause
@@ -793,6 +800,7 @@ class Engine:
                 self.rot_fill_events(new_f)
                 self.fmm_fill_events(new_f)
                 self.carry_fill_events(new_f)
+                self.el_fill_events(new_f)                      # C102 item 9: detection -> sent -> filled, per election order
                 self.sleeve_fill_events(new_f)
                 self.swing_fill_events(new_f)
                 self.rule0_fill_check(new_f)
@@ -817,6 +825,10 @@ class Engine:
             self.az06_audit()                               # C100 item 2: once, SIG's record of Piero's four Oct 17 AZ-06 orders
         except Exception as err:
             self.event("ERR", f"manual book: {err!r}")
+        try:
+            self.el_step(now)                               # C102: election night — the snapshot for the feed thread, the pulls, the queued snipes
+        except Exception as err:
+            self.event("ERR", f"election: {err!r}")
         self.ex.update(pos, self.open, as_of=now)
         if self.ex.frozen or self.journal.unknown():
             n = self.ex.resolve_unknown(self.open, got.get("fills", []), on_adopt=self.adopted)
@@ -1019,6 +1031,8 @@ class Engine:
                         if w.get("qmax") is not None:
                             w["qmax"] = min(w["qmax"], w["qty"])
                 wants = [w for w in wants if w["qty"] >= MIN_QTY]
+                if self.election is not None and self.el_mode_cached == "live" and not self.election.entries_allowed(str(b.ex), now):
+                    wants = [w for w in wants if w.get("reduce") or w["layer"] not in el.PULL_LAYERS]   # C102 C14 / C15: none from the first close - 10 min
                 hold = SELL_HOLD.get(str(b.ex))
                 if hold:                                    # C100 item 1: no layer sells (or nets with a buy of the other side) the held side
                     wants = [w for w in wants if not ((w["action"] == "buy" and w["side"] != hold) or (w["action"] == "sell" and w["side"] == hold))]
@@ -1481,6 +1495,7 @@ class Engine:
             tokens = {ex: t for ex, t in tokens.items() if t and len(t) == len(next(m["pm_ids"] for m in self.mp if m["ex"] == ex))}
             if tokens:
                 self.pm_feed = rt.PolyFeed(tokens, self.rt_event, log=lambda k, s: self.event(k, s))
+                self.pm_feed.on_quote = self.el_quote           # C102: every PM quote -> the call detector (feed thread, detection only)
                 self.pm_feed.start()
         except Exception as e:
             self.event("ERR", f"Polymarket realtime not started: {e!r}")
@@ -1617,6 +1632,7 @@ class Engine:
                     tm=self.tm_now.get(b.ex) or [], tm_exits=self.tm_view.get(b.ex, []), sm=self.sm_now.get(b.ex) or [],
                     rot=self.rot_now.get(b.ex) or [], rot_exits=self.rot_view.get(b.ex, []),
                     fmm=self.fmm_now.get(b.ex) or [], fmm_exits=self.fmm_view.get(b.ex, []), carry=self.carry_now.get(b.ex) or [],
+                    drift=self.drift_now.get(str(b.ex)) or [], drift_exits=self.drift_view.get(str(b.ex), []), callexit=self.callexit_now.get(str(b.ex)) or [],
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
                     room={sd: max(0.0, MARKET_MAX_POS - held[sd]) for sd in ("yes", "no")},
@@ -3793,6 +3809,8 @@ class Engine:
             try:
                 if self.fmm_mode(now) in ("paper", "live", "stopped"):
                     self.night.line(self.fmm_status(now, hourly=True))  # fmm_spec §4: the hourly FMM line (C100 item 4: + the last hour)
+                if self.election is not None and self.el_mode_cached != "off":
+                    self.night.line(self.el_hour_line())  # C102: the election detector / sniper, hourly
                 if GAPMM.get("on") and (self.gapmm_paper_on(time.time()) or self.gapmm_live() or self.gap_paper["fills"]):
                     self.night.line(self.gapmm_line(time.time()))
             except Exception as err:
@@ -8058,7 +8076,11 @@ class Engine:
                         bad += q
             except Exception:
                 continue
-            if bad >= MIN_QTY:
+            if bad >= MIN_QTY and f["layer"] == "callexit":
+                msg = f"RULE0-CALLED {self.name(f['ex'])} {held.upper()} {sub}: {bad:,.0f} of {f['qty']:,.0f} sold at {sale:.3f} after a strict call against it (Piero's §5.4 exemption)"
+                self.event("RULE0", msg)
+                self.night.line(msg)
+            elif bad >= MIN_QTY:
                 msg = f"RULE0 BROKEN {self.name(f['ex'])} {held.upper()} {sub}: {bad:,.0f} of {f['qty']:,.0f} sold at {sale:.3f} under their lot entry + 0.5c ({f['layer']})"
                 self.event("RULE0", msg)
                 self.night.line(msg)
@@ -8193,6 +8215,9 @@ class Engine:
         reconciles: a fast order that is neither resting nor filled sends its market to the slow path for 10 min."""
         if not FAST_PATH_ON or api.DRY_RUN or self.controls.paused or self.fills_blind:
             return 0
+        sent_el = 0
+        if self.election is not None and self.el_mode_cached != "off" and self.election.queue:
+            sent_el = self.election.run_queue(now, self.el_snap["cash"], self.el_snap["pos"])   # C102: a call's snipe, within the wake
         with self.rt_lock:
             events = list(self.rt_pending)
         sig_ev = [e for e in events if e[1] in ("fills", "orders")]
@@ -9016,12 +9041,14 @@ class Engine:
                     anc.pop("below", None)
             bidsell = (NIGHT_SELL.get("on") and NIGHT_SELL["since"] <= time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) < NIGHT_SELL["until"]
                        and self.fmm_mode(now) == "live" and self.fmm_free() < float(NIGHT_SELL["fmm_free_target"]) and self.night_sold() < float(NIGHT_SELL["cap"]))
+            E_ = self.election
+            need = self.el_recycle_need() if (E_ is not None and self.el_mode_cached == "live" and E_.strict_for(str(ex), side)) else 0.0   # C102 item 8
             cbs = (not bidsell and self.carry_bidsell_on(now) and str(ex) not in (CARRY_BIDSELL.get("exclude") or ())
                    and (self.carry_ev_held(ex, side) if self.carry_ev_held(ex, side) is not None else 1.0) <= CARRY_BIDSELL["ev_max"] + 1e-9)   # C100 item 4
             for sub, v in subs_iter:
                 if sub == "inventory" and fresh_inv:
                     continue
-                if v * q <= 0 or sub.startswith(("manual", "pairset:", "fmm:", "fmmlock:")) or (not allow_all and (sub.startswith(("sleeve:", "swing:")) or sub in res_subs)) or ((str(ex), sub) in self.core_set and str(ex) not in rot_left and str(ex) not in fund_left):
+                if v * q <= 0 or sub.startswith(("manual", "pairset:", "fmm:", "fmmlock:")) or (not allow_all and (sub.startswith(("sleeve:", "swing:")) or sub in res_subs)) or ((str(ex), sub) in self.core_set and str(ex) not in rot_left and str(ex) not in fund_left and need <= 0):
                     continue                                # never a core lot (unless Piero named the market for the rotation, C94), his manual / pair / sleeve lots, or the RI reservoir
                 key = f"{ex}|{sub}"
                 sig_avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
@@ -9043,7 +9070,9 @@ class Engine:
                 floor_ = bots.tick_up(round(float(avg) + RULE0_MARGIN, 6))
                 if sub == "inventory" and sig_avg:
                     floor_ = max(floor_, bots.tick_up(round(sig_avg + RULE0_MARGIN, 6)))   # C99e: 'inventory' has no lots of its own (its tranche key is shared): never under SIG's position average + 0.5c (Delaware 02:2x)
-                if sub.startswith("carry:"):
+                if need > 0 and bid is not None and bid >= max(float(ELECTION["recycle_bid"]), floor_) - 1e-9:
+                    px, reason = bid, "recycle at the bid"   # C102 item 8 (C7): wave recycling of a strict-called winner (core included)
+                elif sub.startswith("carry:"):
                     if str(ex) not in self.carry_sell and not cbs:
                         continue                            # C98: a carry lot is held to settlement unless the carry rule sells it
                     if str(ex) not in self.carry_sell:        # C100 item 4: EV/$ held <= 8% while FMM free < 15k: at the bid or not at all
@@ -9101,7 +9130,9 @@ class Engine:
                     take = min(take, int(rot_left[str(ex)]))
                 if reason.startswith("fund sale"):
                     take = min(take, int(fund_left[str(ex)]))
-                if reason.endswith("at the bid"):
+                if reason == "recycle at the bid":
+                    take = min(take, int(need / max(px, 0.01)) + 1)
+                elif reason.endswith("at the bid"):
                     left_ = (float(NIGHT_SELL["cap"]) - self.night_sold()) if bidsell else (float(CARRY_BIDSELL["day_cap"]) - self.carry_bid_sold_today(now))
                     take = min(take, int(max(0.0, left_) / max(px, 0.01)))
                 if take >= MIN_QTY:
@@ -9115,8 +9146,10 @@ class Engine:
                         rot_left[str(ex)] -= take           # C94: the market's target is shared by its sub-books
                     if reason.startswith("fund sale"):
                         fund_left[str(ex)] -= take          # C97: the market's fund target is shared by its sub-books
-                    if reason.endswith("at the bid") and not bidsell:
+                    if reason.endswith("at the bid") and not bidsell and reason != "recycle at the bid":
                         self.carry_bid_sent(now, ex, px)     # C100 item 4: the day's 7.5k counts these orders' fills
+                    if reason == "recycle at the bid":
+                        need -= take * px
             if not split:
                 if anc_wait and not any(str(o["ex"]) == str(ex) and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "release" for o in self.open):
                     self.sale_anchor.pop(str(ex), None)      # C100: no lot clears the kept price and nothing rests: the next post starts a new anchor
@@ -10566,6 +10599,306 @@ class Engine:
                 tot += f["qty"] * (1 - f["price"])
         self._cbs_key, self._cbs_sold = key, tot
         return tot
+
+    # ------------------------------------------------------------------ C102: election night (docs/night_reconcile.md §4 items 1-5, 9)
+    def el_mode(self, now=None):
+        """off / shadow / live: the `election_mode` control, else shadow from ELECTION['shadow_from'] (zero orders). Live only by control."""
+        m = (self.controls.d.get("election") or {}).get("mode")
+        if m in ("off", "shadow", "live"):
+            return m
+        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now or time.time()))
+        return "shadow" if ELECTION.get("on") and t >= ELECTION["shadow_from"] else "off"
+
+    def el_build(self):
+        """The Election from data/election/poll_close.json and the engine's races: the first and last poll close per race (PT)."""
+        rows = (json.load(open(os.path.join(DATA, "election", "poll_close.json"))).get("markets") or [])
+        day = ELECTION["election_day"]
+
+        def ep(hm):
+            hm = str(hm); plus = hm.endswith("+1")
+            return time.mktime(time.strptime(f"{day} {hm.replace('+1', '')}", "%Y-%m-%d %H:%M")) + (86400 if plus else 0)
+        meta, first, last = {}, {}, {}
+        for r in rows:
+            ex = str(r.get("ex"))
+            if ex not in self.owner or not r.get("first_close_pt") or not r.get("last_close_pt"):
+                continue
+            race = self.rot_race(ex)
+            meta[ex] = dict(race=race, party=r.get("party"), title=r.get("title"), state=r.get("state"))
+            f_, l_ = ep(r["first_close_pt"]), ep(r["last_close_pt"])
+            first[race] = min(first.get(race, f_), f_); last[race] = max(last.get(race, l_), l_)
+        self.election = el.Election(meta, last, time.time, self.el_place, self.el_cancel, self.el_book, self.el_log, manual=tuple(str(x) for x in self.manual_ex),
+                                    cash_floor=el.CASH_FLOOR, first_close=first, levels=self.el_levels, place_dry=self.el_place_dry,
+                                    precall_dry=bool(ELECTION.get("precall_dry")))
+        msg = (f"ELECTION armed ({self.el_mode()}): {len(meta)} books / {len(last)} races from poll_close.json; first close "
+               f"{time.strftime('%m-%d %H:%M', time.localtime(min(first.values())))} PT, last {time.strftime('%m-%d %H:%M', time.localtime(max(last.values())))} PT; "
+               f"call = PM side bid >= {el.CALL_HOLD} for {el.CALL_HOLD_S:.0f} s or >= {el.CALL_STRICT} once after the state's last close; sniper <= min({el.PRICE_CAP}, "
+               f"PM bid - {el.PRICE_UNDER_PM * 100:.0f}c), {el.RACE_SHARES:,} shares a race, {el.STATE_CAP:,.0f} a state, {el.TTL_S} s; no post-call bids") if meta else "ELECTION: no books mapped"
+        self.event("NIGHT", msg); self.night.line(msg)
+
+    def el_book(self, ex):
+        px = self.px.get(str(ex)) or self.px.get(ex)
+        return None if not px else (px[0], px[1], 0)
+
+    def el_levels(self, ex, side):
+        fb = self.feed_book(str(ex))
+        if fb is None:
+            return None
+        return list(fb[1]) if side == "yes" else [(round(1 - p, 3), q) for p, q in fb[0]]
+
+    def el_log(self, kind, text):
+        self.el_logq.append((kind, text))                    # the feed thread logs here; the loop writes (no file I/O off the loop)
+
+    def el_place_dry(self, items, layer, ttl, why):
+        self.el_shadowq.append(dict(t=stamp(), kind="order", why=why, layer=layer, ttl=ttl, items=[list(i) for i in items], mode="shadow"))
+        return "dry"
+
+    def el_place(self, items, layer, ttl):
+        """Shadow: the would-be order to shadow.jsonl. Live: through the executor (the fast_l0 pattern), never while new risk is paused."""
+        mode = self.el_mode_cached
+        if mode != "live":
+            self.el_shadowq.append(dict(t=stamp(), kind="order", why="call", layer=layer, ttl=ttl, items=[list(i) for i in items], mode=mode))
+            self.el_hour["would_orders"] += 1
+            return "shadow"
+        if self.controls.paused:
+            return None
+        out = [(self.owner[ex].name, f"{layer}:{ex}:{side}", layer, (ex, side, action, round(px, 3), int(q))) for ex, side, action, px, q in items if ex in self.owner]
+        key = self.ex.place(out, ttl_s=ttl) if out else None
+        if key:
+            self.ex.step_placements()
+            self.el_hour["orders"] += 1
+            for ex, side, action, px, q in items:
+                self.el_sent[str(ex)] = time.time()
+            self.el_shadowq.append(dict(t=stamp(), kind="sent", layer=layer, key=key, items=[list(i) for i in items], mode="live"))
+        return key
+
+    def el_cancel(self, o, reason=""):
+        if self.el_mode_cached != "live":
+            self.el_shadowq.append(dict(t=stamp(), kind="cancel", id=o.get("id"), ex=o.get("ex"), reason=reason, mode=self.el_mode_cached))
+            return True
+        oo = next((x for x in self.open if x["id"] == o.get("id")), None)
+        return bool(oo and self.ex.cancel(oo, reason=reason))
+
+    def el_quote(self, ex, b, a, now):
+        """PolyFeed thread: one PM quote -> the detector, on the loop's immutable snapshot; a call wakes the loop (the snipe goes from there)."""
+        E = self.election
+        if E is None or self.el_mode_cached == "off":
+            return
+        snap = self.el_snap
+        if E.on_pm(str(ex), (b + a) / 2, now, snap["cash"], snap["pos"], pm_bid=b, pm_ask=a, defer=True) == "queued":
+            self.rt_event("call", {str(ex)}, now)
+
+    def el_layer_of(self, o):
+        return (self.ledger.orders.get(o["id"]) or {}).get("layer") if self.ex.owned(o["id"]) else None
+
+    def el_step(self, now):
+        """Each loop: the snapshot the feed thread reads (replaced, never mutated), the poll-close pulls, the queued snipes, the settlement
+        morning, then the logs and files (calls.jsonl, shadow.jsonl, NIGHT lines)."""
+        mode = self.el_mode(now)
+        self.el_mode_cached = mode
+        if mode == "off":
+            return
+        if self.election is None:
+            if getattr(self, "el_build_failed", False):
+                return
+            try:
+                self.el_build()
+            except Exception as err:                        # no poll-close map: say so once, the rest of the engine runs on
+                self.el_build_failed = True
+                self.event("ERR", f"election: not armed: {err!r}")
+                return
+        E = self.election
+        cash = min(self.cash_raw_hist) if getattr(self, "cash_raw_hist", None) else 0.0
+        pos = {str(ex): float(b.get("pos") or 0) for ex, b in self.book.items()}
+        self.el_snap = dict(cash=cash, pos=pos)
+        oo = [dict(id=o["id"], ex=str(o["ex"]), side=o["side"], action=o["action"], price=o["price"], qty=o["qty"]) for o in self.open]
+        st = self.controls.d.get("election") or {}
+        if st.get("stop_req"):
+            n = E.kill(now, oo, pos, self.el_layer_of)
+            with self.controls.lock:
+                self.controls.d["election"].pop("stop_req", None)
+                self.controls.save()
+            self.controls.set_paused(True, f"election_stop (Piero): {n} orders pulled, exits kept")
+        if st.get("rearm_req"):
+            E.rearm((st["rearm_req"] or {}).get("race"))
+            with self.controls.lock:
+                self.controls.d["election"].pop("rearm_req", None)
+                self.controls.save()
+            self.el_log("REARM", f"election_rearm: {(st['rearm_req'] or {}).get('race') or 'every race and the kill switch'} (new risk stays as it is)")
+        E.on_tick(now, cash, pos, oo, self.el_layer_of)
+        try:
+            self.drift_plan(now)                            # C102 item 6: the night drift (shadow: as if every race had closed)
+            self.callexit_plan(now)                         # C102 item 4: RULE0-CALLED exits of lots a strict call says lose
+        except Exception as err:
+            self.event("ERR", f"drift plan: {err!r}")
+        if not self.controls.paused and E.queue:
+            E.run_queue(now, cash, pos)
+        day1 = time.mktime(time.strptime(ELECTION["election_day"], "%Y-%m-%d")) + 86400
+        E.settlement(now, cash, pos, {str(k): v for k, v in self.fair.items()}, day1 + 6 * 3600, day1 + 8.5 * 3600)
+        self.el_flush(mode)
+
+    def el_flush(self, mode):
+        E = self.election
+        d = os.path.join(DATA, "election")
+        os.makedirs(d, exist_ok=True)
+        tag = f"ELECTION ({mode})"
+        while self.el_logq:
+            kind, text = self.el_logq.popleft()
+            self.el_hour[kind] += 1
+            self.event("NIGHT", f"{kind} {text}")
+            if kind != "PRECALL":
+                self.night.line(f"{tag} {kind} {text}")
+        rows = []
+        with E.lock:
+            rows, E.records = E.records, []
+        if rows:
+            with open(os.path.join(d, "calls.jsonl"), "a") as fh:
+                for r in rows:
+                    fh.write(json.dumps(dict(r, ts=r.get("t"), t=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r.get("t") or 0)), mode=mode), default=str) + "\n")
+        if self.el_shadowq:
+            with open(os.path.join(d, "shadow.jsonl"), "a") as fh:
+                while self.el_shadowq:
+                    fh.write(json.dumps(self.el_shadowq.popleft(), default=str) + "\n")
+
+    def el_recycle_need(self):
+        """C7: the cash the next wave still needs — usable (cash - 5k - 2k) under ELECTION['recycle_target']."""
+        return max(0.0, float(ELECTION["recycle_target"]) - (self.el_snap["cash"] - el.CASH_FLOOR))
+
+    def el_fill_events(self, fills):
+        """night_reconcile §4 item 9: each fill of an election layer (call snipe, drift, call exit, settle) -> one NIGHT line and a row of
+        data/election/orders.jsonl: the PM signal, the call, the order sent and the fill, on one clock."""
+        E = self.election
+        rows = []
+        for f in fills:
+            if f.get("layer") not in ("callsnipe", "drift", "driftexit", "callexit", "settle"):
+                continue
+            k = self.fill_key(f)
+            if k in self.el_fill_seen:
+                continue
+            self.el_fill_seen.add(k)
+            ex = str(f["ex"]); c = (E.calls.get(ex) if E else None) or {}
+            try:
+                t_fill = time.mktime(time.strptime(str(f["t"]), "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                t_fill = time.time()
+            sig, call, sent = c.get("signal_t"), c.get("t"), self.el_sent.get(ex)
+            r = dict(t=f["t"], ex=ex, race=E.race(ex) if E else None, layer=f["layer"], side=f["side"], qty=f["qty"], price=f["price"],
+                     signal_t=sig, call_t=call, sent_t=sent, fill_t=t_fill, signal_to_sent=None if not (sig and sent) else round(sent - sig, 2),
+                     sent_to_fill=None if not sent else round(t_fill - sent, 2))
+            rows.append(r)
+            msg = (f"NIGHT {f['layer']} {self.name(ex)} {f['side'].upper()} {f['qty']:,.0f} at {f['price']:.3f}: signal -> sent "
+                   f"{'n/a' if r['signal_to_sent'] is None else str(r['signal_to_sent']) + ' s'}, sent -> fill {'n/a' if r['sent_to_fill'] is None else str(r['sent_to_fill']) + ' s'}")
+            self.event("NIGHT", msg); self.night.line(msg)
+        if rows:
+            d = os.path.join(DATA, "election"); os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "orders.jsonl"), "a") as fh:
+                for r in rows:
+                    fh.write(json.dumps(r, default=str) + "\n")
+        if len(self.el_fill_seen) > 5000:
+            self.el_fill_seen = set(list(self.el_fill_seen)[-2000:])
+
+    def callexit_plan(self, now):
+        """night_reconcile §4 item 4 (C17; Piero's alpha_spec §5.4 YES): after a strict call (the 0.98 rule, after the last close) against a
+        lot we hold, every engine sub-book of it (stuck coin flips included; Piero's manual book, pair sets and locks never) rests a sell at
+        the held side's best bid, rule 0 exempted (RULE0-CALLED). Shadow: logged once per book."""
+        self.callexit_now = {}
+        E, mode = self.election, self.el_mode_cached
+        if E is None or mode == "off":
+            return
+        for ex, b in self.book.items():
+            ex = str(ex); q = float(b.get("pos") or 0)
+            if abs(q) < MIN_QTY or ex in self.manual_ex:
+                continue
+            held = "yes" if q > 0 else "no"
+            if not E.strict_against(ex, held):
+                continue
+            bid = bots.side_book(*self.px.get(ex, (None, None, None))[:2], held)[0]
+            if bid is None:
+                continue
+            rows = [dict(side=held, px=round(bid, 3), sub=sub) for sub, v in (self.ledger.subbooks.get(ex) or {}).items()
+                    if v * q > 0 and abs(v) >= MIN_QTY and not str(sub).startswith(("manual", "pairset:", "fmmlock:"))]
+            if not rows:
+                continue
+            if mode == "live":
+                self.callexit_now[ex] = rows
+            if ex not in self.callexit_logged:
+                self.callexit_logged.add(ex)
+                self.el_log("CALLEXIT", f"{E.race(ex)}: {held.upper()} called against (strict): {len(rows)} lot(s) to sell at the best bid {bid:.3f}"
+                                        + ("" if mode == "live" else " (shadow: nothing sent)"))
+
+    def drift_lots(self):
+        """{sub: (ex, side, shares, lot avg)} of the night drift's lots (sub 'drift:<ex>:<side>')."""
+        out = {}
+        for ex, books in self.ledger.subbooks.items():
+            for sub, q in books.items():
+                if sub.startswith("drift:") and abs(q) >= MIN_QTY:
+                    side = "yes" if q > 0 else "no"
+                    lots = [l for l in self.lots(ex, side, sub) if l[0] > 0]
+                    tot = sum(l[0] for l in lots)
+                    avg = sum(l[0] * l[1] for l in lots) / tot if tot else float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
+                    out[sub] = (str(ex), side, abs(q), avg)
+        return out
+
+    def drift_plan(self, now):
+        """night_reconcile §4 item 6 (C15): the pre-call drift. From a race's first poll close until it is called, a side whose SIG ask sits
+        >= 3c under PM fair gets a take (walking the book to fair - 3c, 120 s); its lot rests an exit at max(fair - 1c, lot avg + 0.5c).
+        Caps: the rotation's race / total caps x 2 (rotation + drift lots at cost), the party cap unchanged (10k net). Shadow: every race
+        counts as closed and the would-be takes go to shadow.jsonl (one per book per 30 min); nothing is sent."""
+        self.drift_now, self.drift_view = {}, {}
+        E, mode = self.election, self.el_mode_cached
+        if E is None or mode == "off":
+            return
+        lots = self.drift_lots()
+        for sub, (ex, side, q, avg) in lots.items():
+            fs = self.side_fair(ex, side)
+            if fs is None or not avg:
+                continue
+            px = max(bots.tick_up(round(avg + RULE0_MARGIN, 6)), bots.tick_up(round(fs - float(ELECTION["drift_exit_gap"]), 6)))
+            self.drift_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg))
+        shadow = mode == "shadow"
+        if (shadow and not ELECTION.get("drift_shadow")) or (not shadow and (self.controls.paused or E.stopped)):
+            return
+        mult, gap = float(ELECTION["drift_cap_mult"]), float(ELECTION["drift_gap"])
+        rc = collections.Counter()
+        for _, (ex, side, q, avg) in list(self.rot_lots().items()) + list(lots.items()):
+            rc[self.rot_race(ex)] += q * avg
+        total = sum(rc.values())
+        party = dict(net=self.party_view()["net"]) if ROTATION.get("party_cap") else None
+        usable = self.el_snap["cash"] - el.CASH_FLOOR
+        for ex in list(E.meta):
+            ok = E.drift_ok(ex, now) if not shadow else (not E.stopped and E.called(ex) is None and E.race(ex) not in E.race_stop and ex not in E.manual)
+            if not ok or (shadow and now - self.drift_logged.get(ex, -1e18) < float(ELECTION["drift_every_s"])):
+                continue
+            race = self.rot_race(ex)
+            for side in ("yes", "no"):
+                bid, ask, fs = self.rot_touch(ex, side)
+                if ask is None or fs is None or ask > fs - gap + 1e-9:
+                    continue
+                lv = self.el_levels(ex, side) or [(ask, 0.0)]
+                take = [(p_, q_) for p_, q_ in lv if p_ <= fs - gap + 1e-9 and q_ > 0]
+                if not take:
+                    continue
+                limit, avail = max(p_ for p_, _ in take), sum(q_ for _, q_ in take)
+                room = min(self.rot_cap(race) * mult - rc[race], float(ROTATION.get("total_cap") or 30_000) * mult - total, usable)
+                qty = int(min(avail, float(ELECTION["drift_clip"]), max(0.0, room) / limit))
+                if qty < MIN_QTY or not self.carry_party_ok(ex, side, qty * limit, party):
+                    continue
+                if shadow:
+                    self.drift_logged[ex] = now
+                    self.el_hour["drift_would"] += 1
+                    self.el_shadowq.append(dict(t=stamp(), kind="order", why="drift", layer="drift", ttl=int(ELECTION["drift_ttl_s"]), mode="shadow",
+                                                items=[[ex, side, "buy", round(limit, 3), qty]], fair=round(fs, 4), ask=ask, gap=round(fs - ask, 4)))
+                else:
+                    self.drift_now.setdefault(ex, []).append(dict(side=side, px=round(limit, 3), qty=qty, sub=f"drift:{ex}:{side}", ttl=int(ELECTION["drift_ttl_s"])))
+                rc[race] += qty * limit; total += qty * limit; usable -= qty * limit
+                break
+
+    def el_hour_line(self):
+        h, E = self.el_hour, self.election
+        line = (f"ELECTION ({self.el_mode_cached}) last hour: PRECALL {h['PRECALL']}, calls {h['CALL']}, no-calls {h['NOCALL']}, reversals {h['REVERSAL']}, "
+                f"would-be orders {h['would_orders']} + drift {h['drift_would']}, orders sent {h['orders']}, pulls {h['POLLS']}; books armed {len((E.meta if E else {}))}, calls held "
+                f"{sum(1 for c in (E.calls.values() if E else []) if not c.get('reversed'))}, races stopped {len(E.race_stop) if E else 0}, kill {'ON' if E and E.stopped else 'off'}")
+        self.el_hour.clear()
+        return line
 
     AZ06_ORDERS = ("46303780", "46306401", "46313591", "46315471")
 
@@ -12272,6 +12605,27 @@ class EngineControls:
                 clean[k] = v
             c.set_caps(layer, clean, by="dashboard")
             return f"{layer} caps {clean}"
+        if action == "election_mode":                      # C102 (night item 5): off / shadow / live
+            m = str(args.get("mode") or "")
+            if m not in ("off", "shadow", "live"):
+                raise ValueError("mode: off | shadow | live")
+            with c.lock:
+                c.d.setdefault("election", {})["mode"] = m
+                c.save()
+            msg = f"ELECTION mode -> {m} by control (Piero)" + ("" if m != "live" else ": the call sniper sends orders from now")
+            self.eng.event("NIGHT", msg); self.eng.night.line(msg)
+            return msg
+        if action == "election_stop":                      # the kill switch: done by the loop (entries, call snipes, drift pulled; exits kept)
+            with c.lock:
+                c.d.setdefault("election", {})["stop_req"] = stamp()
+                c.save()
+            return "election_stop queued for the next loop: entries, call snipes and drift pulled, exits and foreign orders kept, new risk paused"
+        if action == "election_rearm":
+            race = str(args.get("race") or "") or None
+            with c.lock:
+                c.d.setdefault("election", {})["rearm_req"] = dict(t=stamp(), race=race)
+                c.save()
+            return f"election_rearm queued for the next loop: {race or 'every race and the kill switch'}"
         if action == "fmm_restart":                        # Piero 01:05 Oct 18 item 2: FMM back on after a stop (cap / K as given)
             st = c.d.setdefault("fmm", {})
             if st.get("decision") != "live":

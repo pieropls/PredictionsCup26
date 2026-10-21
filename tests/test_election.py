@@ -1,6 +1,7 @@
-"""n_election.Election unit rules (day 5 §5; nothing deployed): a call needs an unbroken run of Polymarket prints past
-0.97 for >= 1 s; the sniper never pays above 0.95, keeps free cash >= floor + 5k counting its unfilled orders, and stops a
-race after 3 failed writes; the reversal guard; poll-close pulls and the kill switch keep exits and foreign orders.
+"""n_election.Election v2 rules (docs/night_reconcile.md §3 C1-C21, Piero 01:05 Oct 18; C8: no post-call bids): a call is the PM side bid
+>= 0.95 held 20 s or >= 0.98 once, after the state's last poll close, with the PM spread <= 3c and the race's other books <= 0.04; the
+sniper pays <= min(0.97, PM bid - 2c) walking the book, min(15k shares a race, the wave share), <= 20k a state, 120-s orders, cash floor
+5k + 2k; a reversal stops the race and holds; pulls at the first close - 10 min keep exits and foreign orders; the kill switch.
 python3 -m unittest tests.test_election"""
 import os
 import sys
@@ -9,18 +10,20 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import n_election as el  # noqa: E402
 
-META = {"1": dict(race="Ohio Senate", party="R", title="R Ohio Senate"), "2": dict(race="Ohio Senate", party="D", title="D Ohio Senate"),
-        "3": dict(race="Utah Governor", party="R", title="R Utah Governor")}
-CLOSE = {"Ohio Senate": 10_000.0, "Utah Governor": 20_000.0}
+META = {"1": dict(race="Ohio Senate", party="R", title="R Ohio Senate", state="Ohio"), "2": dict(race="Ohio Senate", party="D", title="D Ohio Senate", state="Ohio"),
+        "3": dict(race="Utah Governor", party="R", title="R Utah Governor", state="Utah"), "4": dict(race="OH-09 House race", party="R", state="Ohio")}
+LAST = {"Ohio Senate": 10_000.0, "Utah Governor": 20_000.0, "OH-09 House race": 10_000.0}
+FIRST = {"Ohio Senate": 9_000.0, "Utah Governor": 19_000.0, "OH-09 House race": 9_000.0}
 
 
 class Rig:
-    def __init__(self, book=(0.80, 0.82, 5_000), fail=0):
-        self.placed, self.cancelled, self.logs, self.fail = [], [], [], fail
+    def __init__(self, levels=None, fail=0, book=(0.80, 0.82, 5_000)):
+        self.placed, self.cancelled, self.logs, self.dry, self.fail = [], [], [], [], fail
         self.t = [0.0]
         self.bk = book
-        self.E = el.Election(META, CLOSE, lambda: self.t[0], self.place, self.cancel, lambda ex: self.bk, lambda k, x: self.logs.append((k, x)),
-                             manual=())
+        self.lv = levels if levels is not None else {"yes": [(0.90, 2_000), (0.94, 3_000), (0.97, 50_000)], "no": [(0.95, 1_000)]}
+        self.E = el.Election(META, LAST, lambda: self.t[0], self.place, self.cancel, lambda ex: self.bk, lambda k, x: self.logs.append((k, x)),
+                             manual=(), first_close=FIRST, levels=lambda ex, side: self.lv.get(side), place_dry=self.place_dry)
 
     def place(self, items, layer, ttl):
         if self.fail > 0:
@@ -29,131 +32,148 @@ class Rig:
         self.placed.append((items, layer, ttl))
         return "k%d" % len(self.placed)
 
+    def place_dry(self, items, layer, ttl, why):
+        self.dry.append((items, layer, ttl, why))
+        return "dry"
+
     def cancel(self, o, reason=""):
         self.cancelled.append((o["id"], reason))
         return True
 
+    def pm(self, ex, bid, ask, t, cash=200_000, pos=None, defer=False):
+        self.t[0] = t
+        return self.E.on_pm(ex, (bid + ask) / 2, t, cash, pos or {}, pm_bid=bid, pm_ask=ask, defer=defer)
+
 
 class CallTests(unittest.TestCase):
-    def test_a_single_print_is_not_a_call_but_a_1s_run_is(self):
+    def test_rule_a_needs_the_bid_held_at_095_for_20_s(self):
         r = Rig()
-        r.t[0] = 100.0
-        self.assertIsNone(r.E.on_pm("1", 0.98, 100.0, 50_000, {}))
-        self.assertEqual(r.placed, [], "one print on a thin book: no order")
-        self.assertIsNone(r.E.on_pm("1", 0.985, 100.5, 50_000, {}), "0.5 s: not yet")
-        r.t[0] = 101.2
-        key = r.E.on_pm("1", 0.99, 101.2, 50_000, {})
-        self.assertIsNotNone(key)
-        items, layer, ttl = r.placed[0]
-        self.assertEqual((layer, ttl), ("callsnipe", el.SNIPER_TTL_S))
-        ex, side, action, price, qty = items[0]
-        self.assertEqual((ex, side, action, price), ("1", "yes", "buy", 0.82), "buys the called side at SIG's ask")
-        self.assertEqual(qty, int(min(5_000, 0.25 * 50_000 / 0.82)), "25% of free cash per race, <= the visible depth")
-        self.assertAlmostEqual(r.E.latency()["p50"], 1.2, places=3, msg="from the first print of the run to the order")
-
-    def test_a_dip_breaks_the_run(self):
-        r = Rig()
-        r.E.on_pm("1", 0.98, 100.0, 50_000, {})
-        r.E.on_pm("1", 0.90, 100.6, 50_000, {})
-        r.t[0] = 101.5
-        self.assertIsNone(r.E.on_pm("1", 0.98, 101.5, 50_000, {}))
+        self.assertIsNone(r.pm("1", 0.96, 0.97, 10_100.0))
+        self.assertIsNone(r.pm("1", 0.96, 0.97, 10_119.0), "19 s: not yet")
         self.assertEqual(r.placed, [])
+        self.assertIsNotNone(r.pm("1", 0.96, 0.97, 10_120.5))
+        self.assertEqual(r.E.called("1"), "yes"); self.assertFalse(r.E.calls["1"]["strict"])
+        self.assertEqual(r.placed[0][1:], ("callsnipe", 120), "a 120-s order (C5)")
 
-    def test_called_against_buys_the_complement_and_never_above_095(self):
-        r = Rig(book=(0.02, 0.03, 9_000))                   # YES 0.02/0.03 -> NO ask 0.98: too expensive
-        r.E.on_pm("2", 0.01, 100.0, 50_000, {})
-        r.t[0] = 101.5
-        r.E.on_pm("2", 0.005, 101.5, 50_000, {})
-        self.assertEqual(r.E.calls["2"]["side"], "no")
-        self.assertEqual(r.placed, [], "NO ask 0.98 > 0.95: nothing bought")
-        r.bk = (0.06, 0.08, 9_000)                          # NO ask 0.94
-        r.E.on_pm("2", 0.005, 103.0, 50_000, {})
-        self.assertEqual(r.placed[0][0][0][:4], ("2", "no", "buy", 0.94))
+    def test_a_dip_breaks_the_run_and_the_mid_is_not_the_bid(self):
+        r = Rig()
+        r.pm("1", 0.96, 0.97, 10_100.0)
+        r.pm("1", 0.94, 0.99, 10_110.0)                       # mid 0.965 but the bid dipped: the run restarts
+        self.assertIsNone(r.pm("1", 0.96, 0.97, 10_125.0))
+        self.assertIsNone(r.pm("1", 0.96, 0.97, 10_140.0), "15 s of the new run")
+        self.assertIsNotNone(r.pm("1", 0.96, 0.97, 10_146.0))
 
-    def test_floor_plus_5k_counts_unfilled_orders_and_the_race_budget_is_shared(self):
-        r = Rig(book=(0.50, 0.52, 100_000))
-        r.E.on_pm("1", 0.98, 100.0, 12_000, {})
-        r.t[0] = 101.5
-        r.E.on_pm("1", 0.99, 101.5, 12_000, {})
-        q1 = r.placed[0][0][0][4]
-        self.assertLessEqual(q1 * 0.52, 12_000 - 5_000 - 5_000 + 1e-6, "free cash stays >= floor + 5k")
-        r.E.on_pm("1", 0.99, 102.0, 12_000, {})           # the same free cash again (not yet filled): nothing more
+    def test_rule_b_strict_at_098_once(self):
+        r = Rig()
+        self.assertIsNotNone(r.pm("1", 0.98, 0.99, 10_100.0))
+        self.assertTrue(r.E.calls["1"]["strict"]); self.assertTrue(r.E.strict_against("1", "no")); self.assertFalse(r.E.strict_against("1", "yes"))
+
+    def test_before_the_last_close_it_is_a_precall_and_nothing_goes_out(self):
+        r = Rig()
+        r.E.precall_dry = True
+        self.assertIsNone(r.pm("1", 0.99, 0.995, 9_500.0))
+        self.assertEqual(r.placed, []); self.assertIsNone(r.E.called("1"))
+        self.assertTrue(any(k == "PRECALL" for k, _ in r.logs))
+        self.assertEqual(len(r.dry), 1, "shadow: the would-be snipe is logged, not sent")
+        r.pm("1", 0.99, 0.995, 9_600.0)
+        self.assertEqual(sum(1 for k, _ in r.logs if k == "PRECALL"), 1, "once per book per 30 min")
+
+    def test_guards_spread_and_the_other_book(self):
+        r2 = Rig()
+        self.assertIsNone(r2.pm("1", 0.98, 1.0 + 0.02, 10_100.0))
+        self.assertIsNone(r2.E.called("1"), "a 4c PM spread: no call")
+        r3 = Rig()
+        r3.pm("2", 0.10, 0.12, 10_050.0)                      # the D book still at 0.11
+        self.assertIsNone(r3.pm("1", 0.98, 0.99, 10_100.0))
+        self.assertIsNone(r3.E.called("1"), "the race's other book > 0.04: no win call")
+
+    def test_reversal_stops_the_race_and_holds(self):
+        r = Rig()
+        r.pm("1", 0.98, 0.99, 10_100.0)
+        n = len(r.placed)
+        self.assertEqual(r.pm("1", 0.85, 0.87, 10_300.0), "reversed")
+        self.assertEqual(len(r.placed), n, "no exit order: rule 0 holds (C16)")
+        self.assertIn("Ohio Senate", r.E.race_stop)
+        self.assertIsNone(r.pm("2", 0.98, 0.99, 10_400.0), "the race stays stopped")
+        r.E.rearm("Ohio Senate")
+        self.assertNotIn("Ohio Senate", r.E.race_stop)
+
+    def test_the_deferred_snipe_goes_out_from_the_loop(self):
+        r = Rig()
+        self.assertEqual(r.pm("1", 0.98, 0.99, 10_100.0, defer=True), "queued")
+        self.assertEqual(r.placed, [])
+        self.assertEqual(r.E.run_queue(10_101.0, 200_000, {}), 1)
         self.assertEqual(len(r.placed), 1)
-        r.E.on_pm("2", 0.01, 100.0, 50_000, {})           # the other market of the race shares the 25%
-        r.t[0] = 103.0
-        r.E.on_pm("2", 0.005, 103.0, 50_000, {})
-        spent = sum(c["cost"] for c in r.E.calls.values())
-        self.assertLessEqual(spent, 0.25 * 50_000 + 1e-6)
+
+
+class SniperTests(unittest.TestCase):
+    def test_price_cap_min_097_and_pm_bid_less_2c_walking_the_book(self):
+        r = Rig()
+        r.pm("1", 0.98, 0.99, 10_100.0)                       # cap = min(0.97, 0.98 - 0.02) = 0.96
+        items = r.placed[0][0][0]
+        self.assertEqual(items[:4], ("1", "yes", "buy", 0.94), "the 0.90 and 0.94 levels; 0.97 is over the cap")
+        self.assertEqual(items[4], 5_000)
+        r2 = Rig()
+        r2.pm("1", 0.995, 0.999, 10_100.0)                    # cap 0.97
+        self.assertEqual(r2.placed[0][0][0][3], 0.97)
+        self.assertLessEqual(r2.placed[0][0][0][4], el.RACE_SHARES, "<= 15k shares a race")
+
+    def test_cash_floor_7k_counts_unfilled_orders_and_the_state_cap(self):
+        r = Rig(levels={"yes": [(0.95, 100_000)]})
+        r.pm("1", 0.98, 0.99, 10_100.0, cash=9_000)           # usable 2k; wave share 2 x 2k / races of the wave
+        q = r.placed[0][0][0][4]
+        self.assertLessEqual(q * 0.95, 2_000 + 1)
+        r.pm("4", 0.98, 0.99, 10_110.0, cash=9_000)           # the first order is still unfilled: it counts against the 2k
+        self.assertLessEqual(r.placed[1][0][0][4] * 0.95, 2_000 - q * 0.95 + 1)
+        r2 = Rig(levels={"yes": [(0.95, 100_000)]})
+        r2.E.calls["9"] = dict(side="yes", t=0, bought=0, cost=19_800.0, fails=0, stopped=False, reversed=True, strict=False)
+        r2.E.meta = dict(META, **{"9": dict(race="OH-01 House race", state="Ohio")})
+        r2.pm("1", 0.98, 0.99, 10_100.0, cash=500_000)
+        self.assertLessEqual(r2.placed[0][0][0][4] * 0.95, 200 + 1, "20k at cost a state")
 
     def test_three_failed_writes_stop_the_race(self):
-        r = Rig(fail=3)
-        r.E.on_pm("1", 0.98, 100.0, 50_000, {})
-        for t in (101.5, 102.5, 103.5, 104.5):
-            r.t[0] = t
-            r.E.on_pm("1", 0.99, t, 50_000, {})
+        r = Rig(fail=5)
+        for i in range(4):
+            r.pm("1", 0.98, 0.99, 10_100.0 + i)
         self.assertTrue(r.E.calls["1"]["stopped"])
-        self.assertEqual(r.placed, [], "stopped before the writes came back")
-
-    def test_reversal_exits_at_market_within_3c_and_stops(self):
-        r = Rig(book=(0.80, 0.82, 5_000))
-        r.E.on_pm("1", 0.98, 100.0, 50_000, {})
-        r.t[0] = 101.5
-        r.E.on_pm("1", 0.99, 101.5, 50_000, {})
-        q = r.placed[0][0][0][4]
-        r.bk = (0.70, 0.72, 5_000)
-        r.t[0] = 400.0
-        self.assertEqual(r.E.on_pm("1", 0.85, 400.0, 50_000, {"1": q}), "reversed")
-        items, layer, _ = r.placed[-1]
-        self.assertEqual(layer, "callexit")
-        ex, side, action, price, qty = items[0]
-        self.assertEqual((side, action, qty), ("no", "buy", q))
-        self.assertAlmostEqual(1 - price, max(0.70, 0.82 - 0.03), places=3, msg="at the bid, never worse than 3c under entry")
-        self.assertIsNone(r.E.on_pm("1", 0.99, 500.0, 50_000, {"1": q}), "the race is stopped")
-        self.assertIsNone(r.E.called("1"))
+        self.assertIn("Ohio Senate", r.E.race_stop)
 
 
-class TickTests(unittest.TestCase):
-    def orders(self):
-        return [dict(id="a", ex="1", side="yes", action="buy", price=0.70, qty=100),      # dump entry
-                dict(id="b", ex="1", side="no", action="buy", price=0.30, qty=50),        # exit of a long YES
-                dict(id="c", ex="3", side="yes", action="buy", price=0.40, qty=100),      # other state
-                dict(id="d", ex="1", side="yes", action="buy", price=0.60, qty=100)]      # foreign (hand-placed)
-
-    def layer_of(self, o):
-        return {"a": "dump", "b": "dumpexit", "c": "fatfinger", "d": None}.get(o["id"])
-
-    def test_poll_close_pulls_entries_10_min_before_and_keeps_exits_and_foreign(self):
+class LoopTests(unittest.TestCase):
+    def test_pulls_at_the_first_close_less_10_min_keep_exits_and_foreign(self):
         r = Rig()
-        pos = {"1": 500}
-        r.E.on_tick(CLOSE["Ohio Senate"] - 700, 50_000, pos, self.orders(), self.layer_of)
-        self.assertEqual(r.cancelled, [], "11 min before: nothing yet")
-        r.E.on_tick(CLOSE["Ohio Senate"] - 590, 50_000, pos, self.orders(), self.layer_of)
-        self.assertEqual([c[0] for c in r.cancelled], ["a"], "the entry goes; the exit, the other state and the foreign order stay")
-        self.assertFalse(r.E.entries_allowed("1", CLOSE["Ohio Senate"] + 3_600))
-        self.assertTrue(r.E.entries_allowed("1", CLOSE["Ohio Senate"] + 3 * 3_600))
-        self.assertTrue(r.E.entries_allowed("3", CLOSE["Ohio Senate"] + 3_600), "Utah closes later")
+        orders = [dict(id="a", ex="1", side="yes", action="buy", price=0.5, qty=10), dict(id="b", ex="1", side="no", action="buy", price=0.4, qty=10),
+                  dict(id="c", ex="1", side="yes", action="buy", price=0.5, qty=10), dict(id="d", ex="3", side="yes", action="buy", price=0.5, qty=10)]
+        layer = {"a": "fmm", "b": "fmmexit", "c": None, "d": "carry"}
+        out = r.E.on_tick(8_500.0, 50_000, {"1": 100}, orders, lambda o: layer[o["id"]])
+        self.assertEqual(out["pulled"], 1); self.assertEqual(r.cancelled, [("a", "POLLS Ohio Senate")])
+        self.assertFalse(r.E.entries_allowed("1", 8_500.0)); self.assertTrue(r.E.entries_allowed("3", 8_500.0))
+        self.assertTrue(r.E.drift_ok("1", 9_100.0)); self.assertFalse(r.E.drift_ok("1", 8_900.0))
+
+    def test_no_post_call_bids(self):
+        r = Rig()
+        r.pm("1", 0.98, 0.99, 10_100.0)
+        n = len(r.placed)
+        r.E.on_tick(10_200.0, 200_000, {"1": 1000}, [], lambda o: None)
+        self.assertEqual(len(r.placed), n, "C8: no bids at 0.96-0.99 after a call")
 
     def test_kill_switch_pulls_entries_and_snipes_keeps_exits_and_foreign(self):
         r = Rig()
-        n = r.E.kill(5_000.0, self.orders(), {"1": 500}, self.layer_of)
-        self.assertEqual(n, 2)
-        self.assertEqual(sorted(c[0] for c in r.cancelled), ["a", "c"])
-        self.assertTrue(r.E.stopped)
-        self.assertIsNone(r.E.on_pm("3", 0.99, 5_001.0, 50_000, {}), "no new calls after the stop")
-        self.assertFalse(r.E.entries_allowed("3", 5_002.0))
+        orders = [dict(id="a", ex="1", side="yes", action="buy", price=0.95, qty=10), dict(id="b", ex="1", side="no", action="buy", price=0.4, qty=10),
+                  dict(id="c", ex="3", side="yes", action="buy", price=0.5, qty=10)]
+        layer = {"a": "callsnipe", "b": "fmmexit", "c": None}
+        self.assertEqual(r.E.kill(1.0, orders, {"1": 100}, lambda o: layer[o["id"]]), 1)
+        self.assertIsNone(r.pm("1", 0.99, 0.995, 10_100.0)); self.assertEqual(r.placed, [])
 
-    def test_post_call_bids_rest_only_under_the_touch(self):
-        r = Rig(book=(0.80, 0.82, 5_000))
-        r.E.on_pm("1", 0.98, 100.0, 50_000, {})
-        r.t[0] = 101.5
-        r.E.on_pm("1", 0.99, 101.5, 50_000, {})
-        r.placed.clear()
-        r.E.on_tick(200.0, 50_000, {}, [], lambda o: None)
-        self.assertEqual(r.placed, [], "SIG still at 0.80/0.82: a 0.96 bid would lift the asks")
-        r.bk = (0.965, 0.98, 5_000)
-        r.E.on_tick(300.0, 50_000, {}, [], lambda o: None)
-        prices = sorted(p for items, layer, _ in r.placed for (_, _, _, p, _) in items if layer == "postcall")
-        self.assertEqual(prices, [0.96, 0.97], "resting bids up to the touch + 1 tick only")
+    def test_settlement_needs_a_strict_call_and_098_held_2h_and_never_exits_at_market(self):
+        r = Rig(book=(0.975, 0.985, 4_000))
+        r.pm("1", 0.98, 0.99, 10_100.0)
+        n = len(r.placed)
+        self.assertEqual(r.E.settlement(30_000.0, 100_000, {}, {"1": 0.985}, 0, 1e9), 0)
+        self.assertEqual(r.E.settlement(30_000.0 + 7_201, 100_000, {}, {"1": 0.985}, 0, 1e9), 1)
+        self.assertEqual(r.placed[-1][1], "settle")
+        r.E.settlement(40_000.0, 100_000, {"1": 1000}, {"1": 0.95}, 0, 1e9)
+        self.assertEqual(len(r.placed), n + 1, "PM under 0.98: no exit order (rule 0)")
 
 
 if __name__ == "__main__":

@@ -216,7 +216,7 @@ class EngineCase(unittest.TestCase):
         f_engine.RING_WINDOWS = []                          # the rigs run on the real clock: no ring window unless a test sets one (RingWindowTests)
         self.addCleanup(setattr, f_engine, "STARTUP_HOLD_S", f_engine.STARTUP_HOLD_S)
         f_engine.STARTUP_HOLD_S = 0                         # the rigs read from their first loop (the 2-min start-up hold is a live-only guard)
-        for k, v in (("SELL_EV_MAX", 9.0), ("FMM_CF", dict(a_config.FMM_CF, on=False)), ("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
+        for k, v in (("ELECTION", dict(a_config.ELECTION, on=False)), ("SELL_EV_MAX", 9.0), ("FMM_CF", dict(a_config.FMM_CF, on=False)), ("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
                      ("CORE_CAP_COST", 0.0), ("TRADING_HOLD_C", 99.0), ("CORE_LOCK_RET", -99.0), ("TRADING_INV_CAP", 1e12), ("TRADING_CASH_TARGET", 0.0),
                      ("NOEDGE", dict(ret=-99.0, low_fair=0.0, low_edge_c=0.0)), ("REPEG_AWAY_S", 0.0), ("GTC_TTL_S", 0), ("SM_REPEG_TICKS", 2), ("TM_REPEG_TICKS", 2), ("ROTATION", dict(a_config.ROTATION, on=False, sells={}, buys=[])), ("MANUAL_RESERVE", 0.0), ("FMM", dict(a_config.FMM, on=False)), ("DASH_EVERY_S", 0), ("ALLOC", dict(a_config.ALLOC, on=False)), ("FUND", dict(a_config.FUND, on=False)), ("CARRY", dict(a_config.CARRY, on=False)), ("GAPMM", dict(a_config.GAPMM, on=False)), ("NIGHT_SELL", dict(a_config.NIGHT_SELL, on=False))):   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
             self.addCleanup(setattr, f_engine, k, getattr(f_engine, k, None))
@@ -6850,6 +6850,145 @@ class C101Tests(EngineCase):
         eng.sale_anchor.clear()
         plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
         self.assertFalse(a in plan and plan[a]["why"].endswith("at the bid"), "the bid 0.900 is 10% under fair: never a bid sale")
+
+
+
+class C102Tests(EngineCase):
+    """C102 (Piero 15:15 Oct 21 item A; night_reconcile §4 items 1-5, 9): n_election v2 wired — the PM quote hook feeds the detector on the
+    loop's snapshot, a call's snipe goes out from the loop; shadow writes would-be orders to data/election/shadow.jsonl and sends nothing;
+    live places through the executor; election_mode / election_stop / election_rearm."""
+
+    def rig(self, mode=None):
+        fake, eng, favs = C94Tests.rig(self)
+        a = favs[0]
+        C94Tests.c95_market(self, eng, fake, a, 0.95, (0.94, 0.95, 0.945), race="Ohio Senate", vol=100_000.0)
+        os.makedirs(os.path.join(TMP, "election"), exist_ok=True)
+        rows = [dict(ex=a, title="Will the Republican Party win the Ohio Senate?", state="Ohio", race="Senate", party="R", first_close_pt="16:30", last_close_pt="16:30")]
+        with open(os.path.join(TMP, "election", "poll_close.json"), "w") as fh:
+            json.dump(dict(markets=rows), fh)
+        f_engine.ELECTION = dict(a_config.ELECTION, on=True, shadow_from="2000-01-01 00:00:00")
+        if mode:
+            eng.controls.d["election"] = dict(mode=mode)
+        eng.cash_raw_hist = [60_000.0]
+        eng.feed_book = lambda ex: ([(0.93, 5_000.0)], [(0.95, 3_000.0), (0.96, 4_000.0), (0.99, 9_000.0)])
+        eng.el_step(time.time())
+        return fake, eng, a
+
+    def lines(self, name):
+        p = os.path.join(TMP, "election", name)
+        return [json.loads(x) for x in open(p)] if os.path.exists(p) else []
+
+    def test_shadow_precall_logs_and_a_call_writes_a_would_be_order_and_sends_nothing(self):
+        fake, eng, a = self.rig()
+        self.assertEqual(eng.el_mode_cached, "shadow"); self.assertIsNotNone(eng.election)
+        E = eng.election
+        race = E.race(a)
+        E.close[race] = E.first[race] = time.time() + 3600   # polls still open
+        eng.el_quote(a, 0.985, 0.99, time.time())
+        eng.el_step(time.time())
+        self.assertTrue([r for r in self.lines("calls.jsonl") if r["kind"] == "PRECALL"])
+        self.assertTrue([r for r in self.lines("shadow.jsonl") if r.get("why") == "precall"], "the would-be snipe of a PRECALL (shadow)")
+        E.close[race] = E.first[race] = time.time() - 60   # the polls have closed
+        fake.calls.clear()
+        eng.el_quote(a, 0.985, 0.99, time.time())
+        self.assertIn(a, E.queue, "the feed thread only queues the snipe")
+        eng.el_step(time.time())
+        o = [r for r in self.lines("shadow.jsonl") if r.get("why") == "call"]
+        self.assertTrue(o, "a call: the would-be order")
+        self.assertEqual(o[-1]["items"][0][:4], [a, "yes", "buy", 0.96], "<= min(0.97, PM bid 0.985 - 2c) = 0.965: the 0.95 and 0.96 levels")
+        self.assertFalse([c for c in fake.calls if c[0] in ("batch", "multileg", "place")], "shadow: nothing sent")
+        self.assertTrue([r for r in self.lines("calls.jsonl") if r["kind"] == "CALL"])
+
+    def test_live_places_the_snipe_through_the_executor_and_the_kill_switch_pulls_it(self):
+        fake, eng, a = self.rig(mode="live")
+        E = eng.election
+        E.close[E.race(a)] = E.first[E.race(a)] = time.time() - 60
+        eng.el_quote(a, 0.985, 0.99, time.time())
+        eng.el_step(time.time()); drain(eng)
+        snipes = [o for o in fake.open_orders() if (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "callsnipe"]
+        self.assertEqual(len(snipes), 1)
+        self.assertEqual(eng.ledger.orders[snipes[0]["id"]].get("ttl"), 120)
+        f = dict(key="z:el1", order=snipes[0]["id"], ex=a, side="yes", action="buy", qty=500.0, price=0.96, layer="callsnipe", t=time.strftime("%Y-%m-%d %H:%M:%S"))
+        eng.el_fill_events([f]); eng.el_fill_events([f])
+        rows = self.lines("orders.jsonl")
+        self.assertEqual(len(rows), 1, "one row per fill (item 9)")
+        self.assertIsNotNone(rows[0]["signal_to_sent"]); self.assertTrue(any(e["text"].startswith("NIGHT callsnipe") for e in eng.events))
+        eng.open = fake.open_orders()
+        eng.controls.d["election"]["stop_req"] = "x"
+        eng.el_step(time.time()); drain(eng)
+        self.assertTrue(eng.controls.paused, "election_stop pauses new risk")
+        self.assertTrue(E.stopped)
+        self.assertFalse([o for o in fake.open_orders() if (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "callsnipe"], "the snipe is pulled")
+
+    def test_night_drift_takes_3c_gaps_after_the_first_close_and_exits_at_fair_less_1c(self):
+        fake, eng, a = self.rig()
+        eng.px[a] = fake.px[a] = (0.88, 0.90, 0.89)              # the SIG ask 0.90 is 5c under fair 0.95
+        eng.feed_book = lambda ex: ([(0.88, 5_000.0)], [(0.90, 1_000.0), (0.92, 4_000.0), (0.93, 9_000.0)])
+        eng.drift_logged.clear()
+        eng.el_step(time.time())
+        d = [r for r in self.lines("shadow.jsonl") if r.get("why") == "drift"]
+        self.assertTrue(d, "shadow: as if the polls had closed")
+        self.assertEqual(d[-1]["items"][0][:4], [a, "yes", "buy", 0.92], "walks the book to fair - 3c (0.920)")
+        self.assertLessEqual(d[-1]["items"][0][4], a_config.ELECTION["drift_clip"])
+        eng.el_step(time.time())
+        self.assertEqual(len([r for r in self.lines("shadow.jsonl") if r.get("why") == "drift"]), len(d), "one per book per 30 min")
+        eng.controls.d["election"] = dict(mode="live")
+        E = eng.election
+        E.first[E.race(a)] = time.time() + 3600
+        eng.el_step(time.time())
+        self.assertNotIn(a, eng.drift_now, "live: not before the race's first close")
+        E.first[E.race(a)] = time.time() - 60
+        eng.el_step(time.time())
+        self.assertEqual(eng.drift_now[a][0]["px"], 0.92); self.assertEqual(eng.drift_now[a][0]["ttl"], 120)
+        eng.ledger.subbooks.setdefault(a, {})[f"drift:{a}:yes"] = 1000.0
+        eng.lots = lambda ex, side, sub: [(1000.0, 0.91, "engine")] if sub.startswith("drift:") else []
+        eng.el_step(time.time())
+        self.assertEqual(eng.drift_view[a][0]["px"], 0.94, "exit at max(fair - 1c = 0.94, lot avg + 0.5c = 0.915)")
+
+    def test_a_strict_call_against_our_lot_sells_it_at_the_bid_as_rule0_called_never_the_manual_book(self):
+        fake, eng, a = self.rig(mode="live")
+        E = eng.election
+        fake.pos[a] = -1500; eng.book[a] = dict(pos=-1500, row={})
+        eng.ledger.subbooks[a] = {f"sm:{a}": -1000.0, "manual": -500.0}
+        eng.px[a] = fake.px[a] = (0.97, 0.98, 0.975)          # NO's best bid 0.02
+        E.calls[a] = dict(side="yes", t=time.time(), signal_t=time.time(), rule="B", strict=True, bought=0.0, cost=0.0, fails=0, stopped=False, reversed=False)
+        eng.el_step(time.time())
+        self.assertEqual([r["sub"] for r in eng.callexit_now[a]], [f"sm:{a}"], "never Piero's manual book")
+        self.assertEqual(eng.callexit_now[a][0]["px"], 0.02)
+        E.calls[a]["strict"] = False                           # rule A only: no RULE0-CALLED (C1 / C17)
+        eng.el_step(time.time())
+        self.assertNotIn(a, eng.callexit_now)
+        f = dict(key="z:1", order="9001", ex=a, side="yes", action="buy", qty=1000.0, price=0.98, layer="callexit", t=time.strftime("%Y-%m-%d %H:%M:%S"))
+        eng.ledger.orders["9001"] = dict(id="9001", ex=a, layer="callexit", sub=f"sm:{a}", side="yes", action="buy", price=0.98, qty=1000)
+        eng.lots_before = lambda ex, side, sub, fill: [(1000.0, 0.40, "engine")]
+        eng.rule0_fill_check([f])
+        self.assertTrue(any(e["text"].startswith("RULE0-CALLED") for e in eng.events)); self.assertFalse(any(e["text"].startswith("RULE0 BROKEN") for e in eng.events))
+
+    def test_wave_recycling_sells_a_strict_winner_into_098_bids_only_for_the_cash_the_next_wave_needs(self):
+        fake, eng, a = self.rig(mode="live")
+        f_engine.SELL_EV_MAX = 0.05
+        C93Tests.lot(self, eng, fake, a, f"callsnipe:{a}:yes", 20_000, 0.95, (0.985, 0.99, 0.9875), 0.995)
+        loop(eng, fake); loop(eng, fake)
+        eng.ledger.subbooks[a] = {f"callsnipe:{a}:yes": 20_000.0}; eng.lots_cache = (None, {})
+        E = eng.election
+        E.calls[a] = dict(side="yes", t=time.time(), signal_t=time.time(), rule="B", strict=True, bought=0.0, cost=0.0, fails=0, stopped=False, reversed=False)
+        eng.el_mode_cached = "live"
+        eng.el_snap = dict(cash=a_config.CASH_RESERVE + 2_000 + 12_000.0, pos={})   # usable 12k: the next wave needs 8k more
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertEqual((plan[a]["why"], plan[a]["px"]), ("recycle at the bid", 0.985))
+        self.assertLessEqual(sum(plan[a]["subs"].values()) * 0.985, 8_000 + 1)
+        eng.el_snap = dict(cash=a_config.CASH_RESERVE + 2_000 + 25_000.0, pos={})   # enough cash: hold (recycling = 0 in the plan)
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertFalse(a in plan and plan[a]["why"] == "recycle at the bid")
+
+    def test_off_by_default_until_shadow_from_and_live_only_by_control(self):
+        fake, eng, a = self.rig()
+        f_engine.ELECTION = dict(a_config.ELECTION, on=True, shadow_from="2099-01-01 00:00:00")
+        eng.controls.d.pop("election", None)
+        self.assertEqual(eng.el_mode(), "off")
+        f_engine.ELECTION = dict(a_config.ELECTION, on=True, shadow_from="2000-01-01 00:00:00")
+        self.assertEqual(eng.el_mode(), "shadow", "never live without the control")
+        self.assertEqual(a_config.ELECTION["shadow_from"], "2026-10-22 06:00:00")
 
 
 if __name__ == "__main__":

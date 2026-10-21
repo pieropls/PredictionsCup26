@@ -323,6 +323,7 @@ class PolyFeed:
         """tokens: {ex: [yes token id, ...]} (a candidate-sum market lists several)."""
         self.tokens, self.on_event, self.clock, self.log = tokens, on_event, clock, log
         self.by_token = {t: ex for ex, ts in tokens.items() for t in ts}
+        self.on_quote = None                                # C102 (night item 1): per-quote hook -> the election call detector (feed thread)
         self.books, self.quotes, self.last_mid = {}, {}, {}
         self.last_msg_t, self.running, self.thread = None, False, None
         self.stats = dict(messages=0, moves=0, errors=0, reconnects=0)
@@ -341,6 +342,13 @@ class PolyFeed:
         a = sum(float(l[1] if l[1] is not None else (l[0] or 0)) for l in legs)
         now = self.clock()
         self.quotes[ex] = (b, a, now)
+        if self.on_quote is not None:
+            try:
+                self.on_quote(ex, b, a, now)
+            except Exception as e:                          # the detector never breaks the feed
+                self.stats["quote_hook_errors"] = self.stats.get("quote_hook_errors", 0) + 1
+                if self.stats["quote_hook_errors"] <= 3:
+                    self.log("ERR", f"PM quote hook: {e!r}")
         mid, old = (a + b) / 2, self.last_mid.get(ex)
         if old is None or abs(mid - old) >= 0.015 - 1e-12:
             self.last_mid[ex] = mid
