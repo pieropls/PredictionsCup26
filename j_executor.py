@@ -99,6 +99,7 @@ class Executor:
                  clock=time.time, sleep=time.sleep, log=print):
         self.api, self.ledger, self.journal = api, ledger, journal
         self.batch_size, self.stale_s, self.cancel_reserve, self.min_qty = batch_size, stale_s, cancel_reserve, min_qty
+        self.lane_reserve, self.lane_layers = 0, frozenset(("callsnipe", "callexit"))   # C104 (night item 7): writes kept for the call lane
         self.clock, self.sleep, self.log = clock, sleep, log
         self.lock, self.wake = threading.RLock(), threading.Condition(threading.RLock())
         self.queue, self.cancels, self.seq = [], [], itertools.count()
@@ -352,7 +353,9 @@ class Executor:
     def step_placements(self):
         """Send the next write if the budget allows (cancels go first). Returns how many orders were sent."""
         with self.wake:
-            if (not self.queue or self.halted or self.clock() < self.paused_until or self._tokens() <= self.cancel_reserve
+            head_lane = bool(self.queue) and any(it[2] in self.lane_layers for it in self.queue[0][2]["items"])
+            reserve = self.cancel_reserve + (0 if head_lane else self.lane_reserve)   # C104: the last `lane_reserve` writes are the call lane's
+            if (not self.queue or self.halted or self.clock() < self.paused_until or self._tokens() <= reserve
                     or self.cancels or self.cancels_on_wire):     # I6: a placement never goes while a cancel is pending
                 return 0
             parts = self._next_write()

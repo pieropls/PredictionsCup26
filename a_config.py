@@ -543,6 +543,14 @@ SELL_KEEP_LAYERS = ("release", "rotexit")   # item 3: every sell rule (fund, car
 ELECTION = dict(on=True, shadow_from="2026-10-22 06:00:00", election_day="2026-11-03", precall_dry=True, drift_shadow=True,
                 drift_gap=0.03, drift_exit_gap=0.01, drift_ttl_s=120, drift_cap_mult=2.0, drift_every_s=1800, drift_clip=2_000,
                 recycle_bid=0.98, recycle_target=20_000.0)   # item 8 (C7): a strict-called winner sells into bids >= max(0.98, lot avg + 0.5c) while usable < 20k
+# C103 (docs/cash_calendar.md §3 + Piero's §5 decisions of 15:55 Oct 17, moved by Piero 15:15 Oct 21 item C: the ramp starts Oct 28)
+ELECTION_RESERVE = dict(on=True, steps=(("2026-10-28 00:00:00", 20_000.0), ("2026-10-31 00:00:00", 30_000.0), ("2026-11-01 00:00:00", 40_000.0),
+                                        ("2026-11-02 00:00:00", 50_000.0), ("2026-11-03 00:00:00", 60_000.0)),
+                        until="2026-11-04 09:00:00")   # usable cash (cash - 5k floor - 2k reserve) no entry layer may spend; the election sniper / drift use it
+WIND_DOWN = dict(on=True, rot_buys_stop="2026-10-27 00:00:00", locks_stop="2026-10-29 00:00:00", fmm_caps=(("2026-10-29 00:00:00", 15_000.0), ("2026-10-31 00:00:00", 5_000.0)),
+                 fmm_no_bids="2026-11-01 12:00:00", carry_bids_stop="2026-10-30 00:00:00", rot_exit_touch="2026-10-30 00:00:00", conv_from="2026-10-30 00:00:00",
+                 checklist_at="2026-11-03 14:45", entries_stop="2026-11-02 17:00:00",
+                 entries_stop_layers=("dump", "fatfinger", "longshot", "wall", "scalp", "touch", "sleeve", "swing"))   # C13: these entries stop Nov 2 17:00 (TM / SM glide)
 # C101 (Piero 15:15 Oct 21)
 SELL_EV_MAX = 0.05            # item C: no fire sale — every sale rule (fund, carry, no-edge, core lock, rotation sales) sells only a lot with EV/$ held <= 5% at its
                               # sale price; never a leg of a lock / pairset (those subs are out of every seller); rotation exits keep their own rule

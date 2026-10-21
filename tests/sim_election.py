@@ -1,11 +1,16 @@
-"""Election-night simulator (day 5 §5) for n_election.Election on tests/fake_sig.FakeSIG with a scripted clock.
-The 117 races of the tournament universe, first poll-close times by state (ET, Nov 3 2026: typed from the states'
-published hours, UNVERIFIED until the Oct 25 rehearsal), calls arriving 0-6 h after the close as Polymarket jumps,
-SIG lagging the call (its ask walks up to 0.97 over 10-30 min), takers hitting our post-call bids.
+"""Election-night simulator.
 
-Scenarios: 1 normal night · 2 forty calls in 20 min · 3 SIG 5xx bursts and 429s · 4 Polymarket feed down 3 min ·
-5 a wrong early call that reverses. Measured: PM move -> order sent p50/p95, writes/min vs 30, the cash path, P&L vs a
-perfect-information bound, kill-switch time.   python3 -m tests.sim_election [report.md]"""
+Default (docs/night_sim.md, night_reconcile §4 item 10): the rehearsal: the 116 races of data/election/poll_close.json (pulls at the
+first close - 10 min, calls only after the last close), Polymarket quote streams replayed from the 2024 1-min tapes
+(tests/fixtures/night24_paths.json.gz, mapped by pre-close level), a SIG book that lags PM, takers, and n_election.Election wired as
+f_engine wires it, every order through the real j_executor.Executor on FakeSIG (batches <= 50, our 25 writes/min limiter, SIG's 30-s
+minimum expiry). Scenarios: normal, lane, slow count, reversal night, thin PM books, 40 calls in 20 min + 234 pulls, kill switch,
+SIG 5xx / 429 bursts, PM feed down 3 min, SIG-gap sensitivity, 100k start. Code: tests/night_world.py, night_rig.py, night_report.py.
+    python3 -m tests.sim_election [--md out.md] [--only name,name] [--seed N] [-v]
+
+--legacy: the day-5 simulator below (Oct 4: its own CLOSE_ET table, synthetic cliff calls, Election driven without the executor):
+1 normal night · 2 forty calls in 20 min · 3 SIG 5xx bursts and 429s · 4 Polymarket feed down 3 min · 5 a wrong early call that
+reverses.    python3 -m tests.sim_election --legacy [report.md]"""
 import json
 import os
 import random
@@ -273,7 +278,7 @@ def run(scenario="normal", seed=1, kill_at=None, verbose=False, race_share=None)
 SCENARIOS = [("normal", {}), ("stress", {}), ("faults", {}), ("feed_drop", {}), ("reversal", {}), ("stress", dict(kill_at=3 * HOUR + 40 * 60, race_share=0.05))]
 
 
-def main(path=None):
+def legacy_main(path=None):
     rows = []
     for name, kw in SCENARIOS:
         r = run(name, seed=7, **kw)
@@ -312,5 +317,14 @@ def main(path=None):
     return rows
 
 
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--legacy" in argv:
+        argv.remove("--legacy")
+        return legacy_main(argv[0] if argv else None)
+    import night_report
+    return night_report.main(argv)
+
+
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else None)
+    main()

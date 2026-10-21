@@ -96,7 +96,7 @@ class Rig:
         key = self.ex.place(out, ttl_s=ttl) if out else None
         if key:
             for ex, side, action, px, q in items:
-                self.placed.append((self.clock.time(), ex, side, layer, px, q))
+                self.placed.append((self.qtimes.get(ex, self.trigger), self.clock.time(), ex, side, layer, round(px, 3), int(q)))
             self.ex.step_placements()
         else:
             self.place_none += 1
@@ -123,8 +123,7 @@ class Rig:
         sign = (1 if side == "yes" else -1) * (1 if action == "buy" else -1)
         netted = min(q, max(0.0, -sign * before))
         self.cash += -q * p + netted
-        layer = (self.ledger.orders.get(oid) or {}).get("layer") if self.ledger else None
-        self.fills.append((self.clock.time(), oid, ex, side, action, q, p, layer, how))
+        self.fills.append((self.clock.time(), oid, ex, side, action, q, p, None, how))     # the layer is resolved after the run
 
     def xlog(self, s):
         s = s.strip()
@@ -142,6 +141,7 @@ class Rig:
         W = self.W
         self.clock = VClock(nw.T_START)
         self.cash, self.fills, self.placed, self.paused, self.place_none = self.cash0, [], [], False, 0
+        self.qtimes, self.trigger = {}, None
         self.xcount, self.open = {}, []
         self.ledger = None
         self.fake = NightSIG(W, self.clock, self.on_fill, self.wpm, seed=self.seed)
@@ -169,7 +169,7 @@ class Rig:
         for i, ex in enumerate(exs[:self.n_entry]):
             b, a = W.sig_touch(ex, nw.T_START)
             side = "yes" if W.legs[ex].fair >= 0.5 else "no"
-            px = round(max(0.01, (b if side == "yes" else 1 - a) - 0.02), 3)
+            px = round(max(0.01, (b if side == "yes" else 1 - a) - 0.25), 3)   # deep: they test the pulls' cancel load, not P&L
             q = self.rng.randint(500, 2000)
             res = FakeSIG._land(self.fake, (ex, side, "buy", px, q), None)
             self.ledger.placed(f"MKT {W.meta[ex]['race']}", (ex, side, "buy", px, q), True, res, layers[i % len(layers)],
@@ -201,6 +201,7 @@ class Rig:
         for oid, o in list(self.fake.book.items()):
             if o["action"] != "buy" or not self.ex.owned(str(oid)):
                 continue
+            night = (self.ledger.orders.get(str(oid)) or {}).get("layer") in getattr(el, "SNIPE_LAYERS", ("callsnipe", "settle"))
             ex, side, P = o["ex"], o["side"], o["price"]
             got = self.W.take(ex, side, P, o["qty"], now)
             for _, q in got:
@@ -210,7 +211,7 @@ class Rig:
                 continue
             b, a = self.W.sig_touch(ex, now)
             best = b if side == "yes" else round(1 - a, 3)
-            if P >= best - 1e-9 and self.rng.random() < self.taker_p:
+            if night and P >= best - 1e-9 and self.rng.random() < self.taker_p:
                 self.fake.fill(oid, self.rng.randint(100, 1000), price=P, how="taker_hit")
 
     def tick(self, now):
@@ -224,7 +225,9 @@ class Rig:
             self.kill = dict(t=now, n=n, w0=w0, done=None)
         self.E.on_tick(now, self.cash_snap, self.pos, oo, self.layer_of)
         if self.defer and self.E.queue and not self.paused:
+            self.qtimes = dict(self.E.queue)
             self.E.run_queue(now, self.cash_snap, self.pos)
+            self.qtimes = {}
         if nw.SETTLE_START <= now < nw.SETTLE_END and hasattr(self.E, "settlement"):
             pm_now = {ex: self.W.pm_mid(ex, now) for ex in self.W.legs}
             self.E.settlement(now, self.cash_snap, self.pos, pm_now, nw.SETTLE_START, nw.SETTLE_END)
@@ -274,7 +277,9 @@ class Rig:
                 elif kind == "wake":
                     wake_at = None
                     if self.E.queue and not self.paused:
+                        self.qtimes = dict(self.E.queue)
                         self.E.run_queue(now, self.cash_snap, self.pos)
+                        self.qtimes = {}
                 elif kind == "fault":
                     for f in data:
                         (self.fake.cancel_faults if str(f).startswith("cancel_") else self.fake.faults).append(f)
@@ -292,6 +297,7 @@ class Rig:
                 kw = dict(pm_bid=b, pm_ask=a) if self.pm_kw else {}
                 if self.defer:
                     kw["defer"] = True
+                self.trigger = t
                 r = self.E.on_pm(ex, (b + a) / 2, t, self.cash_snap, self.pos, **kw)
                 if r == "queued" and wake_at is None:
                     ph = (t - nw.T_START) % LOOP_S
@@ -305,6 +311,8 @@ class Rig:
                 beat_at = self.clock.time() + 1.0
                 push(beat_at, "beat")
         self.snapshot(self.clock.time())
+        self.fills = [(t, oid, ex, side, action, q, p, (self.ledger.orders.get(oid) or {}).get("layer"), how)
+                      for t, oid, ex, side, action, q, p, _, how in self.fills]
         self.wall = time.time() - t_wall
         shutil.rmtree(self.jdir, ignore_errors=True)
         return self

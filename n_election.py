@@ -39,6 +39,8 @@ REVERSAL_PM, REVERSAL_WINDOW_S = 0.90, 600
 SETTLE_PM, SETTLE_HOLD_S, SETTLE_MAX = 0.98, 2 * 3600, 0.99
 # ---- C21 the cash floor: 5k + Piero's 2k reserve
 CASH_FLOOR = 7_000
+PENDING_S = 60                          # an order with no answer from the executor after 60 s was dropped / never sent: its budget is released
+FEED_GAP_S = 30                         # no Polymarket quote on any book for 30 s = a feed gap: every 0.95 run restarts (sim: a 3-min gap)
 
 # v1 names kept for the old simulator scenarios
 CALL_FOR, CALL_AGAINST, CONFIRM_S, MAX_BUY, SNIPER_TTL_S = CALL_HOLD, 1 - CALL_HOLD, CALL_HOLD_S, PRICE_CAP, TTL_S
@@ -76,6 +78,10 @@ class Election:
         self.committed = []                                 # (t sent, cost) of sniper orders that may still fill (TTL)
         self.queue = collections.OrderedDict()              # books whose snipe waits for the loop (defer=True)
         self.precall_t = {}
+        self.run0 = {}                                      # (ex, side) -> start of the unbroken run of quotes past 0.95
+        self.pending = {}                                   # order key -> dict(ex, qty, cost, t): sent to the executor, not yet answered
+        self.settle_t = {}                                  # ex -> last settlement order t (one order per book per TTL)
+        self.last_quote_t = None
         self.post_bids = {}                                 # C8: none (kept for the old reports)
         waves = sorted(set(v for v in self.close.values() if v is not None))
         self.waves = waves
@@ -141,6 +147,10 @@ class Election:
             ask = pm_ask if pm_ask is not None else pm_yes
             if bid is None or ask is None:
                 return None
+            if self.last_quote_t is not None and now - self.last_quote_t > FEED_GAP_S:
+                self.run0.clear()                           # sim: after a feed gap the first quote back must not complete rule A
+                self._log("FEEDGAP", f"no Polymarket quote for {now - self.last_quote_t:.0f} s: every 0.95 run restarts", now)
+            self.last_quote_t = now
             h = self.pm.setdefault(ex, collections.deque(maxlen=400))
             h.append((now, float(bid), float(ask)))
             c = self.calls.get(ex)
@@ -158,16 +168,16 @@ class Election:
             for side in ("yes", "no"):
                 sb = bid if side == "yes" else 1 - ask
                 if sb < CALL_HOLD - 1e-9:
+                    self.run0.pop((ex, side), None)         # the run past 0.95 is broken
                     continue
+                run_t = self.run0.setdefault((ex, side), now)
                 strict = sb >= CALL_STRICT - 1e-9
-                run_t = None
-                for t, b_, a_ in reversed(h):
-                    if (b_ if side == "yes" else 1 - a_) < CALL_HOLD - 1e-9:
-                        break
-                    run_t = t
-                held = run_t is not None and now - run_t >= CALL_HOLD_S - 1e-9
+                held = now - run_t >= CALL_HOLD_S - 1e-9
                 if not (strict or held):
                     continue
+                last = self.close.get(self.race(ex))
+                if (last is None or now < last) and now - self.precall_t.get(ex, -1e18) < PRECALL_EVERY_S:
+                    continue                                # before the close and logged lately: nothing to do (the common case, O(1))
                 why = []
                 if spread > GUARD_SPREAD + 1e-9:
                     why.append(f"PM spread {spread * 100:.1f}c > 3c")
@@ -176,7 +186,6 @@ class Election:
                     hi = max([(b_ + a_) / 2 for _, b_, a_ in others], default=0.0)
                     if hi > GUARD_COMPLEMENT + 1e-9:
                         why.append(f"another book of the race at {hi:.3f} > 0.04")
-                last = self.close.get(self.race(ex))
                 if last is None or now < last:
                     if now - self.precall_t.get(ex, -1e18) >= PRECALL_EVERY_S:
                         self.precall_t[ex] = now
@@ -229,21 +238,23 @@ class Election:
         if last is None or not self.waves:
             return 1
         i = self.waves.index(last) if last in self.waves else 0
-        times = set(self.waves[i:i + 2])
+        times = set(self.waves[i:])                          # sim: "the next wave" after 17:00 was the 2-race 17:30 one; count every later wave
         races = {r for r, t in self.close.items() if t in times}
         called = {self.race(e) for e, c in self.calls.items() if not c.get("reversed")}
-        return max(1, len(races - called) + (1 if self.race(ex) in races else 0))
+        return max(1, len((races - called) | {self.race(ex)}))
 
     def _snipe(self, ex, c, now, free_cash, pos, dry=False):
         """Buy the called side at <= min(0.97, PM side bid - 2c), walking the SIG book, sized min(15k shares a race, the wave share), <= 20k
-        at cost a state, usable cash = free - floor (7k) - the unfilled orders; 120-s orders; stop after 3 failed writes."""
+        at cost a state, usable cash = free - floor (7k) - the unanswered / unfilled orders; 120-s orders; stop after 3 failed writes."""
         if c["stopped"] or c.get("reversed") or self.race(ex) in self.race_stop:
             return None
-        side = c["side"]
-        sb = self._side_bid(ex, side)
+        sb = self._side_bid(ex, c["side"])
         if sb is None:
             return None
-        cap = round(min(PRICE_CAP, sb - PRICE_UNDER_PM), 3)
+        return self._buy(ex, c, round(min(PRICE_CAP, sb - PRICE_UNDER_PM), 3), now, free_cash, pos, "callsnipe", dry=dry, sb=sb, wave=True)
+
+    def _buy(self, ex, c, cap, now, free_cash, pos, layer, dry=False, sb=None, wave=True):
+        side = c["side"]
         lv = self.levels(ex, side) if self.levels else None
         if not lv:
             bk = self.book(ex)
@@ -261,17 +272,17 @@ class Election:
         sh_race = sum(v["bought"] for e, v in self.calls.items() if self.race(e) == race)
         cost_race = sum(v["cost"] for e, v in self.calls.items() if self.race(e) == race)
         cost_state = sum(v["cost"] for e, v in self.calls.items() if self.state(e) == st)
-        self.committed = [(t, x) for t, x in self.committed if now - t <= TTL_S]
-        usable = free_cash - self.floor - sum(x for _, x in self.committed)
-        wave = WAVE_MULT * max(0.0, usable) / self._wave_races(ex)
-        cash = min(wave - cost_race, STATE_CAP - cost_state, usable)
+        self.expire(now)
+        usable = free_cash - self.floor - sum(e[1] for e in self.committed)
+        share = WAVE_MULT * max(0.0, usable) / self._wave_races(ex) if wave else usable
+        cash = min(share - cost_race, STATE_CAP - cost_state, usable)
         qty = int(min(avail, RACE_SHARES - sh_race, max(0.0, cash) / limit))
         if qty < MIN_QTY:
             return None
         items = [(ex, side, "buy", round(limit, 3), qty)]
         if dry:
-            return self.place_dry(items, "callsnipe", TTL_S, "precall") if self.place_dry else None
-        key = self.place(items, "callsnipe", TTL_S)
+            return self.place_dry(items, layer, TTL_S, "precall") if self.place_dry else None
+        key = self.place(items, layer, TTL_S)
         if key is None:
             c["fails"] += 1
             if c["fails"] >= WRITES_FAIL_STOP:
@@ -279,14 +290,61 @@ class Election:
                 self.race_stop.add(race)
                 self._log("CALL", f"{race}: {WRITES_FAIL_STOP} failed writes: the sniper stops on this race (re-arm by control)", now)
             return None
-        self.sent.append((c.get("signal_t", now), self.clock()))
-        self.committed.append((now, qty * limit))
+        if layer == "callsnipe":
+            self.sent.append((c.get("signal_t", now), self.clock()))
+        self.committed.append([now, qty * limit, key, ex])
+        self.pending[key] = dict(ex=ex, qty=qty, cost=qty * limit, t=now)
         c["bought"] += qty
         c["cost"] += qty * limit
         held_other = (pos.get(ex, 0) < 0) if side == "yes" else (pos.get(ex, 0) > 0)
-        self._log("SNIPE", f"{race}: buy {side.upper()} {qty:,} at <= {limit:.3f} (PM bid {sb:.3f}; {avail:,.0f} on the book under the cap)"
-                           + ("; we held the losing side: the buy nets it out first" if held_other else ""), now)
+        self._log("SNIPE" if layer == "callsnipe" else "SETTLE", f"{race}: buy {side.upper()} {qty:,} at <= {limit:.3f}" + (f" (PM bid {sb:.3f}" if sb is not None else " (")
+                  + f"; {avail:,.0f} on the book under the cap)" + ("; we held the losing side: the buy nets it out first" if held_other else ""), now)
         return key
+
+    # ---------------------------------------------------------------------------------------- what the executor did with an order
+    def _release(self, key, frac=1.0):
+        p = self.pending.get(key)
+        if not p:
+            return
+        c = self.calls.get(p["ex"])
+        if c:
+            c["bought"] = max(0.0, c["bought"] - p["qty"] * frac)
+            c["cost"] = max(0.0, c["cost"] - p["cost"] * frac)
+        for e in self.committed:
+            if e[2] == key:
+                e[1] *= (1 - frac)
+        self.committed = [e for e in self.committed if e[1] > 1e-6]
+
+    def confirm(self, key, part):
+        """The executor's on_done: [(bot, order, ok, data)] per order of the write. A rejected order releases its budget; an accepted one
+        keeps it (until it fills or its 120 s run out)."""
+        with self.lock:
+            p = self.pending.get(key)
+            if not p or not part:
+                return
+            bad = sum(1 for _, _, ok, data in part if not ok or (data or {}).get("orderId") is None)
+            if bad:
+                self._release(key, bad / len(part))
+            self.pending.pop(key, None)
+
+    def expire(self, now):
+        """Orders the executor never answered in 60 s (dropped as stale, 429-bounced, never sent): their budget comes back."""
+        for key in [k for k, p in self.pending.items() if now - p["t"] > PENDING_S]:
+            p = self.pending.pop(key)
+            self.pending[key] = p
+            self._release(key)
+            self.pending.pop(key, None)
+            self._log("EXPIRE", f"{self.race(p['ex'])}: an order of {p['qty']:,} had no answer from the executor in {PENDING_S} s (dropped / not sent): its budget is released", now)
+        self.committed = [e for e in self.committed if now - e[0] <= TTL_S]
+
+    def on_fill(self, ex, qty, price):
+        """A fill of our order on ex: the cash it takes is in the next cash read; the 120-s hold on that cash goes (no double count)."""
+        with self.lock:
+            left = qty * price
+            for e in self.committed:
+                if e[3] == ex and left > 0:
+                    take = min(e[1], left); e[1] -= take; left -= take
+            self.committed = [e for e in self.committed if e[1] > 1e-6]
 
     def _reverse(self, ex, c, now):
         """C16: the side bid back under 0.90 within 10 min of a call -> the race stops and holds (rule 0); `rearm` lifts it."""
@@ -320,6 +378,7 @@ class Election:
         with self.lock:
             self.cash_path.append((now, free_cash))
             self.cash_path = self.cash_path[-5000:]
+            self.expire(now)
             out = dict(pulled=0, post_bids=0, settle=0)
             if self.stopped:
                 return out
@@ -354,20 +413,11 @@ class Election:
                 else:
                     self.settle_hold.pop(ex, None)
                     continue
-                if now - self.settle_hold[ex] < SETTLE_HOLD_S:
-                    continue
-                bk = self.book(ex)
-                if not bk:
-                    continue
-                bid_y, ask_y, depth = bk[:3]
-                ask = ask_y if side == "yes" else (1 - bid_y if bid_y is not None else None)
-                budget = free_cash - self.floor
-                if ask is None or ask >= SETTLE_MAX or budget <= 0:
-                    continue
-                q = int(min(depth or 0, budget / ask))
-                if q >= MIN_QTY and self.place([(ex, side, "buy", round(ask, 3), q)], "settle", TTL_S) is not None:
+                if now - self.settle_hold[ex] < SETTLE_HOLD_S or now - self.settle_t.get(ex, -1e18) < TTL_S:
+                    continue                                # sim: one order per book per 120 s (it re-placed every loop)
+                if self._buy(ex, c, round(SETTLE_MAX - 0.005, 3), now, free_cash, pos, "settle", wave=False):
+                    self.settle_t[ex] = now                 # walks the book below 0.99; the race / state caps and the cash floor hold
                     n += 1
-                    free_cash -= q * ask
             return n
 
     # ---------------------------------------------------------------------------------------- the kill switch

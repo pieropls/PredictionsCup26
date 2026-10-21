@@ -8,7 +8,8 @@ control), choosing at random among the 3 nearest. The template's favourite path 
 other book; the 2026 level is matched by a logit shift that holds before the close and fades with a 60-min time constant after it. Time
 is measured from each race's LAST poll close (2024 state -> 2026 state), so a race closing at 17:00 PT replays its template's evening
 from that moment. The 2026 race is won by the favourite iff the template's favourite won. Templates whose 2024 book was one-sided at the
-close (a mid far from the pre-close level, or > 60 emptied-book minutes in the first 18 h) are left out unless thin=True."""
+close (> 60 emptied-book minutes in the first 18 h, a safe favourite shown under 0.90 at its close, or two legs more than 15c from
+summing to 1) are left out unless thin=True."""
 import calendar
 import gzip
 import json
@@ -70,7 +71,9 @@ class Template:
         self.pre_oth = pre_o[len(pre_o) // 2]
         self.p_fav = max(self.p_pre_winner, 1 - self.p_pre_winner)
         art = sum(self.fav_art[self.i0:self.i0 + 18 * 60]) + sum(self.oth_art[self.i0:self.i0 + 18 * 60])
-        self.thin = art > 60 or abs(self.fav[self.i0] - self.p_fav) > 0.15
+        f0, o0 = self.fav[self.i0], self.oth[self.i0]
+        # a one-sided 2024 book: emptied-book minutes, a safe favourite shown far under 0.90 at its close, or legs that don't sum to ~1
+        self.thin = art > 60 or (self.p_fav >= 0.95 and f0 < 0.90) or abs(f0 + o0 - 1) > 0.15
         self.group = "House" if self.kind == "House" else "Top"
 
     def at(self, tau, leg):
@@ -104,8 +107,9 @@ class World:
     """One scripted night. Knobs: seed; thin (allow one-sided-book templates); stretch (contested races' post-close clock x k, k drawn
     in the given range); gap (share of today's SIG - PM gap that survives to Nov 3); overlays (reversal / stress40 lists)."""
 
-    def __init__(self, seed=7, thin=False, stretch=None, gap=0.5, reversals=0, strict_reversals=0, stress40=False):
+    def __init__(self, seed=7, thin=False, stretch=None, gap=0.5, reversals=0, strict_reversals=0, stress40=False, stress_t0=None):
         self.seed, self.rng = seed, random.Random(seed)
+        self.stress_t0 = stress_t0 or pt(DAY, "18:05")
         lv, pc = load_2026()
         self.snapshot = lv.get("snapshot")
         books = lv["books"]
@@ -131,7 +135,7 @@ class World:
         self.state_of = {r: self.meta[races[r][0]]["state"] for r in races}
         self.minutes = int((T_END - T_START) // MIN) + 2
         self.legs, self.winner, self.template, self.kind, self.stretch = {}, {}, {}, {}, {}
-        self.p26 = {}
+        self.p26, self.delay = {}, {}
         for r in self.races:
             exs = races[r]
             fair = {}
@@ -165,6 +169,7 @@ class World:
                 L.spread = 0.01 if tpl.vol >= 250_000 else (0.015 if tpl.vol >= 60_000 else 0.02)
                 self.legs[ex] = L
             self.winner[r] = F if tpl.fav_won else O
+            self.delay[r] = 0.0 if self.uses[tpl.key] == 1 else self.rng.uniform(0, 30) * 60
             self.build_paths(r, order, tpl, k)
         self.overlays = []
         if reversals or strict_reversals:
@@ -177,14 +182,19 @@ class World:
 
     # ------------------------------------------------------------------------------------------- mapping
     def pick(self, race, p, kind, thin):
+        """Nearest pre-close favourite level (logit), +0.4 for a type mismatch, +0.25 per earlier use of the template (spreads the 116
+        races over the 68 templates); one of the 3 best at random."""
         pool = [t for t in self.templates if thin or not t.thin]
         want = "House" if kind == "House" else "Top"
+        uses = self.uses = getattr(self, "uses", {})
 
         def score(t):
-            return abs(logit(p) - logit(t.p_fav)) + (0.4 if t.group != want else 0.0)
+            return abs(logit(p) - logit(t.p_fav)) + (0.4 if t.group != want else 0.0) + 0.25 * uses.get(t.key, 0)
         best = sorted(pool, key=score)[:3]
         rr = random.Random(f"{self.seed}:{race}")
-        return rr.choice(best)
+        t = rr.choice(best)
+        uses[t.key] = uses.get(t.key, 0) + 1
+        return t
 
     def build_paths(self, r, order, tpl, k):
         L26 = self.last[r]
@@ -198,7 +208,7 @@ class World:
             for m in range(self.minutes):
                 t = T_START + m * MIN
                 tau = t - L26
-                tau24 = tau if tau <= 0 else tau / k
+                tau24 = tau if tau <= 0 else max(0.0, tau / k - self.delay[r])   # a re-used template starts 0-30 min later
                 if i < 2:
                     v, a = tpl.at(tau24, leg)
                     w = 1.0 if tau <= 0 else math.exp(-tau / 3600)
@@ -259,7 +269,7 @@ class World:
                                       fast=fast))
 
     def add_stress40(self):
-        """40 calls in 20 min from 19:00 PT: 40 races (contested first, then safe; last close <= 18:00 PT) are held under 0.90 until their
+        """40 calls in 20 min from 18:05 PT: 40 races (contested first, then safe; last close <= 18:00 PT) are held under 0.90 until their
         slot, then the winner jumps to 0.975 within a minute (the old sim's cliff-call, on the 2026 universe)."""
         lim = pt(DAY, "18:00")
         cont = [r for r in self._contested(max_last=lim)]
@@ -267,16 +277,19 @@ class World:
         self.rng.shuffle(cont)
         self.rng.shuffle(safe)
         pick = (cont + safe)[:40]
-        t0 = pt(DAY, "19:00")
+        t0 = self.stress_t0
         for i, r in enumerate(pick):
             slot = t0 + i * 30
             ms = int((slot - T_START) // MIN)
             W = self.winner[r]
             for ex in self.by_race[r]:
                 L = self.legs[ex]
-                for m in range(int((self.last[r] - T_START) // MIN) - 30, self.minutes):
-                    if m < ms:
-                        L.lvl[m] = min(L.lvl[m], 0.88) if ex == W else max(L.lvl[m], 0.10 if L.role != "x" else L.lvl[m])
+                for m in range(int((self.last[r] - T_START) // MIN), self.minutes):     # from the last close (the pulls are done)
+                    if L.role == "x":
+                        L.lvl[m] = min(L.lvl[m], 0.01)
+                    elif m < ms:                           # the winner held at 0.80-0.88 until its slot (a 10-17c cliff, like 2024's jumps)
+                        w = min(0.88, max(0.80, self.legs[W].lvl[m]))
+                        L.lvl[m] = w if ex == W else round(1 - w - 0.005, 4)
                     else:
                         L.lvl[m] = 0.975 if ex == W else 0.012
                     L.art[m] = 0

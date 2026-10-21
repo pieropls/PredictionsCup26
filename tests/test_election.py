@@ -176,5 +176,55 @@ class LoopTests(unittest.TestCase):
         self.assertEqual(len(r.placed), n + 1, "PM under 0.98: no exit order (rule 0)")
 
 
+
+class SimFixTests(unittest.TestCase):
+    """The rehearsal sim's findings (docs/night_sim.md, Oct 21): settlement sized by the book and once per 120 s; budgets come back for orders
+    the executor dropped or SIG rejected; a fill releases its cash hold; the wave share counts every later wave; a feed gap restarts the runs."""
+
+    def test_a_dropped_or_rejected_order_gives_its_budget_back_and_a_fill_its_cash_hold(self):
+        r = Rig(levels={"yes": [(0.95, 100_000)]})
+        k = r.pm("1", 0.98, 0.99, 10_100.0, cash=50_000)
+        c = r.E.calls["1"]; q = c["bought"]
+        self.assertGreater(q, 0); self.assertIn(k, r.E.pending)
+        r.E.expire(10_100.0 + el.PENDING_S + 1)
+        self.assertEqual(c["bought"], 0.0, "never answered in 60 s: released"); self.assertEqual(r.E.committed, [])
+        r2 = Rig(levels={"yes": [(0.95, 100_000)]})
+        k2 = r2.pm("1", 0.98, 0.99, 10_100.0, cash=50_000)
+        r2.E.confirm(k2, [("bot", ("1", "yes", "buy", 0.95, 100), False, {"error": "x"})])
+        self.assertEqual(r2.E.calls["1"]["cost"], 0.0, "SIG rejected it: released")
+        r3 = Rig(levels={"yes": [(0.95, 100_000)]})
+        k3 = r3.pm("1", 0.98, 0.99, 10_100.0, cash=50_000)
+        r3.E.confirm(k3, [("bot", ("1", "yes", "buy", 0.95, 100), True, {"orderId": 7})])
+        held = sum(e[1] for e in r3.E.committed)
+        r3.E.on_fill("1", 1000, 0.95)
+        self.assertAlmostEqual(sum(e[1] for e in r3.E.committed), held - 950.0, places=3, msg="the fill's cash is in the next cash read")
+        self.assertGreater(r3.E.calls["1"]["bought"], 0, "an accepted order keeps its budget")
+
+    def test_settlement_walks_the_book_once_per_120_s_inside_the_caps(self):
+        r = Rig(levels={"yes": [(0.97, 3_000), (0.98, 30_000), (0.995, 50_000)]})
+        r.pm("1", 0.98, 0.99, 10_100.0, cash=500_000)
+        c = r.E.calls["1"]; c["bought"], c["cost"] = 0.0, 0.0; r.E.committed.clear(); r.E.pending.clear()
+        r.E.settlement(30_000.0, 500_000, {}, {"1": 0.99}, 0, 1e9)
+        self.assertEqual(r.E.settlement(30_000.0 + 7_201, 500_000, {}, {"1": 0.99}, 0, 1e9), 1)
+        it = r.placed[-1][0][0]
+        self.assertEqual(it[3], 0.98, "under 0.99: the 0.97 and 0.98 levels"); self.assertLessEqual(it[4], el.RACE_SHARES)
+        self.assertEqual(r.E.settlement(30_000.0 + 7_260, 500_000, {}, {"1": 0.99}, 0, 1e9), 0, "one order per book per 120 s")
+
+    def test_the_wave_share_counts_every_later_wave(self):
+        meta = dict(META, **{str(10 + i): dict(race=f"Late {i}", state=f"S{i}") for i in range(20)})
+        last = dict(LAST, **{f"Late {i}": 30_000.0 for i in range(20)})
+        E = el.Election(meta, last, lambda: 0, lambda *a: "k", lambda *a, **k: True, lambda ex: None, lambda *a: None, first_close=dict(FIRST, **{f"Late {i}": 29_000.0 for i in range(20)}))
+        self.assertEqual(E._wave_races("1"), 23, "this wave (2), the next (1) and the 20 later races")
+
+    def test_a_feed_gap_restarts_the_095_runs(self):
+        r = Rig()
+        r.pm("1", 0.96, 0.97, 10_100.0)
+        r.pm("1", 0.96, 0.97, 10_300.0)                       # the feed was silent 200 s: the run restarts here
+        self.assertIsNone(r.E.called("1"))
+        self.assertTrue(any(k == "FEEDGAP" for k, _ in r.logs))
+        r.pm("3", 0.50, 0.52, 10_310.0); r.pm("1", 0.96, 0.97, 10_321.0)
+        self.assertEqual(r.E.called("1"), "yes", "20 s of quotes after the gap")
+
+
 if __name__ == "__main__":
     unittest.main()

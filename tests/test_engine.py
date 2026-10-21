@@ -216,7 +216,7 @@ class EngineCase(unittest.TestCase):
         f_engine.RING_WINDOWS = []                          # the rigs run on the real clock: no ring window unless a test sets one (RingWindowTests)
         self.addCleanup(setattr, f_engine, "STARTUP_HOLD_S", f_engine.STARTUP_HOLD_S)
         f_engine.STARTUP_HOLD_S = 0                         # the rigs read from their first loop (the 2-min start-up hold is a live-only guard)
-        for k, v in (("ELECTION", dict(a_config.ELECTION, on=False)), ("SELL_EV_MAX", 9.0), ("FMM_CF", dict(a_config.FMM_CF, on=False)), ("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
+        for k, v in (("ELECTION_RESERVE", dict(a_config.ELECTION_RESERVE, on=False)), ("WIND_DOWN", dict(a_config.WIND_DOWN, on=False)), ("ELECTION", dict(a_config.ELECTION, on=False)), ("SELL_EV_MAX", 9.0), ("FMM_CF", dict(a_config.FMM_CF, on=False)), ("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
                      ("CORE_CAP_COST", 0.0), ("TRADING_HOLD_C", 99.0), ("CORE_LOCK_RET", -99.0), ("TRADING_INV_CAP", 1e12), ("TRADING_CASH_TARGET", 0.0),
                      ("NOEDGE", dict(ret=-99.0, low_fair=0.0, low_edge_c=0.0)), ("REPEG_AWAY_S", 0.0), ("GTC_TTL_S", 0), ("SM_REPEG_TICKS", 2), ("TM_REPEG_TICKS", 2), ("ROTATION", dict(a_config.ROTATION, on=False, sells={}, buys=[])), ("MANUAL_RESERVE", 0.0), ("FMM", dict(a_config.FMM, on=False)), ("DASH_EVERY_S", 0), ("ALLOC", dict(a_config.ALLOC, on=False)), ("FUND", dict(a_config.FUND, on=False)), ("CARRY", dict(a_config.CARRY, on=False)), ("GAPMM", dict(a_config.GAPMM, on=False)), ("NIGHT_SELL", dict(a_config.NIGHT_SELL, on=False))):   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
             self.addCleanup(setattr, f_engine, k, getattr(f_engine, k, None))
@@ -6820,6 +6820,17 @@ class C101Tests(EngineCase):
         eng.fmm_deploy = 40_000.0
         self.assertAlmostEqual(eng.fmm_priority(), 15_000.0, places=0, msg="never more than 15k")
 
+    def test_c104_breadth_first_touch_clips_when_the_room_is_tight(self):
+        fake, eng, mk = self.cf_rig()
+        for i, ex in enumerate(mk[:8]):
+            C94Tests.c95_market(self, eng, fake, ex, 0.90, (0.85, 0.86, 0.855), race=f"BR-{i}", vol=100_000.0)
+        eng.fmm_inv_cap = lambda: 2_000.0                      # room for ~2,350 shares: 500-share clips would cover 4 books
+        tg = [x for x in eng.fmm_targets(time.time(), paper=False) if x[5] == "fmm" and x[1] in mk[:8]]
+        touch = {x[1]: x[4] for x in tg}
+        self.assertEqual(len(touch), 8, "every book gets the touch")
+        self.assertTrue(all(100 <= q < 500 for q in touch.values()), touch)
+        self.assertLessEqual(sum(x[3] * x[4] for x in tg), 2_000.0 + 1)
+
     def test_c101_migration_sets_the_35k_inventory_cap_once(self):
         fake, eng, mk = self.cf_rig()
         eng.controls.d["fmm"]["inv_cap"] = 30_000.0
@@ -6924,13 +6935,13 @@ class C102Tests(EngineCase):
         fake, eng, a = self.rig()
         eng.px[a] = fake.px[a] = (0.88, 0.90, 0.89)              # the SIG ask 0.90 is 5c under fair 0.95
         eng.feed_book = lambda ex: ([(0.88, 5_000.0)], [(0.90, 1_000.0), (0.92, 4_000.0), (0.93, 9_000.0)])
-        eng.drift_logged.clear()
+        eng.drift_logged.clear(); eng.drift_t = 0.0
         eng.el_step(time.time())
         d = [r for r in self.lines("shadow.jsonl") if r.get("why") == "drift"]
         self.assertTrue(d, "shadow: as if the polls had closed")
         self.assertEqual(d[-1]["items"][0][:4], [a, "yes", "buy", 0.92], "walks the book to fair - 3c (0.920)")
         self.assertLessEqual(d[-1]["items"][0][4], a_config.ELECTION["drift_clip"])
-        eng.el_step(time.time())
+        eng.drift_t = 0.0; eng.el_step(time.time())
         self.assertEqual(len([r for r in self.lines("shadow.jsonl") if r.get("why") == "drift"]), len(d), "one per book per 30 min")
         eng.controls.d["election"] = dict(mode="live")
         E = eng.election
@@ -6981,6 +6992,41 @@ class C102Tests(EngineCase):
         plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
         self.assertFalse(a in plan and plan[a]["why"] == "recycle at the bid")
 
+    def test_the_call_lane_sends_the_snipe_off_the_loop_and_keeps_5_writes_for_it(self):
+        fake, eng, a = self.rig(mode="live")
+        E = eng.election
+        E.close[E.race(a)] = E.first[E.race(a)] = time.time() - 60
+        self.assertEqual(eng.ex.lane_reserve, 5, "live: 5 writes stay the lane's")
+        eng.ex._tokens = lambda: eng.ex.cancel_reserve + 3
+        b = favs_other = [x for x in eng.owner if x != a and eng.owner[x].kind == "market"][0]
+        eng.ex.place([(eng.owner[b].name, f"fmm:{b}:yes:0.500", "fmm", (b, "yes", "buy", 0.5, 100))], ttl_s=86400)
+        self.assertEqual(eng.ex.step_placements(), 0, "another layer may not spend the lane's writes")
+        eng.ex.queue.clear()
+        eng.el_quote(a, 0.985, 0.99, time.time())
+        self.assertEqual(eng.el_lane_once(), 1, "the lane places the queued snipe at once")
+        drain(eng)
+        self.assertTrue([o for o in fake.open_orders() if (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "callsnipe"])
+        eng.controls.d["election"] = dict(mode="shadow"); eng.el_step(time.time())
+        self.assertEqual(eng.ex.lane_reserve, 0)
+
+    def test_rehearsal_injection_runs_a_synthetic_call_in_shadow_and_restores_the_race(self):
+        fake, eng, a = self.rig()
+        E = eng.election
+        race = E.race(a); orig = (E.close[race], E.first[race])
+        now = time.time()
+        eng.controls.d.setdefault("election", {})["inject"] = dict(ex=a, path=[[0, 0.90, 0.92], [1, 0.985, 0.99]], close_now=True)
+        eng.el_step(now)
+        eng.el_step(now + 2)
+        o = [r for r in self.lines("shadow.jsonl") if r.get("why") == "call"]
+        self.assertTrue(o and o[-1]["injected"], "the injected call's would-be order, tagged")
+        self.assertEqual(E.called(a), "yes")
+        eng.el_step(now + 2 + 121)
+        self.assertEqual((E.close[race], E.first[race]), orig, "the real poll close is back")
+        self.assertIsNone(E.called(a), "the synthetic call is cleared")
+        eng.controls.d["election"]["mode"] = "live"; eng.el_mode_cached = "live"
+        with self.assertRaises(ValueError):
+            f_engine.EngineControls(eng).apply("election_inject", dict(ex=a, path=[[0, 0.9, 0.92]]))
+
     def test_off_by_default_until_shadow_from_and_live_only_by_control(self):
         fake, eng, a = self.rig()
         f_engine.ELECTION = dict(a_config.ELECTION, on=True, shadow_from="2099-01-01 00:00:00")
@@ -6989,6 +7035,72 @@ class C102Tests(EngineCase):
         f_engine.ELECTION = dict(a_config.ELECTION, on=True, shadow_from="2000-01-01 00:00:00")
         self.assertEqual(eng.el_mode(), "shadow", "never live without the control")
         self.assertEqual(a_config.ELECTION["shadow_from"], "2026-10-22 06:00:00")
+
+
+
+class C103Tests(EngineCase):
+    """C103 (cash_calendar §3, Piero 15:55 Oct 17 / 15:15 Oct 21): the election reserve 20k from Oct 28 -> 60k Nov 3; the wind-down dates;
+    the convergence sales sized to the ramp (asks >= fair / 1.05); the ELECTION CASH line."""
+
+    def ts(self, s):
+        return time.mktime(time.strptime(s, "%Y-%m-%d %H:%M:%S"))
+
+    def test_the_reserve_ramp_and_the_wind_down_dates(self):
+        fake, eng, favs = C94Tests.rig(self)
+        f_engine.ELECTION_RESERVE = dict(a_config.ELECTION_RESERVE); f_engine.WIND_DOWN = dict(a_config.WIND_DOWN)
+        self.assertEqual(eng.el_reserve(self.ts("2026-10-27 23:59:00")), 0.0)
+        self.assertEqual(eng.el_reserve(self.ts("2026-10-28 00:00:00")), 20_000.0, "Piero 15:15 Oct 21: from Oct 28")
+        self.assertEqual(eng.el_reserve(self.ts("2026-10-31 12:00:00")), 30_000.0)
+        self.assertEqual(eng.el_reserve(self.ts("2026-11-03 15:00:00")), 60_000.0)
+        self.assertEqual(eng.el_reserve(self.ts("2026-11-04 09:00:00")), 0.0)
+        self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-28 12:00:00")), float("inf"))
+        self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-29 12:00:00")), 15_000.0)
+        self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-31 12:00:00")), 5_000.0)
+        self.assertFalse(eng.wd_after("rot_buys_stop", self.ts("2026-10-26 23:00:00")))
+        self.assertTrue(eng.wd_after("rot_buys_stop", self.ts("2026-10-27 00:00:00")))
+        self.assertTrue(eng.wd_after("fmm_no_bids", self.ts("2026-11-01 12:00:00")))
+        self.assertFalse(eng.wd_after("entries_stop", self.ts("2026-11-02 16:59:00")))
+        self.assertTrue(eng.wd_after("entries_stop", self.ts("2026-11-02 17:00:00")))
+
+    def test_the_reserve_comes_off_every_layers_cash_but_not_the_snipers(self):
+        fake, eng, favs = C94Tests.rig(self)
+        loop(eng, fake)
+        free0, eng0 = eng.free_cash(), eng.engine_cash_now()
+        f_engine.ELECTION_RESERVE = dict(a_config.ELECTION_RESERVE, steps=(("2000-01-01 00:00:00", 20_000.0),), until="2099-01-01 00:00:00")
+        loop(eng, fake)
+        self.assertAlmostEqual(eng.engine_cash_now(), eng0 - 20_000.0, delta=50)
+        self.assertLess(eng.free_cash(), free0 - 19_000.0)
+        f_engine.WIND_DOWN = dict(a_config.WIND_DOWN, locks_stop="2000-01-01 00:00:00", fmm_no_bids="2000-01-01 00:00:00", rot_buys_stop="2000-01-01 00:00:00",
+                                  carry_bids_stop="2000-01-01 00:00:00")
+        self.assertEqual(eng.fmm_lock_room(), 0.0); self.assertEqual(eng.h4_budget(time.time()), 0.0)
+        FMMTests.live(self, eng)
+        self.assertEqual(eng.fmm_plan(time.time()), {}, "no new FMM bids from Nov 1 12:00")
+        self.assertIn("ELECTION CASH", eng.election_cash_line(time.time()))
+        eng.election = None; eng.el_mode_cached = "shadow"
+        line = eng.el_checklist(time.time(), 70_000.0)
+        self.assertTrue(line.startswith("ELECTION CHECKLIST") and "MISSING" in line and "60,000 OK" in line, line)
+
+    def test_convergence_asks_cover_the_gap_non_core_and_lowest_return_first_at_fair_over_105(self):
+        fake, eng, favs = C94Tests.rig(self)
+        f_engine.SELL_EV_MAX = 0.05
+        a, b = favs[:2]
+        C93Tests.lot(self, eng, fake, a, f"carry:{a}:yes", 3000, 0.85, (0.92, 0.93, 0.925), 0.96)   # ~3.2% left at 0.93
+        C93Tests.lot(self, eng, fake, b, f"dump:{b}:yes:1", 3000, 0.85, (0.90, 0.91, 0.905), 0.99)  # 8.8% left at the touch
+        loop(eng, fake); loop(eng, fake)
+        eng.ledger.subbooks[a] = {f"carry:{a}:yes": 3000.0}; eng.ledger.subbooks[b] = {f"dump:{b}:yes:1": 3000.0}; eng.lots_cache = (None, {})
+        f_engine.WIND_DOWN = dict(a_config.WIND_DOWN, conv_from="2000-01-01 00:00:00")
+        eng.el_reserve = lambda now: 1e9                       # a reserve far above the cash: every candidate
+        eng.cash_raw_hist = [a_config.CASH_RESERVE + 2_000 + 1_000.0]
+        sel = eng.conv_select(time.time())
+        self.assertIn((a, f"carry:{a}:yes"), sel); self.assertIn((b, f"dump:{b}:yes:1"), sel)
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertEqual(plan[a]["why"], "convergence"); self.assertAlmostEqual(plan[a]["px"], 0.93, places=3)
+        self.assertAlmostEqual(plan[b]["px"], 0.945, places=3, msg="never under fair / 1.05 (0.943 -> 0.945)")
+        eng.conv_keep = set()
+        eng.el_reserve = lambda now: (a_config.CASH_RESERVE + 2_000 + 1_000.0) - a_config.CASH_RESERVE - eng.manual_reserve_left() + 2_000.0   # a 2k gap
+        eng.open = []
+        sel = eng.conv_select(time.time())
+        self.assertEqual(sel, {(a, f"carry:{a}:yes")}, "the lowest return left first, only what covers the gap")
 
 
 if __name__ == "__main__":
