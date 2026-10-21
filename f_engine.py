@@ -73,7 +73,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, CASH_FLOOR_RESUME, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
-                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM, SELL_HOLD, SELL_KEEP_LAYERS, CARRY_BIDSELL,
+                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM, SELL_HOLD, SELL_KEEP_LAYERS, CARRY_BIDSELL, SELL_EV_MAX, FMM_CF, ENGINE_ERR_EXTERNAL, ENGINE_ERR_RESUME_S,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -495,6 +495,7 @@ class Engine:
             self.c95_migration(time.time())
             self.c96_migration(time.time())
             self.c97_migration(time.time())
+            self.c101_migration(time.time())
             if not (self.controls.d.get("c95c") or {}).get("since"):
                 with self.controls.lock:
                     self.controls.d["c95c"] = dict(since=stamp()); self.controls.save()
@@ -4111,9 +4112,15 @@ class Engine:
         catcher, TM / SM, locks) see only free cash above FMM's first 10k while FMM is live."""
         if not ALLOC.get("on") or self.fmm_mode(time.time()) != "live":
             return 0.0
-        first = min(max(0.0, self.fmm_free()), float(ALLOC["fmm_priority_free"]))
+        first = self.fmm_claim_first(self.fmm_free())
         return first + sum(n for _, n in self.fmm_unread)   # C99f: + the buys since the last cash read — fmm_free nets them, the others' cash read
                                                              # doesn't yet (07:59 Oct 18: 1,967 of unread FMM fills became a 1,966 RI carry bid)
+
+    def fmm_claim_first(self, free):
+        """C101 item B (Piero 15:15 Oct 21): FMM claims min(15k, what it can deploy under its caps) of the free cash; the rest goes to the
+        carry bids, then the all-NO sets (idle cash above floor + reserve ~0)."""
+        dep = getattr(self, "fmm_deploy", None)
+        return min(max(0.0, free), float(ALLOC["fmm_priority_free"]), float("inf") if dep is None else max(0.0, dep))
 
     def rot_reserve(self):
         return max(0.0, self.rot_pool()[0])
@@ -4612,7 +4619,7 @@ class Engine:
                 else:
                     by_race[self.rot_race(o["ex"])] += o["qty"] * o["price"]
             need = sum(sorted(by_race.values(), reverse=True)[:2]) + hedge + self.carry_bid_notional()   # alpha_spec §4: after FMM's and carry's bids
-            idle = free - min(max(0.0, free), float(ALLOC["fmm_priority_free"])) - need
+            idle = free - self.fmm_claim_first(free) - need   # C101: FMM's claim is what it can deploy, <= 15k
             return max(0.0, min(idle, float(ALLOC["lock_cap"]) - self.fmm_lock_capital()))
         for o in self.fmm_bids():
             if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "fmmhedge":
@@ -4658,17 +4665,36 @@ class Engine:
         vol = self.rot_vol48(now)
         hand = {str(o["ex"]) for o in self.open if not self.ex.owned(o["id"])}   # Piero's own resting orders (RI-GOV-D): FMM stays out of those books
         books = collections.defaultdict(list)
+        cf = set()                                           # C101 item B: the coin-flip books (side fair 0.25-0.75): the touch only, <= fair - 3c, 500 a clip, 3k a race
+        party = dict(net=self.party_view()["net"]) if (ROTATION.get("party_cap") and FMM_CF.get("on") and not paper) else None
         for ex, b in self.owner.items():
             ex = str(ex)
-            if b.kind != "market" or ex in self.manual_ex or ex in hand or self.ex.is_frozen(ex):
+            if b.kind != "market" or ex in self.manual_ex or ex in hand or self.ex.is_frozen(ex) or ex in SELL_HOLD:
                 continue
             f = self.fair.get(ex)
             if f is None:
                 continue
             side = "yes" if f >= FMM["fav_min"] else "no" if f <= 1 - FMM["fav_min"] else None
-            if side is None:
-                continue
             pos_ = float((self.book.get(ex) or {}).get("pos") or 0)
+            if side is None:
+                if not FMM_CF.get("on"):
+                    continue
+                best = None
+                for sd in ("yes", "no"):
+                    if not paper and ((sd == "yes" and pos_ <= -1) or (sd == "no" and pos_ >= 1)):
+                        continue                             # C95f
+                    bid_, ask_, fs_ = self.rot_touch(ex, sd)
+                    if (bid_ is None or fs_ is None or not (FMM_CF["band"][0] - 1e-9 <= fs_ <= FMM_CF["band"][1] + 1e-9) or bid_ > fs_ - FMM_CF["edge"] + 1e-9
+                            or not (0.01 <= bid_ <= 0.99)):
+                        continue
+                    if best is None or fs_ - bid_ > best[2] - best[3]:
+                        best = (sd, ask_, fs_, bid_)
+                if best is None or not self.carry_party_ok(ex, best[0], FMM_CF["clip"] * best[3], party):
+                    continue                                 # the party cap holds (no new D-side close-race buy while net D > 10k)
+                side, ask, fs, bid = best
+                cf.add((ex, side))
+                books[self.rot_race(ex)].append((ex, side, fs, bid, ask))
+                continue
             if not paper and ((side == "yes" and pos_ <= -1) or (side == "no" and pos_ >= 1)):
                 continue                                     # C95f: we hold the other side here; a buy would net against it
             bid, ask, fs = self.rot_touch(ex, side)
@@ -4679,14 +4705,22 @@ class Engine:
         for ex_, v_ in vol.items():
             rvol[self.rot_race(ex_)] += v_
         tot = sum(rvol[r] for r in books) or 1.0
-        inv = collections.Counter()
+        inv, inv_cf = collections.Counter(), collections.Counter()
+        lo_cf, hi_cf = FMM_CF["band"]
         if paper:
             for ex, side, q, px in P["lots"]:
                 inv[self.rot_race(ex)] += q * px
         else:
             for sub, (ex, side, q, avg) in self.fmm_lots().items():
                 inv[self.rot_race(ex)] += q * avg
+                sf_ = self.side_fair(ex, side)
+                if sf_ is not None and lo_cf - 1e-9 <= sf_ <= hi_cf + 1e-9:
+                    inv_cf[self.rot_race(ex)] += q * avg
         inv_tot = sum(inv.values())
+        rcf = float(FMM_CF["race_cap"])
+        # C101 item B: what FMM can still deploy under its caps (its claim on free cash is min(15k, this))
+        self.fmm_deploy = max(0.0, min(cap - inv_tot, sum(max(0.0, (rcap(r) if any((l[0], l[1]) not in cf for l in legs) else min(rcap(r), rcf - inv_cf[r] + inv[r])) - inv[r])
+                                                            for r, legs in books.items())))
         cur = collections.defaultdict(dict)                  # (ex, side) -> {px: (qty, age key)}
         if paper:
             for (ex, side, px), o in P["orders"].items():
@@ -4699,10 +4733,11 @@ class Engine:
         # 1. what each book wants (levels), the kept bids first
         plan, kept = [], []
         for race, legs in books.items():
-            ladder = [l for l in legs if len(cur.get((l[0], l[1]), {})) > 1] or [max(legs, key=lambda l: l[2] - l[3])]   # the cheaper book, sticky while its ladder rests
+            fav = [l for l in legs if (l[0], l[1]) not in cf]
+            ladder = ([l for l in fav if len(cur.get((l[0], l[1]), {})) > 1] or [max(fav, key=lambda l: l[2] - l[3])]) if fav else [(None,)]   # the cheaper book, sticky while its ladder rests
             sw = self.fmm_sweep.get(race)
             for ex, side, fs, bid, ask in legs:
-                lv = list(FMM["levels"]) if ex == ladder[0][0] else [0]
+                lv = list(FMM["levels"]) if ex == ladder[0][0] else [0]   # coin-flip books: the touch only
                 refill = sw is not None and sw.get("ex") == ex and now - sw["t"] <= FMM["refill_s"]
                 if refill:                                   # §2.2 (b): every level the sweep cleared, down to fair - 2c
                     lv = list(range(0, max(lv[-1], int((bid - (fs - edge)) / FMM["level_step"] + 1e-9)) + 1))
@@ -4711,21 +4746,29 @@ class Engine:
                     px = round(bid - k * FMM["level_step"], 3)
                     if px > fs - edge + 1e-9 or px < 0.01 or (own is not None and px >= own - 1e-9):
                         continue                             # never above fair - 2c; never at or through our own ask in the same book
+                    if (ex, side) in cf and px > fs - FMM_CF["edge"] + 1e-9:
+                        continue                             # C101: a coin-flip bid sits <= PM fair - 3c
                     have = cur.get((ex, side), {}).get(px)
-                    (kept if have else plan).append(dict(race=race, ex=ex, side=side, px=px, k=k, fs=fs, ask=ask, have=have, refill=refill))
+                    (kept if have else plan).append(dict(race=race, ex=ex, side=side, px=px, k=k, fs=fs, ask=ask, have=have, refill=refill and (ex, side) not in cf,
+                                                         cf=(ex, side) in cf))
         # 2. kept bids that no longer fit go, the largest first (the planner applies the fill guard's rule every loop)
         kept.sort(key=lambda w: -w["have"][0] * w["px"])
         rest_tot = sum(w["have"][0] * w["px"] for w in kept)
-        rest_race = collections.Counter()
+        rest_race, rest_cf = collections.Counter(), collections.Counter()
         for w in kept:
             rest_race[w["race"]] += w["have"][0] * w["px"]
+            if w.get("cf"):
+                rest_cf[w["race"]] += w["have"][0] * w["px"]
         out, cut = [], []
         other = lambda rc: max([v for r_, v in rest_race.items() if r_ != rc] + [0.0])   # a burst spans <= 2 races (replay): the two largest ladders must fit in free
         for w in kept:
             n = w["have"][0] * w["px"]
             if (n > max(0.0, free) + 1e-6 or rest_race[w["race"]] + other(w["race"]) > max(0.0, free) + 1e-6 or rest_tot > allow + 1e-6
-                    or inv[w["race"]] + rest_race[w["race"]] > rcap(w["race"]) + 1e-6 or inv_tot + rest_tot > cap + 1e-6):
+                    or inv[w["race"]] + rest_race[w["race"]] > rcap(w["race"]) + 1e-6 or inv_tot + rest_tot > cap + 1e-6
+                    or (w.get("cf") and inv_cf[w["race"]] + rest_cf[w["race"]] > rcf + 1e-6)):
                 rest_tot -= n; rest_race[w["race"]] -= n; cut.append(w)
+                if w.get("cf"):
+                    rest_cf[w["race"]] -= n
                 continue
             out.append((w["race"], w["ex"], w["side"], w["px"], int(w["have"][0]), "fmm", f"fmm:{w['ex']}:{w['side']}:{w['px']:.3f}"))
         if cut and not paper:
@@ -4783,6 +4826,8 @@ class Engine:
                 continue
             clip = max(float(FMM["min_clip"]), budget / 4 / px)
             lim = [clip, room / px]
+            if w.get("cf"):
+                lim += [float(FMM_CF["clip"]), (rcf - inv_cf[race] - rest_cf[race]) / px]   # C101: <= 500 a clip, 3k at cost a race
             if w["k"] > 0:
                 lim.append((budget - rest_race[race]) / px)  # the touch is every eligible book's floor; deeper levels within the race budget
             q = int(min(lim))
@@ -4790,9 +4835,12 @@ class Engine:
                 continue
             out.append((race, ex, side, px, q, "fmm", f"fmm:{ex}:{side}:{px:.3f}"))
             rest_tot += q * px; rest_race[race] += q * px
+            if w.get("cf"):
+                rest_cf[race] += q * px
         hedges(stuck=False)
         quoted = {(t[1], t[2]) for t in out if t[5] == "fmm"}
-        self.fmm_cov = dict(eligible=sum(len(v) for v in books.values()), quoted=len(quoted), rest=round(rest_tot), allow=round(allow), free=round(free), K=K)
+        self.fmm_cov = dict(eligible=sum(len(v) for v in books.values()), quoted=len(quoted), rest=round(rest_tot), allow=round(allow), free=round(free), K=K,
+                            cf_eligible=len(cf), cf_quoted=len({k_ for k_ in quoted if k_ in cf}), deploy=round(self.fmm_deploy))
         return out
 
     def fmm_plan(self, now):
@@ -5359,8 +5407,9 @@ class Engine:
         lat = sorted(self.fmm_lat)
         p50 = lat[len(lat) // 2] if lat else None; p90 = lat[int(len(lat) * 0.9)] if lat else None
         cv = getattr(self, "fmm_cov", None) or {}
-        cov = (f"coverage {cv.get('quoted', 0)} of {cv.get('eligible', 0)} books quoted, resting {cv.get('rest', 0):,} of K {cv.get('K', self.fmm_k()):g} x free {cv.get('allow', 0):,} "
-               f"(free {cv.get('free', 0):,})")
+        cov = (f"coverage {cv.get('quoted', 0)} of {cv.get('eligible', 0)} books quoted (coin flips {cv.get('cf_quoted', 0)} of {cv.get('cf_eligible', 0)}), "
+               f"resting {cv.get('rest', 0):,} of K {cv.get('K', self.fmm_k()):g} x free {cv.get('allow', 0):,} (free {cv.get('free', 0):,}; deployable under the caps {cv.get('deploy', 0):,}, "
+               f"claim {self.fmm_claim_first(cv.get('free', 0)):,.0f})")
         latx = f"refill latency p50 {'n/a' if p50 is None else f'{p50:.1f} s'} p90 {'n/a' if p90 is None else f'{p90:.1f} s'}"
         if mode == "paper":
             P = self.fmm_paper
@@ -5545,6 +5594,23 @@ class Engine:
                 f"catcher {cat:,.0f} new lots + {cat_rest:,.0f} resting of {ALLOC['catcher_slice']:,.0f}; locks {locks:,.0f} of {ALLOC['lock_cap']:,.0f}; holdings ~{hold:,.0f} at SIG marks; cash {cash:,.0f} "
                 f"(FMM free {self.fmm_free():,.0f}, its priority {self.fmm_priority():,.0f}). FMM realized {float(lv.get('realized') or 0):+,.1f}, at fair {self.fmm_pnl_fair():+,.0f}. "
                 f"FUND sold {sum(ff['sold'].values()):,.0f} shares, cash {ff['freed']:,.0f}, realized {ff['realized']:+,.0f}. {rk}.")
+
+    def c101_migration(self, now):
+        """Once (C101, Piero 15:15 Oct 21): FMM's inventory cap 30k -> 35k (the race caps stay)."""
+        c = self.controls
+        st = c.d.get("fmm") or {}
+        if (c.d.get("c101") or {}).get("done") or st.get("decision") != "live":
+            return
+        with c.lock:
+            old = float(st.get("inv_cap") or 0)
+            st["inv_cap"] = max(old, float(FMM["inv_cap_live"]))
+            c.d["fmm"] = st
+            c.d["c101"] = dict(done=stamp(), inv_cap_was=old)
+            c.save()
+        msg = (f"C101 (Piero 15:15 Oct 21): FMM inventory cap {old:,.0f} -> {st['inv_cap']:,.0f}; coin-flip sides (side fair {FMM_CF['band'][0]:.2f}-{FMM_CF['band'][1]:.2f}) at the "
+               f"touch <= PM fair - {FMM_CF['edge'] * 100:.0f}c, {FMM_CF['clip']:,} a clip, {FMM_CF['race_cap']:,.0f} a race, the party cap holding; FMM's claim = min(15k, what it can "
+               f"deploy under its caps); sales only at EV/$ held <= {SELL_EV_MAX:.0%}; engine_errors counts the engine's own errors and resumes after 3 clean minutes")
+        self.event("FMM", msg); self.night.line(msg)
 
     def c97_migration(self, now):
         """Once (C97, Piero 15:55 Oct 17): the capital allocation — the fund sale, FMM's 30k cap, the rotation's 30k, the reserve at 2,000."""
@@ -6158,18 +6224,22 @@ class Engine:
 
     AUTO_KINDS = PAUSE_KINDS
 
-    def errors_10m(self, now):
-        """ERR events in the last 10 min (the events carry a same-day HH:MM:SS stamp)."""
-        n, lt = 0, time.localtime(now)
+    def errors_10m(self, now, window=600):
+        """The engine's own ERR events in the last `window` s (the events carry a same-day HH:MM:SS stamp), one per message a minute.
+        C101 item D: an external service's error (HTTP / URL / timeout) is not one — Polymarket's are pm_stale's, SIG's api_errors' /
+        stop_pull's (08:27 Oct 21: 55 Polymarket 404s in 85 s paused new risk 20 min while the fair stayed fresh)."""
+        n, lt, seen = 0, time.localtime(now), set()
         for e in self.events[-400:]:
-            if e.get("kind") != "ERR" or "429" in str(e.get("text", "")) or "RATE_LIMITED" in str(e.get("text", "")):
+            txt = str(e.get("text", ""))
+            if e.get("kind") != "ERR" or "429" in txt or "RATE_LIMITED" in txt or any(x in txt for x in ENGINE_ERR_EXTERNAL):
                 continue                                    # rate-limit answers count under api_errors, not here
             try:
                 hh, mm, ss = (int(x) for x in str(e.get("t", "")).split(":"))
             except ValueError:
                 continue
             t_ = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, ss, 0, 0, -1))
-            if 0 <= now - t_ <= 600:
+            if 0 <= now - t_ <= window and (txt[:80], hh, mm) not in seen:
+                seen.add((txt[:80], hh, mm))
                 n += 1
         return n
 
@@ -6286,7 +6356,7 @@ class Engine:
               "i2_breach": not self.trim_t or now - self.trim_t >= I2_RESUME_S,
               "api_errors": (h["read"]["bad_rate"] < 0.1) and (h.get("throttled") or 0) < 3,
               "pm_stale": bool(self.fair_t) and now - self.fair_t < 60,
-              "engine_errors": self.errors_10m(now) == 0}.get(kind, False)
+              "engine_errors": self.errors_10m(now, ENGINE_ERR_RESUME_S) == 0}.get(kind, False)   # C101 item D: 3 clean minutes
         if not ok:
             return
         with c.lock:
@@ -8928,6 +8998,7 @@ class Engine:
                     return float(t_.get("avg") or ((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
                 subs_iter.sort(key=_avg)
             fresh_inv = now - self.inv_new_t.get(str(ex), 0.0) < 600   # C95c: maybe Piero's own trade, its fill record still coming
+            ev_fl = min(0.99, bots.tick_up(round(fs / (1 + SELL_EV_MAX), 6))) if SELL_EV_MAX < 1 else 0.0   # C101 item C: no sale above EV/$ 5% (price >= fair / 1.05)
             anc = self.sale_anchor.get(str(ex))            # C100 item 3: every sale rule keeps its place (was fund / carry only)
             if anc is not None and anc.get("side") != side:
                 anc = None; self.sale_anchor.pop(str(ex), None)
@@ -8937,7 +9008,7 @@ class Engine:
                     anc.setdefault("below", now)
                     if now - anc["below"] >= SALE_REPEG_S:
                         old_px = anc["px"]
-                        anc.update(px=round(oa, 3), t=now); anc.pop("below", None)
+                        anc.update(px=max(round(oa, 3), ev_fl), t=now); anc.pop("below", None)   # C101: never under fair / 1.05
                         self.sale_stats[str(ex)]["repegs"] += 1
                         msg = f"SALE REPEG {self.name(ex)} {side.upper()}: the best ask sat at {oa:.3f} < our {old_px:.3f} for {SALE_REPEG_S // 60} min: down to max(lot avg + 0.5c, {oa:.3f})"
                         self.event("RELEASE", msg); self.night.line(msg)
@@ -9007,17 +9078,20 @@ class Engine:
                 elif ex in shortfall and bid is not None and bid >= floor_ - 1e-9:
                     px, reason = bid, "h1 shortfall"      # item 4: at the best bid, >= lot average + 0.5c
                 else:
-                    px = max(ask, floor_)
+                    px = self.sale_price(ex, side, max(ask, floor_), floor_, bid, "no-edge", anc, False)[0]   # C101: the return left at the price the ask keeps
                     ret = (fs - px) / px if px > 0 else 1.0
                     if sub.startswith("rot:") and ret >= ROTATION["release_exempt_ret"] - 1e-9:
                         continue                            # C94 item 3: a rotation lot has its own exit; the no-edge release takes it only under 2% left
                     if ret < NOEDGE["ret"] - 1e-9 or (fs < NOEDGE["low_fair"] - 1e-9 and fs - px < NOEDGE["low_edge_c"] - 1e-9):
-                        px, reason = self.sale_price(ex, side, px, floor_, bid, "no-edge", anc, False)   # C100 item 3: keeps its place
-                        if px is None:
-                            anc_wait = anc is not None
-                            continue
+                        reason = "no-edge"                   # (C100 item 3: px is the kept price)
                     else:
                         continue                            # item 1: >= 6% return left -> HOLD
+                if reason != "h1 shortfall" and ev_fl:      # C101 item C (Piero 15:15 Oct 21): no fire sale — EV/$ held <= 5% at the sale price
+                    if reason.endswith("at the bid"):
+                        if px < ev_fl - 1e-9:
+                            continue                        # the bid would sell above 5% EV/$: no
+                    else:
+                        px = max(px, ev_fl)                  # the ask rests at >= fair / 1.05
                 if sub.startswith(self.OWN_EXIT_SUBS) and self.own_exit_resting(ex, sub):
                     continue                                # its own layer's exit already rests at the same price: never a second one
                 take = self.rule0_allowed(ex, side, sub, px, int(abs(v)))
@@ -10823,6 +10897,11 @@ class Engine:
                 old_ask, new_ask = 1 - float(o["price"]), 1 - float(w["px"])
                 if abs(new_ask - old_ask) >= 1e-9:
                     t_u = self.sell_undercut.get(o["id"])
+                    fs_ = self.side_fair(str(o["ex"]), "no" if o["side"] == "yes" else "yes")
+                    if (o.get("layer") == "release" and new_ask > old_ask and SELL_EV_MAX < 1 and fs_ is not None
+                            and old_ask < bots.tick_up(round(fs_ / (1 + SELL_EV_MAX), 6)) - 1e-9):
+                        keep_c.append(o)                    # C101 item C: an ask under fair / 1.05 (a sale above 5% EV/$) moves up to it at once
+                        continue
                     if new_ask > old_ask or t_u is None or now - t_u < SALE_REPEG_S:
                         want_keys[k] -= 1
                         deferred[k] += 1

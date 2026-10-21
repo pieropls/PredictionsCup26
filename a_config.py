@@ -323,7 +323,7 @@ H1_JUDGE_WINDOW = ("04:00", "08:00")   # Piero 17:35: H1 is judged on the mornin
 H3 = dict(swap_c=0.03, converged_ret=0.02)
 # Piero 15:30 Oct 12 (C93): hold the favourites; release the no-edge lots as GTC asks; orders keep their place; the H1 decisive test
 HOLD_RET = 0.06                 # no seller touches a lot with >= 6% return left to settlement (the C89 target seller and the H3 swap seller are gone)
-NOEDGE = dict(ret=0.06, low_fair=0.85, low_edge_c=0.03)   # item 2: a lot with < 6% return left at the sale price, or on a side with fair < 0.85 and < 3c of edge left -> one GTC ask at max(lot average + 0.5c, touch ask)
+NOEDGE = dict(ret=0.05, low_fair=0.85, low_edge_c=0.03)   # item 2: a lot with < 6% return left at the sale price, or on a side with fair < 0.85 and < 3c of edge left -> one GTC ask at max(lot average + 0.5c, touch ask)
 GTC_TTL_S = 24 * 3600           # item 3: every seller and quote rests until re-pegged (no timer re-posts)
 REPEG_AWAY_TICKS, REPEG_AWAY_S = 1, 600   # item 3: re-peg only once the touch has moved >= 1 tick away for > 10 min; re-size only when the target changes > 25% (QTY_TOL)
 H1_TEST = dict(day="2026-10-13", start="04:00", end="18:00", reserve_from="03:45", shortfall_at="03:15", sleeve=5_000.0, n_markets=10, clip=600, layer="tm", stop_fair=-150.0, shortfall_max_cost=400.0)   # item 4; C93b: touch-maker quotes only on H5's ten; C93e (Piero 14:58 Oct 13): window extended to 18:00 (the 12:11-15:2x cash_floor pause was not the sleeve's)   # H3 (arm A): a trading lot is sold only for a waiting entry with >= 3c more edge, sized to that entry's cost; converged lots (< 2% left) first
@@ -507,7 +507,7 @@ ROT_TTL_S = 24 * 3600
 FMM = dict(on=True, fav_min=0.75, edge=0.02, levels=(0, 1, 2, 3), level_step=0.01, min_clip=500, min_new=100, race_cap=5_000.0,
            race_caps={"Rhode Island Senate": 15_000.0},     # Piero 21:15 item 2: RI Senate's inventory clears daily (25 round trips/day in the replay)
            lock_free_share=0.30, hedge_after_s=7_200,        # Piero 21:15 item 1: new locks <= 30% of engine free cash, from cash FMM's ladders don't need; stuck lots (>= 2 h) hedged first
-           k_live=3.0, k_step=5.0, k5_ok=True, inv_cap_live=30_000.0, inv_cap_step=30_000.0, cap_tol=250.0,   # Piero 15:55 Oct 17 item 2: 30k now (Sunday's step brought forward)
+           k_live=3.0, k_step=5.0, k5_ok=True, inv_cap_live=35_000.0, inv_cap_step=35_000.0, cap_tol=250.0,   # Piero 15:55 Oct 17 item 2: 30k now (Sunday's step brought forward)
            exit_c=0.005, exit_ring_c=0.01, ring=(("07:00", "08:00"), ("12:00", "15:00"), ("19:30", "21:00")),
            refill_s=60.0, take_ttl_s=120, fast_writes=5, lock_cost=0.985, lock_cap_sh=10_000, hedge=True,   # item 4b: locks only at a walked cost <= 0.985
            nset_skip=("Alaska Senate",),                   # Piero 01:05 Oct 18 item 6: no Alaska all-NO set
@@ -537,7 +537,15 @@ SALE_REPEG_S = 300
 SELL_HOLD = {"894": "no", "1045": "no"}   # item 1: CO-03 House race D NO and Kansas Senate D NO (R-side, the party cap) — out of every sale rule, no layer sells or nets them
 SELL_KEEP_LAYERS = ("release", "rotexit")   # item 3: every sell rule (fund, carry, core lock, no-edge, rotation sales / exits) posts once; re-pegs down only after the others' best
                                             # ask has sat below ours >= SALE_REPEG_S (never up, never below lot avg + 0.5c: the plans' floor)
-CARRY_BIDSELL = dict(on=True, since="2026-10-18 17:15:00", ev_max=0.08, day_cap=7_500.0, fmm_free_target=15_000.0,
+# C101 (Piero 15:15 Oct 21)
+SELL_EV_MAX = 0.05            # item C: no fire sale — every sale rule (fund, carry, no-edge, core lock, rotation sales) sells only a lot with EV/$ held <= 5% at its
+                              # sale price; never a leg of a lock / pairset (those subs are out of every seller); rotation exits keep their own rule
+FMM_CF = dict(on=True, band=(0.25, 0.75), edge=0.03, clip=500, race_cap=3_000.0)   # item B: FMM on coin-flip sides (side fair 0.25-0.75): touch bids only at
+                              # <= PM fair - 3c, clip <= 500 shares, 3k at cost a race (inventory + resting); gap-median exits; the party cap holds
+ENGINE_ERR_EXTERNAL = ("HTTPError", "URLError", "timed out", "TimeoutError", "RemoteDisconnected", "ConnectionResetError", "ConnectionError", "IncompleteRead")
+ENGINE_ERR_RESUME_S = 180     # item D: engine_errors counts the engine's own errors (one per message a minute); external services' errors are pm_stale /
+                              # api_errors / stop_pull's; it resumes after 3 clean minutes (was 10: 08:27 Oct 21 paused 20 min for 85 s of Polymarket 404s)
+CARRY_BIDSELL = dict(on=True, since="2026-10-18 17:15:00", ev_max=0.05, day_cap=7_500.0, fmm_free_target=15_000.0,
                      exclude=("1077",))     # item 4: carry lots with EV/$ held <= 8% sell at the bid (bid >= lot avg + 0.5c and SIG avg + 0.5c), max 7.5k a day, until FMM free 15k;
                                             # RI Senate R NO excluded (rotation / lock / pairset / manual lots are not carry lots)
 # Piero 01:05 Oct 18 item 8 (alpha_spec §3): the gap-median exit (docs/gapmm.md F1: +2,143 vs +1,698, 6 of 8 days at 6 h; 7 of 8 at 12 h) —
@@ -547,6 +555,6 @@ GAPMM = dict(on=True, window_s=6 * 3600, refresh_s=600, min_prints=10, repeg_s=6
              replay_note="docs/gapmm.md: F1 6-h +2,143 vs FMM +1,698 (6 of 8 days); 12-h 7 of 8")
 # ---- C98 (alpha_spec §2, Piero 16:35 Oct 17): the CARRY book — the favourites in the holdings bucket, held to settlement (no +0.5c exits),
 # rebalanced every 30 min: sell EV/$ held <= 6.5% (rule 0 holds), buy resting bids on EV/$ >= 11% favourites
-CARRY = dict(on=True, sell_ev=0.065, buy_ev=0.11, min_daily=150_000, fav_min=0.75, below_fair=0.05, race_cap=12_000.0,
+CARRY = dict(on=True, sell_ev=0.05, buy_ev=0.11, min_daily=150_000, fav_min=0.75, below_fair=0.05, race_cap=12_000.0,
              race_caps={"Rhode Island Senate": 30_000.0}, swap_pts=0.04, refresh_s=1800, min_clip=500, ttl=86400,
              max_bid_sh=9_900)                 # Piero 01:05 Oct 18 item 6: e.g. RI Senate R NO 9,900 at 0.865
