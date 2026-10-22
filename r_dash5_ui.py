@@ -94,7 +94,8 @@ function hdr5() {
   const h = V("v5hdr"), st = h.status || "trading", cls = st === "trading" ? "green" : st === "paused" ? "red" : "amber";
   const lab = st === "trading" ? "Trading" : st === "paused" ? "Paused" : "Degraded";
   const rb = st === "paused" ? ` <button class="btn5 pri" data-c5="resume" style="margin-left:8px;padding:2px 10px">Resume now</button>` : "";   // C95c: resume from any tab
-  return `<span class="dot5 ${cls}"></span><b>${lab}</b>${h.reason ? " · " + esc(h.reason) : ""}, last loop ${h.loop_age == null ? "–" : h.loop_age + " s"}${rb}`;
+  const e = h.election, eb = e ? ` <span class="dot5 ${e.mode === "live" ? "red" : "amber"}" style="margin-left:10px"></span><b>ELECTION ${esc(String(e.mode).toUpperCase())}</b> · ${e.books} books · calls ${e.calls}${e.stopped ? " · " + e.stopped + " races stopped" : ""}${e.kill ? " · <b>KILL ON</b>" : ""}` : "";   // C104: night item 5
+  return `<span class="dot5 ${cls}"></span><b>${lab}</b>${h.reason ? " · " + esc(h.reason) : ""}, last loop ${h.loop_age == null ? "–" : h.loop_age + " s"}${rb}${eb}`;
 }
 
 // ------------------------------------------------------------------------------------------- Overview

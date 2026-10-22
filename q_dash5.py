@@ -1294,7 +1294,10 @@ def build(eng, api, v4=None):
         st, why = status_of(eng, rl10, loop_age)
         h = api.health(600) if hasattr(api, "health") else {}
         feed = getattr(eng, "mkt_feed", None)
-        out["v5hdr"] = dict(t=now, status=st, reason=why, loop_age=loop_age)
+        E_ = getattr(eng, "election", None)                 # C104 (night item 5): the ELECTION MODE banner
+        el_ = None if not E_ or getattr(eng, "el_mode_cached", "off") == "off" else dict(
+            mode=eng.el_mode_cached, books=len(E_.meta), calls=sum(1 for c_ in list(E_.calls.values()) if not c_.get("reversed")), stopped=len(E_.race_stop), kill=bool(E_.stopped))
+        out["v5hdr"] = dict(t=now, status=st, reason=why, loop_age=loop_age, election=el_)
         # Overview
         slices = sorted(pos_rows, key=lambda p: -p["value"])
         top, rest = slices[:10], slices[10:]
