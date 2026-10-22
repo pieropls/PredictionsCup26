@@ -216,7 +216,7 @@ class EngineCase(unittest.TestCase):
         f_engine.RING_WINDOWS = []                          # the rigs run on the real clock: no ring window unless a test sets one (RingWindowTests)
         self.addCleanup(setattr, f_engine, "STARTUP_HOLD_S", f_engine.STARTUP_HOLD_S)
         f_engine.STARTUP_HOLD_S = 0                         # the rigs read from their first loop (the 2-min start-up hold is a live-only guard)
-        for k, v in (("ELECTION_RESERVE", dict(a_config.ELECTION_RESERVE, on=False)), ("WIND_DOWN", dict(a_config.WIND_DOWN, on=False)), ("ELECTION", dict(a_config.ELECTION, on=False)), ("SELL_EV_MAX", 9.0), ("FMM_CF", dict(a_config.FMM_CF, on=False)), ("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
+        for k, v in (("FMM_ROOM", dict(a_config.FMM_ROOM, on=False)), ("CARRY_FIRST", {}), ("ELECTION_RESERVE", dict(a_config.ELECTION_RESERVE, on=False)), ("WIND_DOWN", dict(a_config.WIND_DOWN, on=False)), ("ELECTION", dict(a_config.ELECTION, on=False)), ("SELL_EV_MAX", 9.0), ("FMM_CF", dict(a_config.FMM_CF, on=False)), ("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
                      ("CORE_CAP_COST", 0.0), ("TRADING_HOLD_C", 99.0), ("CORE_LOCK_RET", -99.0), ("TRADING_INV_CAP", 1e12), ("TRADING_CASH_TARGET", 0.0),
                      ("NOEDGE", dict(ret=-99.0, low_fair=0.0, low_edge_c=0.0)), ("REPEG_AWAY_S", 0.0), ("GTC_TTL_S", 0), ("SM_REPEG_TICKS", 2), ("TM_REPEG_TICKS", 2), ("ROTATION", dict(a_config.ROTATION, on=False, sells={}, buys=[])), ("MANUAL_RESERVE", 0.0), ("FMM", dict(a_config.FMM, on=False)), ("DASH_EVERY_S", 0), ("ALLOC", dict(a_config.ALLOC, on=False)), ("FUND", dict(a_config.FUND, on=False)), ("CARRY", dict(a_config.CARRY, on=False)), ("GAPMM", dict(a_config.GAPMM, on=False)), ("NIGHT_SELL", dict(a_config.NIGHT_SELL, on=False))):   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
             self.addCleanup(setattr, f_engine, k, getattr(f_engine, k, None))
@@ -7101,6 +7101,77 @@ class C103Tests(EngineCase):
         eng.open = []
         sel = eng.conv_select(time.time())
         self.assertEqual(sel, {(a, f"carry:{a}:yes")}, "the lowest return left first, only what covers the gap")
+
+
+
+class C106Tests(EngineCase):
+    """C106 (Piero 02:50 Oct 22): FMM room until Oct 28 23:59 (8k a race, RI 15k, coin flips 4k, 40k, clips 800 / 667); carry bids RI Senate
+    R NO <= 0.845 first; the refill latency measured to the order placed; the call lane timed in shadow; the MANUAL line shows engine subs."""
+
+    def test_fmm_room_until_oct_28_then_the_old_caps(self):
+        fake, eng, mk = C101Tests.cf_rig(self)
+        f_engine.FMM_ROOM = dict(a_config.FMM_ROOM, until="2099-01-01 00:00:00")
+        self.assertEqual(eng.fmm_race_cap("Ohio Senate"), 8_000.0)
+        self.assertEqual(eng.fmm_race_cap(f_engine.RI_SENATE_RACE), 15_000.0, "RI Senate stays 15k")
+        eng.controls.d["fmm"]["inv_cap"] = 35_000.0
+        self.assertEqual(eng.fmm_inv_cap(), 40_000.0)
+        f_engine.FMM_ROOM = dict(a_config.FMM_ROOM, until="2000-01-01 00:00:00")
+        self.assertEqual(eng.fmm_race_cap("Ohio Senate"), 5_000.0); self.assertEqual(eng.fmm_inv_cap(), 35_000.0)
+        self.assertEqual(a_config.FMM_ROOM["until"], "2026-10-28 23:59:59")
+
+    def test_coin_flip_room_4k_and_800_share_clips(self):
+        fake, eng, mk = C101Tests.cf_rig(self)
+        f_engine.FMM_ROOM = dict(a_config.FMM_ROOM, until="2099-01-01 00:00:00")
+        a, c = mk[:2]
+        C94Tests.c95_market(self, eng, fake, a, 0.50, (0.46, 0.48, 0.47), race="CF-A", vol=100_000.0)
+        C94Tests.c95_market(self, eng, fake, c, 0.90, (0.85, 0.86, 0.855), race="FAV-C", vol=100_000.0)
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 60_000.0
+        tg = eng.fmm_targets(time.time(), paper=False)
+        self.assertLessEqual(max(x[4] for x in tg if x[1] == a), 667, "the coin-flip clip scales 500 -> 667")
+        self.assertGreaterEqual(max(x[4] for x in tg if x[1] == c and x[5] == "fmm"), 800, "the favourite clip scales 500 -> 800")
+        eng.ledger.subbooks.setdefault(a, {})[f"fmm:{a}:yes:0.460"] = 8478.0       # 3,900 at cost: 100 of the 4k left
+        eng.ledger.tranches[f"fmm:{a}:yes:0.460"] = dict(ex=a, side="yes", kind="fmm", state="open", ts=time.time(), t="x", avg=0.46, qty=8478.0)
+        tg = eng.fmm_targets(time.time(), paper=False)
+        self.assertLessEqual(sum(x[3] * x[4] for x in tg if x[1] == a and x[5] == "fmm"), 100.0 + 1e-6, "4k at cost a coin-flip race")
+
+    def test_carry_bids_ri_senate_r_no_first_at_0845_or_less(self):
+        fake, eng, favs = AlphaTests.rig(self)
+        ri, c = favs[0], favs[1]
+        f_engine.CARRY_FIRST = {str(ri): ("no", 0.845)}
+        C94Tests.c95_market(self, eng, fake, ri, 0.012, (0.13, 0.14, 0.135), race="RI-S", vol=400_000.0)   # NO bid 0.86, fair 0.988
+        C94Tests.c95_market(self, eng, fake, c, 0.95, (0.80, 0.81, 0.805), race="RC", vol=400_000.0)      # EV 18.8% > RI's
+        cands = eng.carry_candidates(time.time())
+        self.assertEqual((cands[0]["ex"], cands[0]["side"]), (str(ri), "no"), "RI Senate R NO first")
+        self.assertLessEqual(cands[0]["px"], 0.845)
+
+    def test_refill_latency_is_measured_to_the_order_placed(self):
+        fake, eng, mk = FMMTests.rig(self)
+        a = mk[0]
+        t0 = time.time()
+        eng.fmm_lat, eng.fmm_lat_plan = [], []
+        eng.fmm_refill_wait[a] = (t0 - 3.0, t0 - 1.0)        # the sweep 3 s ago, planned 1 s ago
+        eng.ledger.orders["zz1"] = dict(id="zz1", layer="fmmtake", ex=a, ts=t0 - 0.5, side="yes", action="buy", price=0.8, qty=100)
+        eng.fmm_refill_measure()
+        self.assertAlmostEqual(eng.fmm_lat[-1], 2.5, places=3); self.assertAlmostEqual(eng.fmm_lat_plan[-1], 2.0, places=3)
+        self.assertNotIn(a, eng.fmm_refill_wait)
+        FMMTests.live(self, eng)
+        self.assertIn("sweep received -> refill order placed", eng.fmm_status(time.time()))
+
+    def test_the_manual_line_shows_the_engines_own_sub_books(self):
+        fake, eng, favs = C94Tests.rig(self)
+        a = favs[0]
+        eng.book[a] = dict(pos=-4171, row=dict(avgCost=0.92)); eng.ledger.subbooks[a] = {"manual": -4108.0, f"fmm:{a}:no:0.930": -63.0}
+        line = eng.manual_line()
+        self.assertIn("manual -4,108 + engine sub-books -63 = SIG -4,171", line)
+
+    def test_the_call_lane_runs_and_is_timed_in_shadow(self):
+        fake, eng, a = C102Tests.rig(self)
+        E = eng.election
+        E.close[E.race(a)] = E.first[E.race(a)] = time.time() - 60
+        eng.el_quote(a, 0.985, 0.99, time.time())
+        self.assertEqual(eng.el_lane_once(), 1, "shadow: the lane writes the would-be order")
+        self.assertEqual(len(E.lane_lat), 1); self.assertLess(E.lane_lat[0], 1.0)
+        self.assertIn("call lane (quote -> order handed over)", eng.el_hour_line())
 
 
 if __name__ == "__main__":

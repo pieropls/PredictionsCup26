@@ -83,6 +83,7 @@ class Election:
         self.settle_t = {}                                  # ex -> last settlement order t (one order per book per TTL)
         self.last_quote_t = None
         self._placing = None
+        self.lane_lat = []
         self.post_bids = {}                                 # C8: none (kept for the old reports)
         waves = sorted(set(v for v in self.close.values() if v is not None))
         self.waves = waves
@@ -227,10 +228,13 @@ class Election:
         with self.lock:
             n = 0
             for ex in list(self.queue):
-                self.queue.pop(ex, None)
+                qt = self.queue.pop(ex, None)
                 c = self.calls.get(ex)
                 if c and not c.get("reversed") and self._snipe(ex, c, now, free_cash, pos):
                     n += 1
+                    if qt is not None:
+                        self.lane_lat.append(self.clock() - qt)   # C106: the PM quote that queued the call -> the order handed to the executor
+                        self.lane_lat = self.lane_lat[-500:]
             return n
 
     # ---------------------------------------------------------------------------------------- C2-C5 the call sniper

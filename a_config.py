@@ -543,6 +543,9 @@ SELL_KEEP_LAYERS = ("release", "rotexit")   # item 3: every sell rule (fund, car
 ELECTION = dict(on=True, shadow_from="2026-10-22 06:00:00", election_day="2026-11-03", precall_dry=True, drift_shadow=True,
                 drift_gap=0.03, drift_exit_gap=0.01, drift_ttl_s=120, drift_cap_mult=2.0, drift_every_s=1800, drift_clip=2_000,
                 recycle_bid=0.98, recycle_target=20_000.0)   # item 8 (C7): a strict-called winner sells into bids >= max(0.98, lot avg + 0.5c) while usable < 20k
+# C106 (Piero 02:50 Oct 22 item 1): more FMM room until Oct 28 23:59 (then the cash calendar steps FMM down as approved); clips scale with the caps
+FMM_ROOM = dict(on=True, until="2026-10-28 23:59:59", race_cap=8_000.0, cf_race_cap=4_000.0, inv_cap=40_000.0, min_clip=800, cf_clip=667)
+CARRY_FIRST = {"1077": ("no", 0.845)}   # item 1: the unused free cash goes to carry bids, Rhode Island Senate R NO (<= 0.845) first, then the all-NO sets
 # C103 (docs/cash_calendar.md §3 + Piero's §5 decisions of 15:55 Oct 17, moved by Piero 15:15 Oct 21 item C: the ramp starts Oct 28)
 ELECTION_RESERVE = dict(on=True, steps=(("2026-10-28 00:00:00", 20_000.0), ("2026-10-31 00:00:00", 30_000.0), ("2026-11-01 00:00:00", 40_000.0),
                                         ("2026-11-02 00:00:00", 50_000.0), ("2026-11-03 00:00:00", 60_000.0)),

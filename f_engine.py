@@ -74,7 +74,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, CASH_FLOOR_RESUME, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
-                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM, SELL_HOLD, SELL_KEEP_LAYERS, CARRY_BIDSELL, SELL_EV_MAX, FMM_CF, ENGINE_ERR_EXTERNAL, ENGINE_ERR_RESUME_S, ELECTION, ELECTION_RESERVE, WIND_DOWN,
+                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM, SELL_HOLD, SELL_KEEP_LAYERS, CARRY_BIDSELL, SELL_EV_MAX, FMM_CF, ENGINE_ERR_EXTERNAL, ENGINE_ERR_RESUME_S, ELECTION, ELECTION_RESERVE, WIND_DOWN, FMM_ROOM, CARRY_FIRST,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -436,7 +436,8 @@ class Engine:
         self.el_logq, self.el_shadowq, self.el_hour = collections.deque(maxlen=5000), collections.deque(maxlen=20000), collections.Counter()
         self.drift_now, self.drift_view, self.drift_logged = {}, {}, {}
         self.callexit_now, self.callexit_logged = {}, set()
-        self.el_sent, self.el_fill_seen = {}, set()   # C100: per sell order, since when the others' best ask sits below ours; the FMM hour; churn window
+        self.el_sent, self.el_fill_seen = {}, set()
+        self.fmm_refill_wait, self.fmm_lat_plan = {}, []   # C100: per sell order, since when the others' best ask sits below ours; the FMM hour; churn window
         self.gap_paper = dict(asks={}, realized=0.0, fills=0, done=0)                                 # C99c: the gap-median exit on paper
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
         self.tm_cap_logged, self.tm_unfunded, self.dump_cut_rows, self.rotation_log, self.rotation_logged, self.rotation_on = None, [], [], [], {}, False   # Piero 22:15 Oct 7 (C82) / 06:35 Oct 8 (C84b): the rotation
@@ -4581,10 +4582,17 @@ class Engine:
 
     def fmm_inv_cap(self):
         cap = float(self.fmm_state().get("inv_cap") or FMM["inv_cap_live"])
+        if self.fmm_room_on():
+            cap = max(cap, float(FMM_ROOM["inv_cap"]))       # C106: 40k until Oct 28 23:59
         return min(cap, self.wd_fmm_cap(time.time()))      # C103: the cash calendar's FMM wind-down (15k Oct 29, 5k Oct 31)
 
+    def fmm_room_on(self, now=None):
+        """C106: the larger FMM caps until Oct 28 23:59."""
+        return bool(FMM_ROOM.get("on") and time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now or time.time())) <= FMM_ROOM["until"])
+
     def fmm_race_cap(self, race):
-        return float((FMM.get("race_caps") or {}).get(race, FMM["race_cap"]))
+        base = float(FMM_ROOM["race_cap"]) if self.fmm_room_on() else float(FMM["race_cap"])   # C106: 5k -> 8k a race (RI Senate stays 15k)
+        return float((FMM.get("race_caps") or {}).get(race, base))
 
     def fmm_reserve_release(self):
         """Piero 18:30 item 4: once FMM runs (paper simulates it), his reserve counts as 2,000 for FMM only — the other 8,000 goes to FMM, not
@@ -4600,6 +4608,21 @@ class Engine:
         t0 = self.pnl_read_t
         self.fmm_unread = [(t, n) for t, n in self.fmm_unread if t >= t0]
         return self.engine_bid_room() + self.fmm_reserve_release() - sum(n for _, n in self.fmm_unread)
+
+    def fmm_refill_measure(self):
+        """C106 (Piero 02:50 Oct 22 item 2): the refill latency = the sweep's receipt on the feed -> the refill order placed (the ledger's
+        placement time), plus the planning part (sweep -> planned)."""
+        if not self.fmm_refill_wait:
+            return
+        recent = list(itertools.islice(reversed(self.ledger.orders.values()), 60))
+        for ex, (recv, planned) in list(self.fmm_refill_wait.items()):
+            o = next((r for r in recent if r.get("layer") == "fmmtake" and str(r.get("ex")) == str(ex) and float(r.get("ts") or 0) >= planned - 1), None)
+            if o is not None:
+                self.fmm_lat.append(float(o["ts"]) - recv); self.fmm_lat = self.fmm_lat[-500:]
+                self.fmm_lat_plan.append(planned - recv); self.fmm_lat_plan = self.fmm_lat_plan[-500:]
+                self.fmm_refill_wait.pop(ex, None)
+            elif time.time() - planned > 60:
+                self.fmm_refill_wait.pop(ex, None)
 
     def fmm_ring(self, now):
         hm = time.strftime("%H:%M", time.localtime(now))
@@ -4747,7 +4770,9 @@ class Engine:
                 if sf_ is not None and lo_cf - 1e-9 <= sf_ <= hi_cf + 1e-9:
                     inv_cf[self.rot_race(ex)] += q * avg
         inv_tot = sum(inv.values())
-        rcf = float(FMM_CF["race_cap"])
+        rcf = float(FMM_ROOM["cf_race_cap"]) if self.fmm_room_on(now) else float(FMM_CF["race_cap"])   # C106: 3k -> 4k a coin-flip race
+        mclip = float(FMM_ROOM["min_clip"]) if self.fmm_room_on(now) else float(FMM["min_clip"])      # C106: clips scale with the caps
+        cfclip = float(FMM_ROOM["cf_clip"]) if self.fmm_room_on(now) else float(FMM_CF["clip"])
         # C101 item B: what FMM can still deploy under its caps (its claim on free cash is min(15k, this))
         self.fmm_deploy = max(0.0, min(cap - inv_tot, sum(max(0.0, (rcap(r) if any((l[0], l[1]) not in cf for l in legs) else min(rcap(r), rcf - inv_cf[r] + inv[r])) - inv[r])
                                                             for r, legs in books.items())))
@@ -4852,17 +4877,17 @@ class Engine:
                 if q >= MIN_QTY:
                     out.append((race, ex, side, round(min(fs - edge, w["ask"]), 3), q, "fmmtake", f"fmm:{ex}:{side}:{round(min(fs - edge, w['ask']), 3):.3f}"))
                     rest_tot += q * w["ask"]; rest_race[race] += q * w["ask"]; room -= q * w["ask"]
-                    self.fmm_lat.append(now - sw["t"]); self.fmm_lat = self.fmm_lat[-500:]
+                    self.fmm_refill_wait[ex] = (float(sw["t"]), time.time())   # C106: measured to the order placed (was: to the loop's start, < 0 mid-loop)
                     msg = f"FMM REFILL {self.name(ex)} {side.upper()}: take {q:,} at <= {min(fs - edge, w['ask']):.3f} (fair {fs:.3f}) {now - sw['t']:.1f} s after the sweep ({'paper' if paper else 'live'})"
                     self.event("FMM", msg); self.night.line(msg)
             if not allow_new:
                 continue
-            clip = max(float(FMM["min_clip"]), budget / 4 / px)
-            if w["k"] == 0 and breadth is not None and breadth < float(FMM["min_clip"]):
+            clip = max(mclip, budget / 4 / px)
+            if w["k"] == 0 and breadth is not None and breadth < mclip:
                 clip = max(float(FMM["min_new"]), breadth)      # C104: breadth first
             lim = [clip, room / px]
             if w.get("cf"):
-                lim += [float(FMM_CF["clip"]), (rcf - inv_cf[race] - rest_cf[race]) / px]   # C101: <= 500 a clip, 3k at cost a race
+                lim += [cfclip, (rcf - inv_cf[race] - rest_cf[race]) / px]   # C101 / C106: the coin-flip clip and race cap
             if w["k"] > 0:
                 lim.append((budget - rest_race[race]) / px)  # the touch is every eligible book's floor; deeper levels within the race budget
             q = int(min(lim))
@@ -4887,6 +4912,7 @@ class Engine:
         if self.wd_after("fmm_no_bids", now):
             return {}                                        # C103: no new FMM bids from Nov 1 12:00 (exits only)
         tg = self.fmm_targets(now, paper=(mode == "paper"))
+        self.fmm_refill_measure()
         if mode == "paper":
             self.fmm_paper_place(now, tg)
             return {}
@@ -5447,7 +5473,9 @@ class Engine:
         cov = (f"coverage {cv.get('quoted', 0)} of {cv.get('eligible', 0)} books quoted (coin flips {cv.get('cf_quoted', 0)} of {cv.get('cf_eligible', 0)}), "
                f"resting {cv.get('rest', 0):,} of K {cv.get('K', self.fmm_k()):g} x free {cv.get('allow', 0):,} (free {cv.get('free', 0):,}; deployable under the caps {cv.get('deploy', 0):,}, "
                f"claim {self.fmm_claim_first(cv.get('free', 0)):,.0f})")
-        latx = f"refill latency p50 {'n/a' if p50 is None else f'{p50:.1f} s'} p90 {'n/a' if p90 is None else f'{p90:.1f} s'}"
+        lp = sorted(getattr(self, "fmm_lat_plan", []) or [])
+        latx = (f"refill latency (sweep received -> refill order placed, n {len(lat)}) p50 {'n/a' if p50 is None else f'{p50:.1f} s'} p90 {'n/a' if p90 is None else f'{p90:.1f} s'}"
+                + (f", of which sweep -> planned p50 {lp[len(lp) // 2]:.1f} s" if lp else ""))
         if mode == "paper":
             P = self.fmm_paper
             n = len(P["orders"]); notional = sum((o["qty"] - o["filled"]) * k[2] for k, o in P["orders"].items())
@@ -10412,13 +10440,15 @@ class Engine:
             if bid is None or fs is None:
                 continue
             px = bots.tick_down(min(bid, fs - CARRY["below_fair"]))
+            if CARRY_FIRST.get(str(ex), (None,))[0] == side:
+                px = bots.tick_down(min(px, float(CARRY_FIRST[str(ex)][1])))   # C106: RI Senate R NO at <= 0.845
             if px < 0.01:
                 continue
             ev = fs / px - 1
             if ev < CARRY["buy_ev"] - 1e-9:
                 continue
             out.append(dict(ex=ex, side=side, px=px, fs=fs, ev=ev, race=self.rot_race(ex)))
-        return sorted(out, key=lambda c: -c["ev"])
+        return sorted(out, key=lambda c: (CARRY_FIRST.get(str(c["ex"]), (None,))[0] != c["side"], -c["ev"]))   # C106: RI Senate R NO first
 
     def carry_refresh(self, now, cands):
         """Every 30 min: the carry lots to sell — EV/$ held <= 6.5% (at max(lot avg + 0.5c, best ask): rule 0 holds), and, when cash is
@@ -10795,8 +10825,8 @@ class Engine:
         snap = self.el_snap
         if E.on_pm(str(ex), (b + a) / 2, now, snap["cash"], snap["pos"], pm_bid=b, pm_ask=a, defer=True) == "queued":
             lane = getattr(self, "el_lane_ev", None)
-            if lane is not None and self.el_mode_cached == "live":
-                lane.set()                                  # C104 item 7: the call lane sends the snipe now
+            if lane is not None:
+                lane.set()                                  # C104 item 7: the call lane sends the snipe now (C106: shadow too)
             self.rt_event("call", {str(ex)}, now)
 
     def el_inject_start(self, now, inj):
@@ -10821,8 +10851,8 @@ class Engine:
             _, b, a = P[inj["i"]]
             inj["i"] += 1
             self.el_quote(inj["ex"], b, a, now)
-            if E.queue:
-                E.run_queue(now, self.el_snap["cash"], self.el_snap["pos"])
+            if E.queue and getattr(self, "el_lane_ev", None) is None:
+                E.run_queue(now, self.el_snap["cash"], self.el_snap["pos"])   # no lane thread (tests): from the loop
         if inj["i"] >= len(P) and now - (inj["t0"] + P[-1][0]) >= el.TTL_S:
             race = inj["race"]
             E.close[race], E.first[race] = inj["orig"]
@@ -10838,8 +10868,8 @@ class Engine:
         """C104 (night item 7, latency.md §3): one pass of the call lane — the queued snipes go out from here, off the loop, through the
         executor (its locks; the last 5 writes are the lane's while the election is live). -> orders placed."""
         E = self.election
-        if E is None or self.el_mode_cached != "live" or self.controls.paused or not E.queue:
-            return 0
+        if E is None or self.el_mode_cached == "off" or self.controls.paused or not E.queue:
+            return 0                                         # C106: in shadow too (it only writes would-be orders there): the lane's latency is measured
         snap = self.el_snap
         return E.run_queue(time.time(), snap["cash"], snap["pos"])
 
@@ -11089,7 +11119,8 @@ class Engine:
         h, E = self.el_hour, self.election
         line = (f"ELECTION ({self.el_mode_cached}) last hour: PRECALL {h['PRECALL']}, calls {h['CALL']}, no-calls {h['NOCALL']}, reversals {h['REVERSAL']}, "
                 f"would-be orders {h['would_orders']} + drift {h['drift_would']}, orders sent {h['orders']}, pulls {h['POLLS']}; books armed {len((E.meta if E else {}))}, calls held "
-                f"{sum(1 for c in (E.calls.values() if E else []) if not c.get('reversed'))}, races stopped {len(E.race_stop) if E else 0}, kill {'ON' if E and E.stopped else 'off'}")
+                f"{sum(1 for c in (E.calls.values() if E else []) if not c.get('reversed'))}, races stopped {len(E.race_stop) if E else 0}, kill {'ON' if E and E.stopped else 'off'}"
+                + (lambda L: f"; call lane (quote -> order handed over) n {len(L)} p50 {L[len(L) // 2] * 1000:.0f} ms p95 {L[min(len(L) - 1, int(0.95 * len(L)))] * 1000:.0f} ms" if L else "")(sorted(E.lane_lat if E else [])))
         self.el_hour.clear()
         return line
 
@@ -11127,7 +11158,9 @@ class Engine:
             fs = self.side_fair(str(ex), side)
             avg = float(((self.book.get(str(ex)) or {}).get("row") or {}).get("avgCost") or 0)
             tag = "R ticket" if self.party_dir(str(ex), side) == "R" else "D ticket" if self.party_dir(str(ex), side) == "D" else "ticket"
-            note = "" if abs(abs(pos) - abs(m)) < 1 else f" (manual sub-book {m:+,.0f}: off SIG's {pos:+,.0f})"
+            eng_ = sum(float(v) for k, v in books.items() if k != "manual")   # C106: the engine's own sub-books here (Oregon Oct 21: an FMM lot of 63)
+            note = ("" if abs(abs(pos) - abs(m)) < 1 else f" (manual {m:+,.0f} + engine sub-books {eng_:+,.0f} = SIG {pos:+,.0f})" if abs(m + eng_ - pos) < 1
+                    else f" (manual sub-book {m:+,.0f} + engine {eng_:+,.0f}: off SIG's {pos:+,.0f})")
             rows.append(f"{self.name(ex)} {side.upper()} SIG {abs(pos):,.0f} @ {avg:.3f} = {abs(pos) * avg:,.0f} at cost, fair {fs if fs is None else round(fs, 3)} [{tag}]{note}")
         return "MANUAL (Piero's tickets): " + ("; ".join(rows) if rows else "none")
 
