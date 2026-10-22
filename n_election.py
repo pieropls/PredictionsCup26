@@ -262,7 +262,7 @@ class Election:
         side = c["side"]
         if (pos.get(ex, 0) < 0) if side == "yes" else (pos.get(ex, 0) > 0):
             k = ("held_other", ex)
-            if k not in self.precall_t:
+            if not dry and k not in self.precall_t:         # (a PRECALL dry snipe says nothing: 06:37 Oct 22 it read like a real one)
                 self.precall_t[k] = now
                 self._log("SNIPE", f"{self.race(ex)}: we hold the other side of this book: no {layer} here (the executor's I2 trim would cut it and pause; "
                                    f"a strict call sells our lot by RULE0-CALLED; the race's other book can still be bought)", now)
