@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 from datetime import datetime, timedelta
 
@@ -437,6 +438,7 @@ class Engine:
         self.drift_now, self.drift_view, self.drift_logged = {}, {}, {}
         self.callexit_now, self.callexit_logged = {}, set()
         self.el_sent, self.el_fill_seen = {}, set()
+        self.el_taken = {}
         self.fmm_refill_wait, self.fmm_lat_plan = {}, []   # C100: per sell order, since when the others' best ask sits below ours; the FMM hour; churn window
         self.gap_paper = dict(asks={}, realized=0.0, fills=0, done=0)                                 # C99c: the gap-median exit on paper
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
@@ -1502,6 +1504,8 @@ class Engine:
                 self.pm_feed.on_quote = self.el_quote           # C102: every PM quote -> the call detector (feed thread, detection only)
                 self.el_lane_ev = threading.Event()             # C104 item 7: the call lane (live engine only)
                 threading.Thread(target=self.el_lane_loop, name="call-lane", daemon=True).start()
+                self.el_inj_thread = threading.Thread(target=self.el_inject_loop, name="rehearsal-injector", daemon=True)   # C112
+                self.el_inj_thread.start()
                 self.pm_feed.start()
         except Exception as e:
             self.event("ERR", f"Polymarket realtime not started: {e!r}")
@@ -10780,14 +10784,25 @@ class Engine:
         fb = self.feed_book(str(ex))
         if fb is None:
             return None
-        return list(fb[1]) if side == "yes" else [(round(1 - p, 3), q) for p, q in fb[0]]
+        lv = list(fb[1]) if side == "yes" else [(round(1 - p, 3), q) for p, q in fb[0]]
+        if self.el_mode_cached != "live":                    # C112: shadow buys nothing, so the depth its would-be orders took stays on the book;
+            now = time.time()                                # it is taken off for 120 s (cheapest first), as a live order would have taken it
+            tk = self.el_taken[(str(ex), side)] = [(t, q) for t, q in self.el_taken.get((str(ex), side), []) if now - t <= el.TTL_S]
+            left = sum(q for _, q in tk)
+            out = []
+            for p_, q_ in sorted(lv):
+                use = min(q_, left); left -= use
+                if q_ - use > 0:
+                    out.append((p_, q_ - use))
+            lv = out
+        return lv
 
     def el_log(self, kind, text):
         self.el_logq.append((kind, text))                    # the feed thread logs here; the loop writes (no file I/O off the loop)
 
     def el_inj_races(self):
         E = self.election
-        return {j["race"] for j in (getattr(self, "el_injs", None) or [])} if E else set()
+        return {j["race"] for j in (getattr(self, "el_injs", None) or []) if j.get("started")} if E else set()   # C112: started ones only
 
     def el_place_dry(self, items, layer, ttl, why):
         self.el_shadowq.append(dict(t=stamp(), kind="order", why=why, layer=layer, ttl=ttl, items=[list(i) for i in items], mode="shadow",
@@ -10801,7 +10816,12 @@ class Engine:
             self.el_shadowq.append(dict(t=stamp(), ts=round(time.time(), 3), kind="order", why="call", layer=layer, ttl=ttl, items=[list(i) for i in items], mode=mode,
                                         injected=any(self.election.race(str(i[0])) in self.el_inj_races() for i in items)))
             self.el_hour["would_orders"] += 1
-            return "shadow"
+            for ex_, side_, _, _, q_ in items:
+                self.el_taken.setdefault((str(ex_), side_), []).append((time.time(), float(q_)))
+            key = f"shadow-{uuid.uuid4().hex[:12]}"           # C112: a key per would-be order, answered at once as accepted (one shared key expired every 60 s
+            if self.election is not None:                    # and the book was re-sniped about once a minute)
+                self.election.confirm(key, [("shadow", tuple(items[0]), True, {"orderId": "shadow"})])
+            return key
         if self.controls.paused:
             return None
         out = [(self.owner[ex].name, f"{layer}:{ex}:{side}", layer, (ex, side, action, round(px, 3), int(q))) for ex, side, action, px, q in items if ex in self.owner]
@@ -10849,7 +10869,7 @@ class Engine:
         injs = self.el_injs = getattr(self, "el_injs", [])
         orig = next((j["orig"] for j in injs if j["race"] == race), None) or (E.close.get(race), E.first.get(race))
         j = dict(ex=ex, race=race, t0=t0, path=sorted(inj["path"]), i=0, orig=orig, tag=tag or inj.get("tag"), close_now=inj.get("close_now", True),
-                 close_at=inj.get("close_at"), closed=False)
+                 close_at=inj.get("close_at"), closed=False, started=False)
         injs.append(j)
         self.el_inj = j
         self.el_log("INJECT", f"{race}: {len(j['path'])} synthetic PM quotes into {self.name(ex)} over {j['path'][-1][0]:.0f} s from "
@@ -10861,20 +10881,16 @@ class Engine:
         if not injs:
             return
         E = self.election
+        threaded = getattr(self, "el_inj_thread", None) is not None
         for j in list(injs):
             if now < j["t0"]:
                 continue
-            if not j["closed"] and j["close_now"] and now >= j["t0"] + float(j.get("close_at") or 0):
-                E.close[j["race"]] = E.first[j["race"]] = time.time() - (60 if not j.get("close_at") else 0)   # the quotes' own clock
-                j["closed"] = True
-            P = j["path"]
-            while j["i"] < len(P) and j["t0"] + P[j["i"]][0] <= now:
-                _, b, a = P[j["i"]]
-                j["i"] += 1
-                self.el_inj = j
-                self.el_quote(j["ex"], b, a, time.time(), injected=True)   # C108: the quote's own time
+            self.el_inject_begin(j)
+            if not threaded:                                # tests (no realtime threads): quotes fed from the loop
+                self.el_inject_feed(j, now)
                 if E.queue and getattr(self, "el_lane_ev", None) is None:
-                    E.run_queue(now, self.el_snap["cash"], self.el_snap["pos"])   # no lane thread (tests): from the loop
+                    E.run_queue(now, self.el_snap["cash"], self.el_snap["pos"])
+            P = j["path"]
             if j["i"] >= len(P) and now - (j["t0"] + P[-1][0]) >= el.TTL_S:
                 injs.remove(j)
                 if any(k["race"] == j["race"] for k in injs):
@@ -10884,10 +10900,51 @@ class Engine:
                 for e in [e for e in list(E.calls) if E.race(e) == race]:
                     E.calls.pop(e, None)
                 E.race_stop.discard(race); E.pulled.discard(race)
-                for k in [k for k in E.run0 if E.race(k[0]) == race]:
+                for k in [k for k in list(E.run0) if E.race(k[0]) == race]:
                     E.run0.pop(k, None)
                 self.el_log("INJECT", f"{race}: synthetic path done; the race's real poll close restored and its synthetic call cleared" + (f" [{j['tag']}]" if j["tag"] else ""))
         self.el_inj = injs[-1] if injs else None
+
+    def el_inject_begin(self, j):
+        """C112 (the rehearsal agent's findings): at an injection's start its race's FIRST close is set to the synthetic close (so the poll-close
+        pulls fire 10 min before it, as on the night) and the book's 0.95 runs restart (a run begun on real quotes must not carry in)."""
+        if j["started"]:
+            return
+        E = self.election
+        j["started"] = True
+        if j["close_now"]:
+            E.first[j["race"]] = j["t0"] + float(j.get("close_at") or 0) - (0 if j.get("close_at") else 60)
+        for side in ("yes", "no"):
+            E.run0.pop((j["ex"], side), None)
+
+    def el_inject_feed(self, j, now):
+        """Feed the due synthetic quotes of one injection (and set its LAST close when due), each at its own time."""
+        E = self.election
+        if not j["closed"] and j["close_now"] and now >= j["t0"] + float(j.get("close_at") or 0):
+            E.close[j["race"]] = time.time() - (60 if not j.get("close_at") else 0)   # the quotes' own clock
+            j["closed"] = True
+        P = j["path"]
+        while j["i"] < len(P) and j["t0"] + P[j["i"]][0] <= now:
+            _, b, a = P[j["i"]]
+            j["i"] += 1
+            self.el_quote(j["ex"], b, a, time.time(), injected=True)
+
+    def el_inject_loop(self):
+        """C112: the rehearsal's own thread — every synthetic quote reaches the detector at its own time (the loop fed them 0-20 s late), as
+        real quotes do from the feed thread; the loop keeps the starts / restores."""
+        while True:
+            try:
+                injs = list(getattr(self, "el_injs", None) or [])
+                now = time.time()
+                for j in injs:
+                    if now >= j["t0"]:
+                        self.el_inject_begin(j)
+                        self.el_inject_feed(j, now)
+                due = [j["t0"] + j["path"][j["i"]][0] for j in injs if j["i"] < len(j["path"])]
+                time.sleep(max(0.05, min([1.0] + [d - time.time() for d in due])))
+            except Exception as err:
+                self.el_log("INJECT", f"injector thread error: {err!r}")
+                time.sleep(1.0)
 
     def el_rehearsal_load(self, req):
         """C111: a plan file {"injections": [{ex, path [[s, bid, ask], ...], at (s after start), close_at (s after its own start), tag}]}."""
@@ -11235,7 +11292,7 @@ class Engine:
         h, E = self.el_hour, self.election
         line = (f"ELECTION ({self.el_mode_cached}) last hour: PRECALL {h['PRECALL']}, calls {h['CALL']}, no-calls {h['NOCALL']}, reversals {h['REVERSAL']}, "
                 f"would-be orders {h['would_orders']} + drift {h['drift_would']}, orders sent {h['orders']}, pulls {h['POLLS']}; books armed {len((E.meta if E else {}))}, calls held "
-                f"{sum(1 for c in (E.calls.values() if E else []) if not c.get('reversed'))}, races stopped {len(E.race_stop) if E else 0}, kill {'ON' if E and E.stopped else 'off'}"
+                f"{sum(1 for c in (list(E.calls.values()) if E else []) if not c.get('reversed'))}, races stopped {len(E.race_stop) if E else 0}, kill {'ON' if E and E.stopped else 'off'}"
                 + (lambda L: f"; call lane (quote -> order handed over) n {len(L)} p50 {L[len(L) // 2] * 1000:.0f} ms p95 {L[min(len(L) - 1, int(0.95 * len(L)))] * 1000:.0f} ms" if L else "")(sorted(E.lane_lat if E else [])))
         self.el_hour.clear()
         return line
@@ -13104,7 +13161,8 @@ def main():
             try:
                 eng.step()
             except Exception as e:
-                eng.event("ERR", repr(e))
+                fr = traceback.extract_tb(e.__traceback__)[-1] if e.__traceback__ else None   # C112: where (the recurring dict race has no location)
+                eng.event("ERR", repr(e) + (f" at {os.path.basename(fr.filename)}:{fr.lineno} {fr.name}" if fr else ""))
                 eng.pos_fail = eng.pos_fail + 1 if "position" in repr(e).lower() else eng.pos_fail
                 if eng.pos_fail >= 2:                       # Piero's unattended rule: the positions read failing -> stop and pull
                     eng.stop_and_pull(f"positions read failed {eng.pos_fail} loops in a row ({repr(e)[:80]})")

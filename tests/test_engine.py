@@ -118,7 +118,8 @@ sys.modules["c_polymarket"] = pmf
 
 import d_ledger  # noqa: E402
 import e_bots as bots  # noqa: E402
-import f_engine  # noqa: E402
+import f_engine
+import n_election as el_mod  # noqa: E402
 import j_executor as jx  # noqa: E402
 import l_intel  # noqa: E402
 
@@ -7220,6 +7221,30 @@ class C111Tests(EngineCase):
         eng.el_step(now + 102 + 125)
         self.assertEqual(eng.el_injs, []); self.assertIsNone(E.called(a)); self.assertIsNone(E.called(b))
         self.assertGreater(E.close["Utah Governor"], now + 80_000, "the real poll close is back")
+
+    def test_c112_injection_sets_the_first_close_at_start_restarts_runs_and_shadow_keys_do_not_resnipe(self):
+        fake, eng, a = C102Tests.rig(self)
+        E = eng.election
+        race = E.race(a)
+        now = time.time()
+        E.run0[(a, "yes")] = now - 300                          # a 0.95 run begun on real quotes
+        eng.el_inject_start(now, dict(ex=a, path=[[0, 0.90, 0.92], [300, 0.985, 0.99]], close_at=290), t0=now)
+        self.assertIsNone(E.called(a))
+        eng.el_step(now + 1)
+        self.assertNotIn((a, "yes"), E.run0, "the real run does not carry into the synthetic path")
+        self.assertAlmostEqual(E.first[race], now + 290, delta=1, msg="the synthetic FIRST close is set at the start: the pulls fire 10 min before it")
+        self.assertGreater(E.close[race], now + 3600, "the LAST close only at close_at (PRECALLs before it)")
+        self.assertEqual(eng.el_inj_races(), {race})
+        eng.el_inject_start(now, dict(ex=[x for x in E.meta if x != a][0] if len(E.meta) > 1 else a, path=[[0, 0.5, 0.52]]), t0=now + 9999)
+        self.assertEqual(eng.el_inj_races(), {race}, "a scheduled, not yet started injection is not tagged")
+        eng.el_injs = []; E.close[race] = E.first[race] = time.time() - 60
+        n0 = len([r for r in C102Tests.lines(self, "shadow.jsonl") if r.get("why") == "call"])
+        eng.el_quote(a, 0.985, 0.99, time.time()); eng.el_step(time.time())
+        n1 = len([r for r in C102Tests.lines(self, "shadow.jsonl") if r.get("why") == "call"])
+        self.assertEqual(n1, n0 + 1)
+        E.expire(time.time() + el_mod.PENDING_S + 1)
+        eng.el_quote(a, 0.985, 0.99, time.time()); eng.el_step(time.time())
+        self.assertEqual(len([r for r in C102Tests.lines(self, "shadow.jsonl") if r.get("why") == "call"]), n1, "accepted at once: no re-snipe after 60 s")
 
     def test_the_probe_sends_one_genuine_minimum_size_bid_and_times_sigs_answer(self):
         fake, eng, a = C102Tests.rig(self)
