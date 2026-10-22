@@ -82,6 +82,7 @@ class Election:
         self.pending = {}                                   # order key -> dict(ex, qty, cost, t): sent to the executor, not yet answered
         self.settle_t = {}                                  # ex -> last settlement order t (one order per book per TTL)
         self.last_quote_t = None
+        self._placing = None
         self.post_bids = {}                                 # C8: none (kept for the old reports)
         waves = sorted(set(v for v in self.close.values() if v is not None))
         self.waves = waves
@@ -282,7 +283,11 @@ class Election:
         items = [(ex, side, "buy", round(limit, 3), qty)]
         if dry:
             return self.place_dry(items, layer, TTL_S, "precall") if self.place_dry else None
-        key = self.place(items, layer, TTL_S)
+        self._placing = dict(done=None)                     # the executor may answer inside place() (it sends at once): confirm() lands here
+        try:
+            key = self.place(items, layer, TTL_S)
+        finally:
+            pl, self._placing = self._placing, None
         if key is None:
             c["fails"] += 1
             if c["fails"] >= WRITES_FAIL_STOP:
@@ -296,6 +301,10 @@ class Election:
         self.pending[key] = dict(ex=ex, qty=qty, cost=qty * limit, t=now)
         c["bought"] += qty
         c["cost"] += qty * limit
+        if pl and pl.get("done") is not None:               # answered already (sim: the answer came before the record, and 60 s later the budget was re-spent)
+            if pl["done"] > 0:
+                self._release(key, pl["done"])
+            self.pending.pop(key, None)
         held_other = (pos.get(ex, 0) < 0) if side == "yes" else (pos.get(ex, 0) > 0)
         self._log("SNIPE" if layer == "callsnipe" else "SETTLE", f"{race}: buy {side.upper()} {qty:,} at <= {limit:.3f}" + (f" (PM bid {sb:.3f}" if sb is not None else " (")
                   + f"; {avail:,.0f} on the book under the cap)" + ("; we held the losing side: the buy nets it out first" if held_other else ""), now)
@@ -320,6 +329,9 @@ class Election:
         keeps it (until it fills or its 120 s run out)."""
         with self.lock:
             p = self.pending.get(key)
+            if not p and getattr(self, "_placing", None) is not None and self._placing.get("done") is None and part:
+                self._placing["done"] = sum(1 for _, _, ok, data in part if not ok or (data or {}).get("orderId") is None) / len(part)
+                return                                      # the order being placed right now: _buy applies it
             if not p or not part:
                 return
             bad = sum(1 for _, _, ok, data in part if not ok or (data or {}).get("orderId") is None)

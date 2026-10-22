@@ -93,7 +93,10 @@ class Rig:
             return None
         out = [(f"MKT {self.W.meta[ex]['race']} {self.W.meta[ex]['party']}", f"{layer}:{ex}:{side}", layer,
                 (ex, side, action, round(px, 3), int(q))) for ex, side, action, px, q in items if ex in self.W.legs]
-        key = self.ex.place(out, ttl_s=ttl) if out else None
+        box = {}
+        conf = getattr(self.E, "confirm", None)
+        key = (self.ex.place(out, ttl_s=ttl, on_done=(lambda part: conf(box.get("k"), part)) if conf else None) if out else None)   # as f_engine.el_place
+        box["k"] = key
         if key:
             for ex, side, action, px, q in items:
                 self.placed.append((self.qtimes.get(ex, self.trigger), self.clock.time(), ex, side, layer, round(px, 3), int(q)))
@@ -124,6 +127,8 @@ class Rig:
         netted = min(q, max(0.0, -sign * before))
         self.cash += -q * p + netted
         self.fills.append((self.clock.time(), oid, ex, side, action, q, p, None, how))     # the layer is resolved after the run
+        if action == "buy" and hasattr(self.E, "on_fill"):
+            self.E.on_fill(ex, q, p)                           # as f_engine.el_fill_events: a fill's cash hold goes
 
     def xlog(self, s):
         s = s.strip()

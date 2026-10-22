@@ -200,6 +200,30 @@ class SimFixTests(unittest.TestCase):
         self.assertAlmostEqual(sum(e[1] for e in r3.E.committed), held - 950.0, places=3, msg="the fill's cash is in the next cash read")
         self.assertGreater(r3.E.calls["1"]["bought"], 0, "an accepted order keeps its budget")
 
+    def test_an_answer_that_comes_inside_place_still_counts(self):
+        r = Rig(levels={"yes": [(0.95, 100_000)]})
+        E = r.E
+        def place_now(items, layer, ttl):                     # the engine's el_place: the executor sends and answers before place() returns
+            r.placed.append((items, layer, ttl))
+            E.confirm("kX", [("bot", items[0], True, {"orderId": 9})])
+            return "kX"
+        E.place = place_now
+        r.pm("1", 0.98, 0.99, 10_100.0, cash=50_000)
+        q = E.calls["1"]["bought"]
+        self.assertGreater(q, 0); self.assertNotIn("kX", E.pending, "answered: nothing left pending")
+        E.expire(10_100.0 + el.PENDING_S + 1)
+        self.assertEqual(E.calls["1"]["bought"], q, "an accepted order keeps its budget after 60 s")
+        def place_rej(items, layer, ttl):
+            E.confirm("kY", [("bot", items[0], False, {"error": "x"})])
+            return "kY"
+        r2 = Rig(levels={"yes": [(0.95, 100_000)]}); r2.E.place = place_rej
+        E2 = r2.E
+        def pr(items, layer, ttl):
+            E2.confirm("kY", [("bot", items[0], False, {"error": "x"})]); return "kY"
+        E2.place = pr
+        r2.pm("1", 0.98, 0.99, 10_100.0, cash=50_000)
+        self.assertEqual(E2.calls["1"]["bought"], 0.0, "rejected inside place(): released at once")
+
     def test_settlement_walks_the_book_once_per_120_s_inside_the_caps(self):
         r = Rig(levels={"yes": [(0.97, 3_000), (0.98, 30_000), (0.995, 50_000)]})
         r.pm("1", 0.98, 0.99, 10_100.0, cash=500_000)
