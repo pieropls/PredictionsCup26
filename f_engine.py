@@ -11079,7 +11079,10 @@ class Engine:
             if not ok or (shadow and now - self.drift_logged.get(ex, -1e18) < float(ELECTION["drift_every_s"])):
                 continue
             race = self.rot_race(ex)
+            pos_ = float((self.book.get(ex) or {}).get("pos") or 0)
             for side in ("yes", "no"):
+                if (side == "yes" and pos_ <= -1) or (side == "no" and pos_ >= 1):
+                    continue                                # C107: never a take that nets our own other-side lot (the I2 trim would cut it and pause)
                 bid, ask, fs = self.rot_touch(ex, side)
                 if ask is None or fs is None or ask > fs - gap + 1e-9:
                     continue

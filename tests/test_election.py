@@ -131,6 +131,13 @@ class SniperTests(unittest.TestCase):
         r2.pm("1", 0.98, 0.99, 10_100.0, cash=500_000)
         self.assertLessEqual(r2.placed[0][0][0][4] * 0.95, 200 + 1, "20k at cost a state")
 
+    def test_no_snipe_on_a_book_where_we_hold_the_other_side(self):
+        r = Rig()
+        self.assertIsNone(r.pm("1", 0.98, 0.99, 10_100.0, pos={"1": -2_000}))   # we hold NO; YES is called
+        self.assertEqual(r.placed, [], "the buy would net our NO lot: the I2 trim would cut it (and pause)")
+        self.assertTrue(any("other side of this book" in x for _, x in r.logs))
+        self.assertIsNotNone(r.pm("2", 0.005, 0.01, 10_110.0, pos={"1": -2_000}), "the race's other book (its NO side) can still be bought")
+
     def test_three_failed_writes_stop_the_race(self):
         r = Rig(fail=5)
         for i in range(4):

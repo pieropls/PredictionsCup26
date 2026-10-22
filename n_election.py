@@ -260,6 +260,13 @@ class Election:
 
     def _buy(self, ex, c, cap, now, free_cash, pos, layer, dry=False, sb=None, wave=True):
         side = c["side"]
+        if (pos.get(ex, 0) < 0) if side == "yes" else (pos.get(ex, 0) > 0):
+            k = ("held_other", ex)
+            if k not in self.precall_t:
+                self.precall_t[k] = now
+                self._log("SNIPE", f"{self.race(ex)}: we hold the other side of this book: no {layer} here (the executor's I2 trim would cut it and pause; "
+                                   f"a strict call sells our lot by RULE0-CALLED; the race's other book can still be bought)", now)
+            return None                                     # v2 §4.4 b: never a buy that nets our own losing lot
         lv = self.levels(ex, side) if self.levels else None
         if not lv:
             bk = self.book(ex)
@@ -309,9 +316,8 @@ class Election:
             if pl["done"] > 0:
                 self._release(key, pl["done"])
             self.pending.pop(key, None)
-        held_other = (pos.get(ex, 0) < 0) if side == "yes" else (pos.get(ex, 0) > 0)
         self._log("SNIPE" if layer == "callsnipe" else "SETTLE", f"{race}: buy {side.upper()} {qty:,} at <= {limit:.3f}" + (f" (PM bid {sb:.3f}" if sb is not None else " (")
-                  + f"; {avail:,.0f} on the book under the cap)" + ("; we held the losing side: the buy nets it out first" if held_other else ""), now)
+                  + f"; {avail:,.0f} on the book under the cap)", now)
         return key
 
     # ---------------------------------------------------------------------------------------- what the executor did with an order

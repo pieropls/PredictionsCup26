@@ -6955,6 +6955,9 @@ class C102Tests(EngineCase):
         eng.lots = lambda ex, side, sub: [(1000.0, 0.91, "engine")] if sub.startswith("drift:") else []
         eng.el_step(time.time())
         self.assertEqual(eng.drift_view[a][0]["px"], 0.94, "exit at max(fair - 1c = 0.94, lot avg + 0.5c = 0.915)")
+        eng.book[a] = dict(pos=-500, row={})                    # C107: we hold NO here: no YES take (it would net our lot: I2 trim + pause)
+        eng.el_step(time.time())
+        self.assertFalse([x for x in eng.drift_now.get(a, []) if x["side"] == "yes"])
 
     def test_a_strict_call_against_our_lot_sells_it_at_the_bid_as_rule0_called_never_the_manual_book(self):
         fake, eng, a = self.rig(mode="live")
