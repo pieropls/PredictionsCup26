@@ -10792,7 +10792,7 @@ class Engine:
         """Shadow: the would-be order to shadow.jsonl. Live: through the executor (the fast_l0 pattern), never while new risk is paused."""
         mode = self.el_mode_cached
         if mode != "live":
-            self.el_shadowq.append(dict(t=stamp(), kind="order", why="call", layer=layer, ttl=ttl, items=[list(i) for i in items], mode=mode,
+            self.el_shadowq.append(dict(t=stamp(), ts=round(time.time(), 3), kind="order", why="call", layer=layer, ttl=ttl, items=[list(i) for i in items], mode=mode,
                                         injected=bool(getattr(self, "el_inj", None))))
             self.el_hour["would_orders"] += 1
             return "shadow"
@@ -10850,7 +10850,7 @@ class Engine:
         while inj["i"] < len(P) and inj["t0"] + P[inj["i"]][0] <= now:
             _, b, a = P[inj["i"]]
             inj["i"] += 1
-            self.el_quote(inj["ex"], b, a, now)
+            self.el_quote(inj["ex"], b, a, time.time())       # C108: the quote's own time (the loop's start would inflate the lane's measured latency)
             if E.queue and getattr(self, "el_lane_ev", None) is None:
                 E.run_queue(now, self.el_snap["cash"], self.el_snap["pos"])   # no lane thread (tests): from the loop
         if inj["i"] >= len(P) and now - (inj["t0"] + P[-1][0]) >= el.TTL_S:
