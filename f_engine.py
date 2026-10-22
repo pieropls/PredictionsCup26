@@ -9167,7 +9167,9 @@ class Engine:
                         reason = "no-edge"                   # (C100 item 3: px is the kept price)
                     else:
                         continue                            # item 1: >= 6% return left -> HOLD
-                if reason != "h1 shortfall" and ev_fl:      # C101 item C (Piero 15:15 Oct 21): no fire sale — EV/$ held <= 5% at the sale price
+                if reason == "convergence" and self.wd_after("conv_no_ev_floor", now):
+                    pass                                    # C110 (Piero 11:40 Oct 22 item 3): from Oct 29 the ramp overrides the 5% floor (lowest EV/$ first)
+                elif reason != "h1 shortfall" and ev_fl:    # C101 item C (Piero 15:15 Oct 21): no fire sale — EV/$ held <= 5% at the sale price
                     if reason.endswith("at the bid"):
                         if px < ev_fl - 1e-9:
                             continue                        # the bid would sell above 5% EV/$: no
@@ -10710,7 +10712,7 @@ class Engine:
                 if v * q <= 0 or abs(v) < MIN_QTY or str(sub).startswith(("manual", "pairset:", "fmm:", "fmmlock:", "rot:", "callsnipe:", "drift:", "sleeve:", "swing:")) or (ex, sub) in keep:
                     continue
                 avg = float((self.ledger.tranches.get(sub) or {}).get("avg") or ((b.get("row") or {}).get("avgCost")) or 0)
-                px = max(ask, bots.tick_up(round(avg + RULE0_MARGIN, 6)), bots.tick_up(round(fs / (1 + SELL_EV_MAX), 6)) if SELL_EV_MAX < 1 else 0.0)
+                px = max(ask, bots.tick_up(round(avg + RULE0_MARGIN, 6)), bots.tick_up(round(fs / (1 + SELL_EV_MAX), 6)) if (SELL_EV_MAX < 1 and not self.wd_after("conv_no_ev_floor", now)) else 0.0)
                 cands.append(((ex, sub) in self.core_set, fs / px - 1, ex, sub, abs(v) * px))
         out = set(keep)
         for core, ret, ex, sub, val in sorted(cands):
@@ -11048,26 +11050,49 @@ class Engine:
                     out[sub] = (str(ex), side, abs(q), avg)
         return out
 
+    def drift_baseline(self, ex, now, shadow):
+        """C110: (baseline gap, PM at the anchor). Live: the book's 6-h median gap (print - PM fair) and PM at its race's first poll close,
+        frozen the first time they are read after the close (persisted). Shadow: a rolling anchor 60 min back, the current 6-h median."""
+        if shadow:
+            return self.gap6(now).get(str(ex)), self.fair_at(str(ex), now - float(ELECTION["drift_anchor_s"]))
+        st = self.controls.d.setdefault("drift_base", {})
+        b = st.get(str(ex))
+        if b is None:
+            E = self.election
+            first = E.first.get(E.race(str(ex))) if E else None
+            g = self.gap6(now).get(str(ex))
+            pm0 = self.fair_at(str(ex), first) if first else None
+            if g is None:
+                return None, None
+            b = st[str(ex)] = dict(base=round(float(g), 4), pm0=round(float(pm0 if pm0 is not None else self.fair.get(str(ex)) or 0), 4), t=stamp())
+            with self.controls.lock:
+                self.controls.save()
+        return b["base"], b["pm0"]
+
     def drift_plan(self, now):
-        """night_reconcile §4 item 6 (C15): the pre-call drift. From a race's first poll close until it is called, a side whose SIG ask sits
-        >= 3c under PM fair gets a take (walking the book to fair - 3c, 120 s); its lot rests an exit at max(fair - 1c, lot avg + 0.5c).
-        Caps: the rotation's race / total caps x 2 (rotation + drift lots at cost), the party cap unchanged (10k net). Shadow: every race
-        counts as closed and the would-be takes go to shadow.jsonl (one per book per 30 min); nothing is sent."""
+        """night_reconcile §4 item 6, C110 (Piero 11:40 Oct 22): the pre-call drift trades the CHANGE, not SIG's permanent 6-12c gap level.
+        From a race's first poll close until it is called: when PM has moved >= 3c since the close and the SIG mid - PM gap sits >= 3c beyond
+        the book's 6-h median gap before the close (in the direction of the move: SIG lagging), take the lagging side walking the book to the
+        baseline-implied price - 3c (120 s); its lot exits when the gap is back within 1c of the baseline, never under lot avg + 0.5c. Caps: the
+        rotation's race / total caps x 2, the 10k party cap. Shadow: a rolling 60-min anchor instead of the close; would-be takes to
+        shadow.jsonl (one per book per 30 min); nothing is sent."""
         self.drift_now, self.drift_view = {}, {}
         E, mode = self.election, self.el_mode_cached
         if E is None or mode == "off":
             return
+        shadow = mode == "shadow"
         lots = self.drift_lots()
         for sub, (ex, side, q, avg) in lots.items():
-            fs = self.side_fair(ex, side)
-            if fs is None or not avg:
+            pm = self.fair.get(ex)
+            base, _ = self.drift_baseline(ex, now, shadow)
+            if pm is None or base is None or not avg:
                 continue
-            px = max(bots.tick_up(round(avg + RULE0_MARGIN, 6)), bots.tick_up(round(fs - float(ELECTION["drift_exit_gap"]), 6)))
+            tgt = (pm + base - float(ELECTION["drift_exit_gap"])) if side == "yes" else (1 - (pm + base + float(ELECTION["drift_exit_gap"])))
+            px = max(bots.tick_up(round(avg + RULE0_MARGIN, 6)), bots.tick_up(round(tgt, 6)))
             self.drift_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg))
-        shadow = mode == "shadow"
         if (shadow and not ELECTION.get("drift_shadow")) or (not shadow and (self.controls.paused or E.stopped)):
             return
-        mult, gap = float(ELECTION["drift_cap_mult"]), float(ELECTION["drift_gap"])
+        mult, gap_c, move_c = float(ELECTION["drift_cap_mult"]), float(ELECTION["drift_gap"]), float(ELECTION["drift_move"])
         rc = collections.Counter()
         for _, (ex, side, q, avg) in list(self.rot_lots().items()) + list(lots.items()):
             rc[self.rot_race(ex)] += q * avg
@@ -11078,32 +11103,42 @@ class Engine:
             ok = E.drift_ok(ex, now) if not shadow else (not E.stopped and E.called(ex) is None and E.race(ex) not in E.race_stop and ex not in E.manual)
             if not ok or (shadow and now - self.drift_logged.get(ex, -1e18) < float(ELECTION["drift_every_s"])):
                 continue
-            race = self.rot_race(ex)
+            pm = self.fair.get(ex); px_ = self.px.get(ex) or (None, None, None)
+            if pm is None or px_[0] is None or px_[1] is None:
+                continue
+            base, pm0 = self.drift_baseline(ex, now, shadow)
+            if base is None or pm0 is None:
+                continue
+            move = pm - pm0
+            gap = (px_[0] + px_[1]) / 2 - pm
+            if move >= move_c - 1e-9 and gap <= base - gap_c + 1e-9:
+                side, lim = "yes", pm + base - gap_c                      # PM up, SIG lagging below its usual gap: buy YES up to that price
+            elif move <= -move_c + 1e-9 and gap >= base + gap_c - 1e-9:
+                side, lim = "no", 1 - (pm + base + gap_c)                 # PM down, SIG lagging above: buy NO
+            else:
+                continue
             pos_ = float((self.book.get(ex) or {}).get("pos") or 0)
-            for side in ("yes", "no"):
-                if (side == "yes" and pos_ <= -1) or (side == "no" and pos_ >= 1):
-                    continue                                # C107: never a take that nets our own other-side lot (the I2 trim would cut it and pause)
-                bid, ask, fs = self.rot_touch(ex, side)
-                if ask is None or fs is None or ask > fs - gap + 1e-9:
-                    continue
-                lv = self.el_levels(ex, side) or [(ask, 0.0)]
-                take = [(p_, q_) for p_, q_ in lv if p_ <= fs - gap + 1e-9 and q_ > 0]
-                if not take:
-                    continue
-                limit, avail = max(p_ for p_, _ in take), sum(q_ for _, q_ in take)
-                room = min(self.rot_cap(race) * mult - rc[race], float(ROTATION.get("total_cap") or 30_000) * mult - total, usable)
-                qty = int(min(avail, float(ELECTION["drift_clip"]), max(0.0, room) / limit))
-                if qty < MIN_QTY or not self.carry_party_ok(ex, side, qty * limit, party):
-                    continue
-                if shadow:
-                    self.drift_logged[ex] = now
-                    self.el_hour["drift_would"] += 1
-                    self.el_shadowq.append(dict(t=stamp(), kind="order", why="drift", layer="drift", ttl=int(ELECTION["drift_ttl_s"]), mode="shadow",
-                                                items=[[ex, side, "buy", round(limit, 3), qty]], fair=round(fs, 4), ask=ask, gap=round(fs - ask, 4)))
-                else:
-                    self.drift_now.setdefault(ex, []).append(dict(side=side, px=round(limit, 3), qty=qty, sub=f"drift:{ex}:{side}", ttl=int(ELECTION["drift_ttl_s"])))
-                rc[race] += qty * limit; total += qty * limit; usable -= qty * limit
-                break
+            if (side == "yes" and pos_ <= -1) or (side == "no" and pos_ >= 1):
+                continue                                    # C107: never a take that nets our own other-side lot
+            race = self.rot_race(ex)
+            lv = self.el_levels(ex, side) or []
+            take = [(p_, q_) for p_, q_ in lv if p_ <= lim + 1e-9 and q_ > 0]
+            if not take:
+                continue
+            limit, avail = max(p_ for p_, _ in take), sum(q_ for _, q_ in take)
+            room = min(self.rot_cap(race) * mult - rc[race], float(ROTATION.get("total_cap") or 30_000) * mult - total, usable)
+            qty = int(min(avail, float(ELECTION["drift_clip"]), max(0.0, room) / limit))
+            if qty < MIN_QTY or not self.carry_party_ok(ex, side, qty * limit, party):
+                continue
+            if shadow:
+                self.drift_logged[ex] = now
+                self.el_hour["drift_would"] += 1
+                self.el_shadowq.append(dict(t=stamp(), ts=round(time.time(), 3), kind="order", why="drift", layer="drift", ttl=int(ELECTION["drift_ttl_s"]), mode="shadow",
+                                            items=[[ex, side, "buy", round(limit, 3), qty]], pm=round(pm, 4), pm0=round(pm0, 4), move=round(move, 4),
+                                            gap=round(gap, 4), base=round(base, 4)))
+            else:
+                self.drift_now.setdefault(ex, []).append(dict(side=side, px=round(limit, 3), qty=qty, sub=f"drift:{ex}:{side}", ttl=int(ELECTION["drift_ttl_s"])))
+            rc[race] += qty * limit; total += qty * limit; usable -= qty * limit
 
     def el_checklist(self, now, cash):
         E = self.election

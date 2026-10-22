@@ -21,10 +21,10 @@ GUARD_SPREAD = 0.03                     # PM spread <= 3c
 GUARD_COMPLEMENT = 0.04                 # the race's other books' PM <= 0.04 when a candidate is called to win
 PRECALL_EVERY_S = 1800                  # a rule firing before the close is logged (PRECALL) once per book per 30 min
 # ---- C2 price, C3 / C4 size, C5 TTL
-PRICE_CAP, PRICE_UNDER_PM = 0.97, 0.02  # <= min(0.97, PM side bid - 2c), walking the SIG book
+PRICE_CAP, PRICE_UNDER_PM = 0.97, 0.03  # <= min(0.97, PM side bid - 3c), walking the SIG book (Piero 11:40 Oct 22: 3c, was 2c; docs/night_sim.md)
 RACE_SHARES = 15_000                    # <= 15k shares a race (both books)
 STATE_CAP = 20_000.0                    # <= 20k at cost a state (its Senate, Governor and House races are called off the same count)
-WAVE_MULT = 2.0                         # the wave share: 2 x usable cash / the uncalled races of this wave and the next (v2 §4.3)
+WAVE_MULT = 1.0                         # the wave share: 1 x usable cash / the uncalled races of this and every later wave (Piero 11:40 Oct 22: 1x, was 2x)
 TTL_S = 120                             # SIG rejects 10-20 s expiries (RECAP §11 9.3)
 WRITES_FAIL_STOP = 3                    # failed writes on a race -> the sniper stops there
 MIN_QTY = 10

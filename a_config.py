@@ -542,6 +542,8 @@ SELL_KEEP_LAYERS = ("release", "rotexit")   # item 3: every sell rule (fund, car
 # cancels to data/election/shadow.jsonl, the detector's rows to data/election/calls.jsonl); live only by control.
 ELECTION = dict(on=True, shadow_from="2026-10-22 06:00:00", election_day="2026-11-03", precall_dry=True, drift_shadow=True,
                 drift_gap=0.03, drift_exit_gap=0.01, drift_ttl_s=120, drift_cap_mult=2.0, drift_every_s=1800, drift_clip=2_000,
+                drift_move=0.03, drift_anchor_s=3600,   # C110 (Piero 11:40 Oct 22 item 1): the drift trades the CHANGE — PM moved >= 3c since the close and the
+                                                        # SIG - PM gap >= 3c beyond its 6-h median before the close; exit when the gap is back within 1c of it
                 recycle_bid=0.98, recycle_target=20_000.0)   # item 8 (C7): a strict-called winner sells into bids >= max(0.98, lot avg + 0.5c) while usable < 20k
 # C106 (Piero 02:50 Oct 22 item 1): more FMM room until Oct 28 23:59 (then the cash calendar steps FMM down as approved); clips scale with the caps
 FMM_ROOM = dict(on=True, until="2026-10-28 23:59:59", race_cap=8_000.0, cf_race_cap=4_000.0, inv_cap=40_000.0, min_clip=800, cf_clip=667)
@@ -551,7 +553,8 @@ ELECTION_RESERVE = dict(on=True, steps=(("2026-10-28 00:00:00", 20_000.0), ("202
                                         ("2026-11-02 00:00:00", 50_000.0), ("2026-11-03 00:00:00", 60_000.0)),
                         until="2026-11-04 09:00:00")   # usable cash (cash - 5k floor - 2k reserve) no entry layer may spend; the election sniper / drift use it
 WIND_DOWN = dict(on=True, rot_buys_stop="2026-10-27 00:00:00", locks_stop="2026-10-29 00:00:00", fmm_caps=(("2026-10-29 00:00:00", 15_000.0), ("2026-10-31 00:00:00", 5_000.0)),
-                 fmm_no_bids="2026-11-01 12:00:00", carry_bids_stop="2026-10-30 00:00:00", rot_exit_touch="2026-10-30 00:00:00", conv_from="2026-10-30 00:00:00",
+                 fmm_no_bids="2026-11-01 12:00:00", carry_bids_stop="2026-10-30 00:00:00", rot_exit_touch="2026-10-30 00:00:00", conv_from="2026-10-29 00:00:00",   # C110 (Piero 11:40 Oct 22 item 3): from Oct 29
+                 conv_no_ev_floor="2026-10-29 00:00:00",   # the 5% (fair / 1.05) floor holds until Oct 28 23:59; from Oct 29 the ramp overrides it for the convergence asks
                  checklist_at="2026-11-03 14:45", entries_stop="2026-11-02 17:00:00",
                  entries_stop_layers=("dump", "fatfinger", "longshot", "wall", "scalp", "touch", "sleeve", "swing"))   # C13: these entries stop Nov 2 17:00 (TM / SM glide)
 # C101 (Piero 15:15 Oct 21)

@@ -107,15 +107,15 @@ class CallTests(unittest.TestCase):
 
 
 class SniperTests(unittest.TestCase):
-    def test_price_cap_min_097_and_pm_bid_less_2c_walking_the_book(self):
+    def test_price_cap_min_097_and_pm_bid_less_3c_walking_the_book(self):
         r = Rig()
-        r.pm("1", 0.98, 0.99, 10_100.0)                       # cap = min(0.97, 0.98 - 0.02) = 0.96
+        r.pm("1", 0.98, 0.99, 10_100.0)                       # cap = min(0.97, 0.98 - 0.03) = 0.95 (Piero 11:40 Oct 22: 3c)
         items = r.placed[0][0][0]
         self.assertEqual(items[:4], ("1", "yes", "buy", 0.94), "the 0.90 and 0.94 levels; 0.97 is over the cap")
         self.assertEqual(items[4], 5_000)
         r2 = Rig()
-        r2.pm("1", 0.995, 0.999, 10_100.0)                    # cap 0.97
-        self.assertEqual(r2.placed[0][0][0][3], 0.97)
+        r2.pm("1", 0.999, 1.0, 10_100.0)                      # cap min(0.97, 0.969): the 0.97 level stays out
+        self.assertEqual(r2.placed[0][0][0][3], 0.94)
         self.assertLessEqual(r2.placed[0][0][0][4], el.RACE_SHARES, "<= 15k shares a race")
 
     def test_cash_floor_7k_counts_unfilled_orders_and_the_state_cap(self):

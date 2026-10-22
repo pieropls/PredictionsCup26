@@ -6906,7 +6906,7 @@ class C102Tests(EngineCase):
         eng.el_step(time.time())
         o = [r for r in self.lines("shadow.jsonl") if r.get("why") == "call"]
         self.assertTrue(o, "a call: the would-be order")
-        self.assertEqual(o[-1]["items"][0][:4], [a, "yes", "buy", 0.96], "<= min(0.97, PM bid 0.985 - 2c) = 0.965: the 0.95 and 0.96 levels")
+        self.assertEqual(o[-1]["items"][0][:4], [a, "yes", "buy", 0.95], "<= min(0.97, PM bid 0.985 - 3c) = 0.955: the 0.95 level")
         self.assertFalse([c for c in fake.calls if c[0] in ("batch", "multileg", "place")], "shadow: nothing sent")
         self.assertTrue([r for r in self.lines("calls.jsonl") if r["kind"] == "CALL"])
 
@@ -6931,18 +6931,27 @@ class C102Tests(EngineCase):
         self.assertTrue(E.stopped)
         self.assertFalse([o for o in fake.open_orders() if (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "callsnipe"], "the snipe is pulled")
 
-    def test_night_drift_takes_3c_gaps_after_the_first_close_and_exits_at_fair_less_1c(self):
+    def test_night_drift_trades_the_change_not_the_level(self):
         fake, eng, a = self.rig()
-        eng.px[a] = fake.px[a] = (0.88, 0.90, 0.89)              # the SIG ask 0.90 is 5c under fair 0.95
         eng.feed_book = lambda ex: ([(0.88, 5_000.0)], [(0.90, 1_000.0), (0.92, 4_000.0), (0.93, 9_000.0)])
+        eng.px[a] = fake.px[a] = (0.88, 0.90, 0.89)              # SIG mid 0.89, PM 0.95: a 6c gap
         eng.drift_logged.clear(); eng.drift_t = 0.0
+        eng.gap6 = lambda now: {a: -0.06}                       # ... which is this book's usual gap (6-h median)
+        eng.fair_at = lambda ex, ts: 0.95                       # and PM has not moved
         eng.el_step(time.time())
-        d = [r for r in self.lines("shadow.jsonl") if r.get("why") == "drift"]
-        self.assertTrue(d, "shadow: as if the polls had closed")
-        self.assertEqual(d[-1]["items"][0][:4], [a, "yes", "buy", 0.92], "walks the book to fair - 3c (0.920)")
-        self.assertLessEqual(d[-1]["items"][0][4], a_config.ELECTION["drift_clip"])
+        self.assertFalse([r for r in self.lines("shadow.jsonl") if r.get("why") == "drift"], "a normal day: SIG's permanent gap is not a drift (Piero 11:40)")
+        eng.gap6 = lambda now: {a: 0.0}                         # the book's usual gap is 0 ...
+        eng.fair_at = lambda ex, ts: 0.90                       # ... and PM has moved +5c since the anchor, SIG lagging 6c below
         eng.drift_t = 0.0; eng.el_step(time.time())
-        self.assertEqual(len([r for r in self.lines("shadow.jsonl") if r.get("why") == "drift"]), len(d), "one per book per 30 min")
+        d = [r for r in self.lines("shadow.jsonl") if r.get("why") == "drift"]
+        self.assertTrue(d)
+        self.assertEqual(d[-1]["items"][0][:4], [a, "yes", "buy", 0.92], "walks the book to PM + baseline - 3c (0.920)")
+        self.assertAlmostEqual(d[-1]["move"], 0.05, places=3)
+        eng.fair_at = lambda ex, ts: 0.93                       # PM moved only +2c: no entry
+        eng.drift_logged.clear(); eng.drift_t = 0.0; eng.el_step(time.time())
+        self.assertEqual(len([r for r in self.lines("shadow.jsonl") if r.get("why") == "drift"]), len(d), "PM must have moved >= 3c")
+        # live: the baseline and PM at the first close are frozen; the lot exits when the gap is back within 1c of the baseline
+        eng.fair_at = lambda ex, ts: 0.90
         eng.controls.d["election"] = dict(mode="live")
         E = eng.election
         E.first[E.race(a)] = time.time() + 3600
@@ -6951,11 +6960,13 @@ class C102Tests(EngineCase):
         E.first[E.race(a)] = time.time() - 60
         eng.el_step(time.time())
         self.assertEqual(eng.drift_now[a][0]["px"], 0.92); self.assertEqual(eng.drift_now[a][0]["ttl"], 120)
+        self.assertEqual(eng.controls.d["drift_base"][a]["base"], 0.0); self.assertEqual(eng.controls.d["drift_base"][a]["pm0"], 0.90)
+        eng.gap6 = lambda now: {a: -0.20}                       # later prints don't move the frozen baseline
         eng.ledger.subbooks.setdefault(a, {})[f"drift:{a}:yes"] = 1000.0
         eng.lots = lambda ex, side, sub: [(1000.0, 0.91, "engine")] if sub.startswith("drift:") else []
         eng.el_step(time.time())
-        self.assertEqual(eng.drift_view[a][0]["px"], 0.94, "exit at max(fair - 1c = 0.94, lot avg + 0.5c = 0.915)")
-        eng.book[a] = dict(pos=-500, row={})                    # C107: we hold NO here: no YES take (it would net our lot: I2 trim + pause)
+        self.assertEqual(eng.drift_view[a][0]["px"], 0.94, "exit at max(PM + baseline - 1c = 0.94, lot avg + 0.5c = 0.915)")
+        eng.book[a] = dict(pos=-500, row={})                    # C107: we hold NO here: no YES take
         eng.el_step(time.time())
         self.assertFalse([x for x in eng.drift_now.get(a, []) if x["side"] == "yes"])
 
@@ -7099,6 +7110,11 @@ class C103Tests(EngineCase):
         plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
         self.assertEqual(plan[a]["why"], "convergence"); self.assertAlmostEqual(plan[a]["px"], 0.93, places=3)
         self.assertAlmostEqual(plan[b]["px"], 0.945, places=3, msg="never under fair / 1.05 (0.943 -> 0.945)")
+        f_engine.WIND_DOWN = dict(f_engine.WIND_DOWN, conv_no_ev_floor="2000-01-01 00:00:00")   # from Oct 29: the ramp overrides the 5% floor
+        eng.sale_anchor.clear()
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertAlmostEqual(plan[b]["px"], 0.91, places=3, msg="Oct 29 on: max(lot avg + 0.5c, touch) = 0.91 (Piero 11:40 Oct 22 item 3)")
+        f_engine.WIND_DOWN = dict(f_engine.WIND_DOWN, conv_no_ev_floor="2099-01-01 00:00:00")
         eng.conv_keep = set()
         eng.el_reserve = lambda now: (a_config.CASH_RESERVE + 2_000 + 1_000.0) - a_config.CASH_RESERVE - eng.manual_reserve_left() + 2_000.0   # a 2k gap
         eng.open = []
