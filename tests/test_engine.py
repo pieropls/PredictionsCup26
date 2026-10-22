@@ -7193,5 +7193,46 @@ class C106Tests(EngineCase):
         self.assertIn("call lane (quote -> order handed over)", eng.el_hour_line())
 
 
+
+class C111Tests(EngineCase):
+    """C111 (Piero 11:40 Oct 22 item 5, the Oct 25 rehearsal): a scheduled multi-race injection plan (shadow only; an injected book hears only its
+    synthetic path; each race restored after), and one genuine minimum-size probe order through the lane path, timed to SIG's answer."""
+
+    def test_a_scheduled_plan_runs_two_books_and_ignores_their_real_quotes(self):
+        fake, eng, a = C102Tests.rig(self)
+        E = eng.election
+        b = [x for x in eng.owner if x != a and eng.owner[x].kind == "market"][0]
+        E.meta[b] = dict(race="Utah Governor", party="R", state="Utah"); E.close["Utah Governor"] = E.first["Utah Governor"] = time.time() + 86400
+        plan = dict(injections=[dict(ex=a, path=[[0, 0.90, 0.92], [1, 0.985, 0.99]], at=0, tag="w1"),
+                                dict(ex=b, path=[[0, 0.90, 0.92], [1, 0.985, 0.99]], at=100, tag="w2")])
+        os.makedirs("/tmp/c111_test", exist_ok=True)
+        with open("/tmp/c111_test/plan.json", "w") as fh:
+            json.dump(plan, fh)
+        now = time.time()
+        eng.el_rehearsal_load(dict(file="/tmp/c111_test/plan.json", start=now))
+        self.assertEqual(len(eng.el_injs), 2)
+        eng.el_step(now + 2)
+        self.assertEqual(E.called(a), "yes"); self.assertIsNone(E.called(b), "the second book starts at +100 s")
+        eng.el_quote(a, 0.50, 0.52, now + 3)                     # a real quote on the injected book: ignored
+        self.assertEqual(E._side_bid(a, "yes"), 0.985)
+        eng.el_step(now + 102)
+        self.assertEqual(E.called(b), "yes")
+        eng.el_step(now + 102 + 125)
+        self.assertEqual(eng.el_injs, []); self.assertIsNone(E.called(a)); self.assertIsNone(E.called(b))
+        self.assertGreater(E.close["Utah Governor"], now + 80_000, "the real poll close is back")
+
+    def test_the_probe_sends_one_genuine_minimum_size_bid_and_times_sigs_answer(self):
+        fake, eng, a = C102Tests.rig(self)
+        eng.px[a] = fake.px[a] = (0.93, 0.95, 0.94)
+        fake.calls.clear()
+        f_engine.EngineControls(eng).apply("election_probe", dict(ex=a, side="yes"))
+        eng.el_step(time.time()); drain(eng)
+        sent = [c for c in fake.calls if c[0] in ("batch", "place")]
+        self.assertEqual(len(sent), 1, "one write")
+        self.assertTrue(any(e["text"].startswith("PROBE") and "SIG answered in" in e["text"] for e in eng.events))
+        probe = [o for o in fake.open_orders() if o["ex"] == a]
+        self.assertEqual([(o["side"], o["price"], o["qty"]) for o in probe], [("yes", 0.93, a_config.MIN_QTY)], "a genuine bid at the touch, minimum size")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10785,9 +10785,13 @@ class Engine:
     def el_log(self, kind, text):
         self.el_logq.append((kind, text))                    # the feed thread logs here; the loop writes (no file I/O off the loop)
 
+    def el_inj_races(self):
+        E = self.election
+        return {j["race"] for j in (getattr(self, "el_injs", None) or [])} if E else set()
+
     def el_place_dry(self, items, layer, ttl, why):
         self.el_shadowq.append(dict(t=stamp(), kind="order", why=why, layer=layer, ttl=ttl, items=[list(i) for i in items], mode="shadow",
-                                    injected=bool(getattr(self, "el_inj", None))))
+                                    injected=any(self.election.race(str(i[0])) in self.el_inj_races() for i in items)))
         return "dry"
 
     def el_place(self, items, layer, ttl):
@@ -10795,7 +10799,7 @@ class Engine:
         mode = self.el_mode_cached
         if mode != "live":
             self.el_shadowq.append(dict(t=stamp(), ts=round(time.time(), 3), kind="order", why="call", layer=layer, ttl=ttl, items=[list(i) for i in items], mode=mode,
-                                        injected=bool(getattr(self, "el_inj", None))))
+                                        injected=any(self.election.race(str(i[0])) in self.el_inj_races() for i in items)))
             self.el_hour["would_orders"] += 1
             return "shadow"
         if self.controls.paused:
@@ -10819,11 +10823,13 @@ class Engine:
         oo = next((x for x in self.open if x["id"] == o.get("id")), None)
         return bool(oo and self.ex.cancel(oo, reason=reason))
 
-    def el_quote(self, ex, b, a, now):
+    def el_quote(self, ex, b, a, now, injected=False):
         """PolyFeed thread: one PM quote -> the detector, on the loop's immutable snapshot; a call wakes the loop (the snipe goes from there)."""
         E = self.election
         if E is None or self.el_mode_cached == "off":
             return
+        if not injected and any(j["ex"] == str(ex) and now >= j["t0"] for j in (getattr(self, "el_injs", None) or [])):
+            return                                          # C111: an injected book hears only its synthetic path
         snap = self.el_snap
         if E.on_pm(str(ex), (b + a) / 2, now, snap["cash"], snap["pos"], pm_bid=b, pm_ask=a, defer=True) == "queued":
             lane = getattr(self, "el_lane_ev", None)
@@ -10831,40 +10837,94 @@ class Engine:
                 lane.set()                                  # C104 item 7: the call lane sends the snipe now (C106: shadow too)
             self.rt_event("call", {str(ex)}, now)
 
-    def el_inject_start(self, now, inj):
-        """C104 (item 10): start a synthetic path — the race treated as closed (shadow), its quotes fed through the detector hook."""
+    def el_inject_start(self, now, inj, t0=None, tag=None):
+        """C104 / C111 (item 10): start a synthetic path — the race treated as closed (shadow) from t0 (or with close_at seconds after t0), its
+        quotes fed through the detector hook; the book's real Polymarket quotes are ignored while it runs. Several run at once."""
         E = self.election
         ex = str(inj["ex"]); race = E.race(ex)
         if race is None:
             self.el_log("INJECT", f"{self.name(ex)}: not an armed book; nothing injected")
             return
-        self.el_inj = dict(ex=ex, race=race, t0=now, path=sorted(inj["path"]), i=0, orig=(E.close.get(race), E.first.get(race)))
-        if inj.get("close_now", True):
-            E.close[race] = E.first[race] = now - 60
-        self.el_log("INJECT", f"{race}: {len(inj['path'])} synthetic PM quotes into {self.name(ex)} over {inj['path'][-1][0]:.0f} s (shadow; polls treated as closed)")
+        t0 = now if t0 is None else float(t0)
+        injs = self.el_injs = getattr(self, "el_injs", [])
+        orig = next((j["orig"] for j in injs if j["race"] == race), None) or (E.close.get(race), E.first.get(race))
+        j = dict(ex=ex, race=race, t0=t0, path=sorted(inj["path"]), i=0, orig=orig, tag=tag or inj.get("tag"), close_now=inj.get("close_now", True),
+                 close_at=inj.get("close_at"), closed=False)
+        injs.append(j)
+        self.el_inj = j
+        self.el_log("INJECT", f"{race}: {len(j['path'])} synthetic PM quotes into {self.name(ex)} over {j['path'][-1][0]:.0f} s from "
+                              f"{time.strftime('%H:%M:%S', time.localtime(t0))} (shadow; polls treated as closed{' at +' + str(int(j['close_at'])) + ' s' if j['close_at'] else ''})"
+                              + (f" [{j['tag']}]" if j["tag"] else ""))
 
     def el_inject_step(self, now):
-        inj = getattr(self, "el_inj", None)
-        if not inj:
+        injs = getattr(self, "el_injs", None) or []
+        if not injs:
             return
         E = self.election
-        P = inj["path"]
-        while inj["i"] < len(P) and inj["t0"] + P[inj["i"]][0] <= now:
-            _, b, a = P[inj["i"]]
-            inj["i"] += 1
-            self.el_quote(inj["ex"], b, a, time.time())       # C108: the quote's own time (the loop's start would inflate the lane's measured latency)
-            if E.queue and getattr(self, "el_lane_ev", None) is None:
-                E.run_queue(now, self.el_snap["cash"], self.el_snap["pos"])   # no lane thread (tests): from the loop
-        if inj["i"] >= len(P) and now - (inj["t0"] + P[-1][0]) >= el.TTL_S:
-            race = inj["race"]
-            E.close[race], E.first[race] = inj["orig"]
-            for e in [e for e in list(E.calls) if E.race(e) == race]:
-                E.calls.pop(e, None)
-            E.race_stop.discard(race); E.pulled.discard(race)
-            for k in [k for k in E.run0 if E.race(k[0]) == race]:
-                E.run0.pop(k, None)
-            self.el_inj = None
-            self.el_log("INJECT", f"{race}: synthetic path done; the race's real poll close restored and its synthetic call cleared")
+        for j in list(injs):
+            if now < j["t0"]:
+                continue
+            if not j["closed"] and j["close_now"] and now >= j["t0"] + float(j.get("close_at") or 0):
+                E.close[j["race"]] = E.first[j["race"]] = time.time() - (60 if not j.get("close_at") else 0)   # the quotes' own clock
+                j["closed"] = True
+            P = j["path"]
+            while j["i"] < len(P) and j["t0"] + P[j["i"]][0] <= now:
+                _, b, a = P[j["i"]]
+                j["i"] += 1
+                self.el_inj = j
+                self.el_quote(j["ex"], b, a, time.time(), injected=True)   # C108: the quote's own time
+                if E.queue and getattr(self, "el_lane_ev", None) is None:
+                    E.run_queue(now, self.el_snap["cash"], self.el_snap["pos"])   # no lane thread (tests): from the loop
+            if j["i"] >= len(P) and now - (j["t0"] + P[-1][0]) >= el.TTL_S:
+                injs.remove(j)
+                if any(k["race"] == j["race"] for k in injs):
+                    continue                                # the race's other book still runs
+                race = j["race"]
+                E.close[race], E.first[race] = j["orig"]
+                for e in [e for e in list(E.calls) if E.race(e) == race]:
+                    E.calls.pop(e, None)
+                E.race_stop.discard(race); E.pulled.discard(race)
+                for k in [k for k in E.run0 if E.race(k[0]) == race]:
+                    E.run0.pop(k, None)
+                self.el_log("INJECT", f"{race}: synthetic path done; the race's real poll close restored and its synthetic call cleared" + (f" [{j['tag']}]" if j["tag"] else ""))
+        self.el_inj = injs[-1] if injs else None
+
+    def el_rehearsal_load(self, req):
+        """C111: a plan file {"injections": [{ex, path [[s, bid, ask], ...], at (s after start), close_at (s after its own start), tag}]}."""
+        try:
+            plan = json.load(open(req["file"]))
+        except Exception as err:
+            self.el_log("INJECT", f"rehearsal plan not read: {err!r}")
+            return
+        start = float(req.get("start") or time.time())
+        n = 0
+        for inj in plan.get("injections") or []:
+            if str(inj.get("ex")) in (self.election.meta if self.election else {}):
+                self.el_inject_start(time.time(), inj, t0=start + float(inj.get("at") or 0), tag=inj.get("tag"))
+                n += 1
+        self.el_log("INJECT", f"REHEARSAL plan {os.path.basename(req['file'])}: {n} injections scheduled from {time.strftime('%H:%M', time.localtime(start))}")
+
+    def el_probe_run(self):
+        """C111 item 5: one genuine minimum-size bid at the touch through the lane's path (ex.place + step_placements from the lane thread);
+        the SIG round trip = the executor's answer (on_done) - the send; logged as a NIGHT PROBE line."""
+        pr = getattr(self, "el_probe_q", None)
+        if not pr:
+            return
+        self.el_probe_q = None
+        ex, side = str(pr["ex"]), pr.get("side", "yes")
+        bid = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
+        if bid is None or ex not in self.owner:
+            self.el_log("PROBE", f"{self.name(ex)}: no touch: no probe")
+            return
+        t0 = time.time(); box = {}
+        def done(part, t0=t0):
+            box["t1"] = time.time()
+            ok = [d for _, _, ok_, d in part if ok_ and (d or {}).get("orderId") is not None]
+            self.el_log("PROBE", f"{self.name(ex)} {side.upper()} {el.MIN_QTY} at {bid:.3f}: handed over -> SIG answered in {(box['t1'] - t0) * 1000:.0f} ms "
+                                 f"({'accepted' if ok else 'not accepted'}; a genuine 120-s bid at the touch)")
+        key = self.ex.place([(self.owner[ex].name, f"probe:{ex}:{side}", "callsnipe", (ex, side, "buy", round(bid, 3), int(el.MIN_QTY)))], ttl_s=el.TTL_S, on_done=done)
+        if key:
+            self.ex.step_placements()
 
     def el_lane_once(self):
         """C104 (night item 7, latency.md §3): one pass of the call lane — the queued snipes go out from here, off the loop, through the
@@ -10880,6 +10940,8 @@ class Engine:
             self.el_lane_ev.wait(timeout=5.0)
             self.el_lane_ev.clear()
             try:
+                if getattr(self, "el_probe_q", None):
+                    self.el_probe_run()                     # C111: the probe goes out from the lane thread, as a snipe would
                 self.el_lane_once()
             except Exception as err:
                 self.el_log("LANE", f"call lane error: {err!r}")
@@ -10915,6 +10977,22 @@ class Engine:
             with self.controls.lock:
                 self.controls.d["election"].pop("inject", None)
                 self.controls.save()
+        if st.get("rehearsal") and mode == "shadow":
+            self.el_rehearsal_load(st["rehearsal"])
+            with self.controls.lock:
+                self.controls.d["election"].pop("rehearsal", None)
+                self.controls.save()
+        if st.get("probe"):
+            pr = st["probe"]
+            with self.controls.lock:
+                self.controls.d["election"].pop("probe", None)
+                self.controls.save()
+            self.el_probe_q = pr
+            lane = getattr(self, "el_lane_ev", None)
+            if lane is not None:
+                lane.set()
+            else:
+                self.el_probe_run()
         self.el_inject_step(now)
         if st.get("stop_req"):
             n = E.kill(now, oo, pos, self.el_layer_of)
@@ -10963,7 +11041,7 @@ class Engine:
             with open(os.path.join(d, "calls.jsonl"), "a") as fh:
                 for r in rows:
                     fh.write(json.dumps(dict(r, ts=r.get("t"), t=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r.get("t") or 0)), mode=mode,
-                                             injected=bool(getattr(self, "el_inj", None)) and r.get("race") == (self.el_inj or {}).get("race")), default=str) + "\n")
+                                             injected=r.get("race") in self.el_inj_races()), default=str) + "\n")
         if self.el_shadowq:
             with open(os.path.join(d, "shadow.jsonl"), "a") as fh:
                 while self.el_shadowq:
@@ -12891,6 +12969,25 @@ class EngineControls:
                 c.d.setdefault("election", {})["inject"] = dict(ex=ex, path=path, close_now=bool(args.get("close_now", True)), t=stamp())
                 c.save()
             return f"election_inject queued: {len(path)} quotes into {self.eng.name(ex)} over {path[-1][0]:.0f} s (shadow; polls treated as closed: {bool(args.get('close_now', True))})"
+        if action == "election_rehearsal":                 # C111 (Piero 11:40 Oct 22 item 5): a scheduled multi-race injection plan from /opt/research/ (shadow only)
+            st = c.d.get("election") or {}
+            if self.eng.el_mode_cached == "live" or st.get("mode") == "live":
+                raise ValueError("election_rehearsal runs in shadow only")
+            path_ = os.path.realpath(str(args.get("file") or ""))
+            if not path_.startswith("/opt/research/") or not os.path.exists(path_):
+                raise ValueError("election_rehearsal needs file= a plan under /opt/research/")
+            with c.lock:
+                c.d.setdefault("election", {})["rehearsal"] = dict(file=path_, t=stamp(), start=float(args.get("start") or time.time()))
+                c.save()
+            return f"election_rehearsal queued from {path_}"
+        if action == "election_probe":                     # C111 item 5: ONE genuine minimum-size order through the call lane, to time SIG's round trip
+            ex = str(args.get("ex") or "")
+            if ex not in self.eng.owner or ex in self.eng.manual_ex:
+                raise ValueError("election_probe needs a known, non-manual ex")
+            with c.lock:
+                c.d.setdefault("election", {})["probe"] = dict(ex=ex, side=str(args.get("side") or "yes"), t=stamp())
+                c.save()
+            return f"election_probe queued: one {el.MIN_QTY}-share bid at the touch on {self.eng.name(ex)} through the call lane (genuine, 120 s)"
         if action == "election_stop":                      # the kill switch: done by the loop (entries, call snipes, drift pulled; exits kept)
             with c.lock:
                 c.d.setdefault("election", {})["stop_req"] = stamp()
