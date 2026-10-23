@@ -7093,7 +7093,9 @@ class C103Tests(EngineCase):
         self.assertEqual(eng.el_reserve(self.ts("2026-11-02 12:00:00")), 40_000.0 + 15_000.0, "firm 40k + the elastic 15k from Nov 2")
         self.assertEqual(eng.el_firm(self.ts("2026-11-03 12:00:00")), 45_000.0)
         self.assertEqual(eng.el_firm(self.ts("2026-11-03 11:59:00")), 40_000.0)
-        self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-28 12:00:00")), float("inf"))
+        self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-26 12:00:00")), 35_000.0, "C115: the taper 35k Oct 26")
+        self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-27 12:00:00")), 30_000.0)
+        self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-28 12:00:00")), 25_000.0)
         self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-29 12:00:00")), 15_000.0)
         self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-31 12:00:00")), 5_000.0)
         self.assertFalse(eng.wd_after("rot_buys_stop", self.ts("2026-10-26 23:00:00")))
@@ -7101,6 +7103,30 @@ class C103Tests(EngineCase):
         self.assertTrue(eng.wd_after("fmm_no_bids", self.ts("2026-11-01 12:00:00")))
         self.assertFalse(eng.wd_after("entries_stop", self.ts("2026-11-02 16:59:00")))
         self.assertTrue(eng.wd_after("entries_stop", self.ts("2026-11-02 17:00:00")))
+
+    def test_c115_backstop_reprices_fmm_and_rotation_exits_for_the_shortfall_only(self):
+        fake, eng, mk = FMMTests.rig(self)
+        a, b = mk[:2]
+        C94Tests.c95_market(self, eng, fake, a, 0.90, (0.85, 0.86, 0.855), race="RA")
+        C94Tests.c95_market(self, eng, fake, b, 0.90, (0.85, 0.86, 0.855), race="RB")
+        FMMTests.live(self, eng)
+        eng.fmm_lots = lambda: {f"fmm:{a}:yes:0.840": (a, "yes", 1000.0, 0.84)}
+        eng.rot_lots = lambda: {f"rot:{b}:yes": (b, "yes", 1000.0, 0.80)}
+        f_engine.WIND_DOWN = dict(a_config.WIND_DOWN, backstop_from="2000-01-01 00:00:00", backstop_at="00:00")
+        early = time.time() + 86400
+        sel = eng.conv_backstop_select(time.time(), 800.0, 0.0, early)
+        self.assertEqual(len(sel), 1, "the shortfall only: one lot (860) covers 800")
+        k = next(iter(sel)); self.assertAlmostEqual(sel[k], 0.86, places=3, msg="max(lot avg + 0.5c, touch 0.86)")
+        self.assertEqual(eng.conv_backstop_select(time.time(), 0.0, 0.0, early), {}, "no shortfall: nothing")
+        f_engine.WIND_DOWN = dict(a_config.WIND_DOWN, backstop_from="2099-01-01 00:00:00")
+        self.assertEqual(eng.conv_backstop_select(time.time(), 900.0, 0.0, early), {}, "not before Oct 30")
+        # the lot's own FMM exit is re-priced to it
+        eng.fmm_lots = lambda: {f"fmm:{a}:yes:0.840": (a, "yes", 1000.0, 0.84)}
+        eng.ledger.tranches[f"fmm:{a}:yes:0.840"] = dict(ex=a, side="yes", kind="fmm", state="open", ts=time.time(), t="x", avg=0.84, qty=1000.0)
+        eng.gapmm_live = lambda: True; eng.gap_exit_px = lambda ex, side, top, avg, now: 0.95
+        eng.track_fmm(time.time()); self.assertAlmostEqual(eng.fmm_view[a][0]["px"], 0.95, places=3)
+        eng.conv_backstop = {(a, f"fmm:{a}:yes:0.840"): 0.86}
+        eng.track_fmm(time.time()); self.assertAlmostEqual(eng.fmm_view[a][0]["px"], 0.86, places=3, msg="backstop: the exit at its convergence price")
 
     def test_the_reserve_comes_off_every_layers_cash_but_not_the_snipers(self):
         fake, eng, favs = C94Tests.rig(self)

@@ -559,7 +559,10 @@ ELECTION_RESERVE = dict(on=True, steps=(("2026-10-28 00:00:00", 20_000.0), ("202
                         # Nov 2-3 only from lots that sell at >= PM fair - 5c (at the bid, or resting at the touch), lowest EV/$ first, never cheaper; what
                         # doesn't fill stays held, the favourites of states whose last poll close is <= 17:00 PT kept last (wave recycling after their calls)
                         elastic=15_000.0, elastic_from="2026-11-02 00:00:00", elastic_below_fair=0.05, elastic_keep_close="17:00", fav_min=0.75)
-WIND_DOWN = dict(on=True, rot_buys_stop="2026-10-27 00:00:00", locks_stop="2026-10-29 00:00:00", fmm_caps=(("2026-10-29 00:00:00", 15_000.0), ("2026-10-31 00:00:00", 5_000.0)),
+WIND_DOWN = dict(on=True, rot_buys_stop="2026-10-27 00:00:00", locks_stop="2026-10-29 00:00:00",
+                 fmm_caps=(("2026-10-26 00:00:00", 35_000.0), ("2026-10-27 00:00:00", 30_000.0), ("2026-10-28 00:00:00", 25_000.0),   # C115 (Piero 15:10 Oct 23): a taper
+                           ("2026-10-29 00:00:00", 15_000.0), ("2026-10-31 00:00:00", 5_000.0)),                                       # instead of the Oct 29 cliff
+                 backstop_from="2026-10-30 00:00:00", backstop_at="12:00",   # item 2: from Oct 30, short of the day's ramp at 12:00 -> FMM / rotation lots join the queue
                  fmm_no_bids="2026-11-01 12:00:00", carry_bids_stop="2026-10-30 00:00:00", rot_exit_touch="2026-10-30 00:00:00", conv_from="2026-10-29 00:00:00",   # C110 (Piero 11:40 Oct 22 item 3): from Oct 29
                  conv_no_ev_floor="2026-10-29 00:00:00",   # the 5% (fair / 1.05) floor holds until Oct 28 23:59; from Oct 29 the ramp overrides it for the convergence asks
                  checklist_at="2026-11-03 14:45", entries_stop="2026-11-02 17:00:00",

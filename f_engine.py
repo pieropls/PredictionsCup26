@@ -438,6 +438,7 @@ class Engine:
         self.drift_now, self.drift_view, self.drift_logged = {}, {}, {}
         self.callexit_now, self.callexit_logged = {}, set()
         self.rot_fairbased = {}
+        self.conv_backstop = {}
         self.el_sent, self.el_fill_seen = {}, set()
         self.el_taken = {}
         self.fmm_refill_wait, self.fmm_lat_plan = {}, []   # C100: per sell order, since when the others' best ask sits below ours; the FMM hour; churn window
@@ -4957,6 +4958,9 @@ class Engine:
                 px = min(have, max(first, oa)) if oa is not None and oa < have - 1e-9 else have   # C100: down to what a new post would take (ring hours: fill + 1c),
             else:                                            # never up: IA-01 07:18-08:01 Oct 18 flipped 0.825 (new) <-> 0.820 (re-peg) each loop, 166 cancels
                 px = max(first, oa) if oa is not None else first
+            bp = (getattr(self, "conv_backstop", None) or {}).get((str(ex), sub))
+            if bp is not None:
+                px = max(floor_, min(px, bp))                # C115: the backstop re-prices the lot's own exit (never under its floor)
             self.fmm_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg))
 
     def gap6(self, now):
@@ -5533,6 +5537,9 @@ class Engine:
                     self.rot_logged.add(k_)
                     msg = f"ROT SWAP {self.name(ex)} {side.upper()} {q:,.0f}: ask at the touch {px:.3f} ({why})"
                     self.event("ROT", msg); self.night.line(msg)
+            bp = (getattr(self, "conv_backstop", None) or {}).get((str(ex), sub))
+            if bp is not None:
+                px, why = max(floor_, min(px, bp)), "backstop (cash short of the day's ramp)"   # C115
             self.rot_fairbased[sub] = (why == "fair - 1.5c")    # C113: only a fair-based target may re-peg the exit up (never the touch)
             self.rot_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg, why=why))
 
@@ -10720,7 +10727,7 @@ class Engine:
         keep = {k for k in getattr(self, "conv_keep", set()) if k in resting}     # an ask already out keeps its place
         keep_e = {k for k in getattr(self, "conv_elastic", set()) if k in resting}
         if gap_e <= 0:
-            self.conv_keep, self.conv_elastic = keep, keep_e
+            self.conv_keep, self.conv_elastic, self.conv_backstop = keep, keep_e, {}
             return keep | keep_e
         E = self.election
         early = time.mktime(time.strptime(f"{ELECTION['election_day']} {ELECTION_RESERVE['elastic_keep_close']}", "%Y-%m-%d %H:%M"))
@@ -10757,6 +10764,7 @@ class Engine:
                 if gap_e <= 0:
                     break
                 out_e.add(c["key"]); gap_e -= c["val_e"]
+        self.conv_backstop = self.conv_backstop_select(now, max(gap_f, 0.0), max(gap_e, 0.0) - max(gap_f, 0.0), early)
         if (out - keep) or (out_e - keep_e):
             msg = (f"CONVERGENCE (cash calendar): usable {usable:,.0f} + asks {asks:,.0f} under the {firm:,.0f} firm" + (f" + {elastic:,.0f} elastic" if elastic else "")
                    + " reserve: asks on " + ", ".join(f"{self.name(e)} {s_.split(':')[0]}" for e, s_ in sorted(out - keep))[:500]
@@ -10764,6 +10772,45 @@ class Engine:
             self.event("RELEASE", msg); self.night.line(msg)
         self.conv_keep, self.conv_elastic = out, out_e
         return out | out_e
+
+    def backstop_on(self, now):
+        """C115 (Piero 15:10 Oct 23 item 2): from Oct 30, each day from 12:00."""
+        if not WIND_DOWN.get("on") or not self.wd_after("backstop_from", now):
+            return False
+        return time.strftime("%H:%M", time.localtime(now)) >= WIND_DOWN["backstop_at"]
+
+    def conv_backstop_select(self, now, short_f, short_e, early):
+        """C115 item 2: what the normal convergence queue can't cover of the day's ramp (firm, then the elastic part) is asked of the FMM and
+        rotation lots still held, lowest EV/$ first, the shortfall only, at the same floors (>= lot avg + 0.5c; the elastic part >= fair - 5c).
+        Their OWN exits are re-priced to it (a second ask on the same shares would be an I2 trim). -> {(ex, sub): ask price}."""
+        if not self.backstop_on(now) or (short_f <= 0 and short_e <= 0):
+            return {}
+        E = self.election
+        lots = []
+        for sub, (ex, side, q, avg) in list(self.fmm_lots().items()) + list(self.rot_lots().items()):
+            ex = str(ex)
+            if ex in self.manual_ex or ex in SELL_HOLD or ex in dash5.RI_EX:
+                continue
+            bid, ask = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[:2]
+            fs = self.side_fair(ex, side)
+            if ask is None or fs is None or not avg:
+                continue
+            px = max(ask, bots.tick_up(round(avg + RULE0_MARGIN, 6)))
+            last = E.close.get(E.race(ex)) if E is not None else None
+            lots.append(dict(key=(ex, sub), q=q, px=px, fs=fs, ret=fs / px - 1,
+                             early_fav=fs >= float(ELECTION_RESERVE["fav_min"]) - 1e-9 and last is not None and last <= early))
+        out = {}
+        for c in sorted(lots, key=lambda c: c["ret"]):
+            if short_f > 0:
+                out[c["key"]] = c["px"]; short_f -= c["q"] * c["px"]
+            elif short_e > 0 and not c["early_fav"]:
+                pe = max(c["px"], bots.tick_up(round(c["fs"] - float(ELECTION_RESERVE["elastic_below_fair"]), 6)))
+                out[c["key"]] = pe; short_e -= c["q"] * pe
+        if out and set(out) != set(getattr(self, "conv_backstop", {}) or {}):
+            msg = (f"CONVERGENCE BACKSTOP (Piero 15:10 Oct 23): short of the day's ramp at {WIND_DOWN['backstop_at']}: {len(out)} FMM / rotation lot(s) re-priced to "
+                   f"max(lot avg + 0.5c, touch) (elastic part >= fair - 5c): " + ", ".join(f"{self.name(e)} {s_.split(':')[0]} {p_:.3f}" for (e, s_), p_ in sorted(out.items()))[:500])
+            self.event("RELEASE", msg); self.night.line(msg)
+        return out
 
     def election_cash_line(self, now):
         """cash_calendar §3 item 4: the ELECTION CASH line — usable cash vs the ramp and the 60k (cash >= 67k) target by Nov 3 15:00."""
