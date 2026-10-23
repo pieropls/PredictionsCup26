@@ -9129,6 +9129,9 @@ class Engine:
                     floor_ = max(floor_, bots.tick_up(round(sig_avg + RULE0_MARGIN, 6)))   # C99e: 'inventory' has no lots of its own (its tranche key is shared): never under SIG's position average + 0.5c (Delaware 02:2x)
                 if need > 0 and bid is not None and bid >= max(float(ELECTION["recycle_bid"]), floor_) - 1e-9:
                     px, reason = bid, "recycle at the bid"   # C102 item 8 (C7): wave recycling of a strict-called winner (core included)
+                elif (str(ex), sub) in getattr(self, "conv_elastic", set()) and (str(ex), sub) in conv:
+                    fl_e = max(floor_, bots.tick_up(round(fs - float(ELECTION_RESERVE["elastic_below_fair"]), 6)))   # C114: the elastic 15k, never under fair - 5c
+                    px, reason = (bid, "elastic bid") if (bid is not None and bid >= fl_e - 1e-9) else (max(ask, fl_e), "elastic")
                 elif (str(ex), sub) in conv:
                     px, reason = self.sale_price(ex, side, max(ask, floor_), floor_, bid, "convergence", anc, False)   # C103: GTC at max(lot avg + 0.5c, touch), >= fair / 1.05
                 elif sub.startswith("carry:"):
@@ -9174,7 +9177,7 @@ class Engine:
                         reason = "no-edge"                   # (C100 item 3: px is the kept price)
                     else:
                         continue                            # item 1: >= 6% return left -> HOLD
-                if reason == "convergence" and self.wd_after("conv_no_ev_floor", now):
+                if reason in ("convergence", "elastic", "elastic bid") and self.wd_after("conv_no_ev_floor", now):
                     pass                                    # C110 (Piero 11:40 Oct 22 item 3): from Oct 29 the ramp overrides the 5% floor (lowest EV/$ first)
                 elif reason != "h1 shortfall" and ev_fl:    # C101 item C (Piero 15:15 Oct 21): no fire sale — EV/$ held <= 5% at the sale price
                     if reason.endswith("at the bid"):
@@ -10667,7 +10670,18 @@ class Engine:
 
     # ------------------------------------------------------------------ C102: election night (docs/night_reconcile.md §4 items 1-5, 9)
     def el_reserve(self, now):
-        """C103: the election reserve (usable cash no entry layer may spend) on the day's step of the ramp."""
+        """C103 / C114: the election reserve (usable cash no entry layer may spend) = the firm ramp + the elastic 15k from Nov 2."""
+        return self.el_firm(now) + self.el_elastic(now)
+
+    def el_elastic(self, now):
+        """C114 (Piero 14:00 Oct 23): the elastic 15k (45k -> 60k usable), Nov 2 -> Nov 4 09:00."""
+        if not ELECTION_RESERVE.get("on") or not ELECTION_RESERVE.get("elastic"):
+            return 0.0
+        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+        return float(ELECTION_RESERVE["elastic"]) if ELECTION_RESERVE["elastic_from"] <= t < ELECTION_RESERVE["until"] else 0.0
+
+    def el_firm(self, now):
+        """C103 / C114: the firm reserve on the day's step of the ramp (20k Oct 28 -> 45k Nov 3 12:00)."""
         if not ELECTION_RESERVE.get("on"):
             return 0.0
         t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
@@ -10692,19 +10706,24 @@ class Engine:
         return cap
 
     def conv_select(self, now):
-        """C103 (cash_calendar §2 Oct 30 / §3 item 2): the lots that get a convergence ask — while usable cash plus the sale asks resting is
-        under the day's election reserve, non-core lots first, lowest return left first, until their value covers the gap. Out: Piero's
-        manual book, locks / pair sets, FMM, rotation (own exits), the night layers, RI Senate R NO (his keep), the held R-side lots."""
+        """C103 / C114 (cash_calendar §2-3; Piero 11:40 / 14:00 Oct 23): the lots that get a sale ask so usable cash + the sale asks resting reach
+        the reserve. FIRM (the ramp, 45k by Nov 3 12:00): lowest EV/$ first. ELASTIC (+15k, Nov 2-3): only at >= PM fair - 5c (at the bid, or
+        resting at max(touch, fair - 5c)), lowest EV/$ first, the favourites of states whose last poll close is <= 17:00 PT last (they are kept
+        for wave recycling after their calls). Out: Piero's manual book, locks / pair sets, FMM, rotation (own exits), the night layers, RI
+        Senate R NO (his keep), the held R-side lots."""
         cash = min(self.cash_raw_hist) if getattr(self, "cash_raw_hist", None) else 0.0
         usable = cash - CASH_RESERVE - self.manual_reserve_left()
         asks = sum(o["qty"] * (1 - o["price"]) for o in self.open if (self.ledger.orders.get(o["id"]) or {}).get("layer") in ("release", "rotexit"))
-        gap = self.el_reserve(now) - usable - asks
-        keep = getattr(self, "conv_keep", set())
+        firm, elastic = self.el_firm(now), self.el_elastic(now)
+        gap_f, gap_e = firm - usable - asks, firm + elastic - usable - asks
         resting = {(str(o["ex"]), (self.ledger.orders.get(o["id"]) or {}).get("sub")) for o in self.open if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "release"}
-        keep = {k for k in keep if k in resting}             # an ask already out keeps its place
-        if gap <= 0:
-            self.conv_keep = keep
-            return keep
+        keep = {k for k in getattr(self, "conv_keep", set()) if k in resting}     # an ask already out keeps its place
+        keep_e = {k for k in getattr(self, "conv_elastic", set()) if k in resting}
+        if gap_e <= 0:
+            self.conv_keep, self.conv_elastic = keep, keep_e
+            return keep | keep_e
+        E = self.election
+        early = time.mktime(time.strptime(f"{ELECTION['election_day']} {ELECTION_RESERVE['elastic_keep_close']}", "%Y-%m-%d %H:%M"))
         cands = []
         for ex, b in self.book.items():
             ex = str(ex); q = float(b.get("pos") or 0)
@@ -10715,23 +10734,36 @@ class Engine:
             fs = self.side_fair(ex, side)
             if ask is None or fs is None:
                 continue
+            last = E.close.get(E.race(ex)) if E is not None else None
+            early_fav = fs >= float(ELECTION_RESERVE["fav_min"]) - 1e-9 and last is not None and last <= early
             for sub, v in (self.ledger.subbooks.get(ex) or {}).items():
-                if v * q <= 0 or abs(v) < MIN_QTY or str(sub).startswith(("manual", "pairset:", "fmm:", "fmmlock:", "rot:", "callsnipe:", "drift:", "sleeve:", "swing:")) or (ex, sub) in keep:
+                if v * q <= 0 or abs(v) < MIN_QTY or str(sub).startswith(("manual", "pairset:", "fmm:", "fmmlock:", "rot:", "callsnipe:", "drift:", "sleeve:", "swing:")) or (ex, sub) in keep or (ex, sub) in keep_e:
                     continue
                 avg = float((self.ledger.tranches.get(sub) or {}).get("avg") or ((b.get("row") or {}).get("avgCost")) or 0)
-                px = max(ask, bots.tick_up(round(avg + RULE0_MARGIN, 6)), bots.tick_up(round(fs / (1 + SELL_EV_MAX), 6)) if (SELL_EV_MAX < 1 and not self.wd_after("conv_no_ev_floor", now)) else 0.0)
-                cands.append(((ex, sub) in self.core_set, fs / px - 1, ex, sub, abs(v) * px))
-        out = set(keep)
-        for core, ret, ex, sub, val in sorted(cands):
-            if gap <= 0:
-                break
-            out.add((ex, sub)); gap -= val
-        if out - keep:
-            msg = (f"CONVERGENCE (cash calendar): usable {usable:,.0f} + asks {asks:,.0f} under the {self.el_reserve(now):,.0f} reserve: asks on " +
-                   ", ".join(f"{self.name(e)} {s_.split(':')[0]}" for e, s_ in sorted(out - keep))[:600])
+                fl = bots.tick_up(round(avg + RULE0_MARGIN, 6))
+                px = max(ask, fl, bots.tick_up(round(fs / (1 + SELL_EV_MAX), 6)) if (SELL_EV_MAX < 1 and not self.wd_after("conv_no_ev_floor", now)) else 0.0)
+                fl_e = max(fl, bots.tick_up(round(fs - float(ELECTION_RESERVE["elastic_below_fair"]), 6)))
+                px_e = bid if (bid is not None and bid >= fl_e - 1e-9) else max(ask, fl_e)
+                cands.append(dict(ret=fs / px - 1, ret_e=fs / px_e - 1, key=(ex, sub), val=abs(v) * px, val_e=abs(v) * px_e, early_fav=early_fav))
+        out, out_e = set(keep), set(keep_e)
+        rest = []
+        for c in sorted(cands, key=lambda c: c["ret"]):      # FIRM: lowest EV/$ first (Piero 11:40 Oct 22 item 3)
+            if gap_f > 0:
+                out.add(c["key"]); gap_f -= c["val"]; gap_e -= c["val"]
+            else:
+                rest.append(c)
+        if elastic > 0:
+            for c in sorted(rest, key=lambda c: (c["early_fav"], c["ret_e"])):   # ELASTIC: early-close favourites last
+                if gap_e <= 0:
+                    break
+                out_e.add(c["key"]); gap_e -= c["val_e"]
+        if (out - keep) or (out_e - keep_e):
+            msg = (f"CONVERGENCE (cash calendar): usable {usable:,.0f} + asks {asks:,.0f} under the {firm:,.0f} firm" + (f" + {elastic:,.0f} elastic" if elastic else "")
+                   + " reserve: asks on " + ", ".join(f"{self.name(e)} {s_.split(':')[0]}" for e, s_ in sorted(out - keep))[:500]
+                   + (("; elastic (>= fair - 5c): " + ", ".join(f"{self.name(e)} {s_.split(':')[0]}" for e, s_ in sorted(out_e - keep_e))[:300]) if out_e - keep_e else ""))
             self.event("RELEASE", msg); self.night.line(msg)
-        self.conv_keep = out
-        return out
+        self.conv_keep, self.conv_elastic = out, out_e
+        return out | out_e
 
     def election_cash_line(self, now):
         """cash_calendar §3 item 4: the ELECTION CASH line — usable cash vs the ramp and the 60k (cash >= 67k) target by Nov 3 15:00."""
@@ -10741,8 +10773,8 @@ class Engine:
         nxt = next(((at, v) for at, v in ELECTION_RESERVE["steps"] if time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) < at), None)
         asks = sum(o["qty"] * (1 - o["price"]) for o in self.open if (self.ledger.orders.get(o["id"]) or {}).get("layer") in ("release", "rotexit"))
         return (f"ELECTION CASH: cash {cash:,.0f}, usable {usable:,.0f} (cash - 5k - Piero's reserve left), election reserve now {er:,.0f}"
-                + (f", next {nxt[1]:,.0f} from {nxt[0][5:16]}" if nxt else "") + f"; sale asks resting would bring {asks:,.0f}; target 60,000 usable by Nov 3 15:00 "
-                f"(short {max(0.0, 60_000 - usable - asks):,.0f} at today's asks)")
+                + (f", next {nxt[1]:,.0f} from {nxt[0][5:16]}" if nxt else "") + f"; sale asks resting would bring {asks:,.0f}; target 45,000 usable FIRM by Nov 3 12:00 "
+                f"(short {max(0.0, 45_000 - usable - asks):,.0f} at today's asks) + 15,000 ELASTIC Nov 2-3 at >= fair - 5c (Piero 14:00 Oct 23)")
 
     def el_mode(self, now=None):
         """off / shadow / live: the `election_mode` control, else shadow from ELECTION['shadow_from'] (zero orders). Live only by control."""
@@ -11287,7 +11319,7 @@ class Engine:
         usable = cash - CASH_RESERVE - self.manual_reserve_left()
         return (f"ELECTION CHECKLIST {time.strftime('%H:%M', time.localtime(now))}: mode {self.el_mode_cached}{' (live needs election_mode=live)' if self.el_mode_cached != 'live' else ''}; "
                 f"kill {'ON' if E and E.stopped else 'off'}; books armed {len(E.meta) if E else 0} / races {len(E.close) if E else 0}; first pulls "
-                f"{time.strftime('%H:%M', time.localtime(first - el.PULL_BEFORE_S)) if first else 'n/a'} PT; usable cash {usable:,.0f} (target 60,000 {'OK' if usable >= 60_000 else 'SHORT'}); "
+                f"{time.strftime('%H:%M', time.localtime(first - el.PULL_BEFORE_S)) if first else 'n/a'} PT; usable cash {usable:,.0f} (firm 45,000 {'OK' if usable >= 45_000 else 'SHORT'}; with the elastic 60,000 {'OK' if usable >= 60_000 else 'not reached'}); "
                 f"FMM bids resting {fmm_b}, carry bids {car_b} (both should be 0); PM feed last quote {pm_age:.0f} s ago; writes left {api.writes_left()}; "
                 f"new risk {'PAUSED' if self.controls.paused else 'on'}; poll_close.json {'ok' if E else 'MISSING'}")
 

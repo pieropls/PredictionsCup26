@@ -7024,6 +7024,27 @@ class C102Tests(EngineCase):
         eng.controls.d["election"] = dict(mode="shadow"); eng.el_step(time.time())
         self.assertEqual(eng.ex.lane_reserve, 0)
 
+    def test_c114_elastic_keeps_early_close_favourites_last(self):
+        fake, eng, a = self.rig()
+        E = eng.election
+        b = [x for x in eng.owner if x != a and eng.owner[x].kind == "market" and str(x) not in f_engine.dash5.RI_EX and x not in eng.manual_ex][0]
+        C94Tests.c95_market(self, eng, fake, b, 0.95, (0.94, 0.95, 0.945), race="Utah Governor", vol=100_000.0)
+        E.meta[b] = dict(race="Utah Governor", party="R", state="Utah")
+        eng.book = {}; eng.ledger.subbooks = {}                 # only the two test books
+        day = a_config.ELECTION["election_day"]
+        E.close[E.race(a)] = time.mktime(time.strptime(f"{day} 16:00", "%Y-%m-%d %H:%M"))   # a: last close 16:00 PT (an early-close favourite)
+        E.close["Utah Governor"] = time.mktime(time.strptime(f"{day} 20:00", "%Y-%m-%d %H:%M"))
+        for ex in (a, b):
+            fake.pos[ex] = 1000; eng.book[ex] = dict(pos=1000, row=dict(avgCost=0.90))
+            eng.ledger.subbooks[ex] = {f"dump:{ex}:yes:1": 1000.0}
+            eng.ledger.tranches[f"dump:{ex}:yes:1"] = dict(ex=ex, side="yes", kind="dump", state="open", ts=time.time(), t="x", avg=0.90)
+        eng.cash_raw_hist = [a_config.CASH_RESERVE + 2_000.0]
+        eng.conv_usable_now = lambda: min(eng.cash_raw_hist) - a_config.CASH_RESERVE - eng.manual_reserve_left()
+        eng.el_firm = lambda now: 0.0; eng.el_elastic = lambda now: eng.conv_usable_now() + 500.0   # room for one lot above the usable cash
+        eng.conv_keep, eng.conv_elastic = set(), set(); eng.open = []
+        eng.conv_select(time.time())
+        self.assertEqual({k[0] for k in eng.conv_elastic}, {b}, "the 16:00-close favourite stays held (wave recycling after its call)")
+
     def test_rehearsal_injection_runs_a_synthetic_call_in_shadow_and_restores_the_race(self):
         fake, eng, a = self.rig()
         E = eng.election
@@ -7068,6 +7089,10 @@ class C103Tests(EngineCase):
         self.assertEqual(eng.el_reserve(self.ts("2026-10-31 12:00:00")), 30_000.0)
         self.assertEqual(eng.el_reserve(self.ts("2026-11-03 15:00:00")), 60_000.0)
         self.assertEqual(eng.el_reserve(self.ts("2026-11-04 09:00:00")), 0.0)
+        self.assertEqual(eng.el_reserve(self.ts("2026-11-01 12:00:00")), 35_000.0, "C114: the firm ramp to 45k")
+        self.assertEqual(eng.el_reserve(self.ts("2026-11-02 12:00:00")), 40_000.0 + 15_000.0, "firm 40k + the elastic 15k from Nov 2")
+        self.assertEqual(eng.el_firm(self.ts("2026-11-03 12:00:00")), 45_000.0)
+        self.assertEqual(eng.el_firm(self.ts("2026-11-03 11:59:00")), 40_000.0)
         self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-28 12:00:00")), float("inf"))
         self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-29 12:00:00")), 15_000.0)
         self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-31 12:00:00")), 5_000.0)
@@ -7104,7 +7129,7 @@ class C103Tests(EngineCase):
         loop(eng, fake); loop(eng, fake)
         eng.ledger.subbooks[a] = {f"carry:{a}:yes": 3000.0}; eng.ledger.subbooks[b] = {f"dump:{b}:yes:1": 3000.0}; eng.lots_cache = (None, {})
         f_engine.WIND_DOWN = dict(a_config.WIND_DOWN, conv_from="2000-01-01 00:00:00")
-        eng.el_reserve = lambda now: 1e9                       # a reserve far above the cash: every candidate
+        eng.el_firm = lambda now: 1e9; eng.el_elastic = lambda now: 0.0   # a firm reserve far above the cash: every candidate
         eng.cash_raw_hist = [a_config.CASH_RESERVE + 2_000 + 1_000.0]
         sel = eng.conv_select(time.time())
         self.assertIn((a, f"carry:{a}:yes"), sel); self.assertIn((b, f"dump:{b}:yes:1"), sel)
@@ -7117,10 +7142,21 @@ class C103Tests(EngineCase):
         self.assertAlmostEqual(plan[b]["px"], 0.91, places=3, msg="Oct 29 on: max(lot avg + 0.5c, touch) = 0.91 (Piero 11:40 Oct 22 item 3)")
         f_engine.WIND_DOWN = dict(f_engine.WIND_DOWN, conv_no_ev_floor="2099-01-01 00:00:00")
         eng.conv_keep = set()
-        eng.el_reserve = lambda now: (a_config.CASH_RESERVE + 2_000 + 1_000.0) - a_config.CASH_RESERVE - eng.manual_reserve_left() + 2_000.0   # a 2k gap
+        eng.el_firm = lambda now: (a_config.CASH_RESERVE + 2_000 + 1_000.0) - a_config.CASH_RESERVE - eng.manual_reserve_left() + 2_000.0   # a 2k gap
         eng.open = []
         sel = eng.conv_select(time.time())
-        self.assertEqual(sel, {(a, f"carry:{a}:yes")}, "the lowest return left first, only what covers the gap")
+        ev = lambda k: eng.side_fair(k[0], "yes" if eng.book[k[0]]["pos"] > 0 else "no") / max(eng.px[k[0]][1] if eng.book[k[0]]["pos"] > 0 else 1 - eng.px[k[0]][0], 0.01)
+        cand = [(str(e), s_) for e, bk in eng.ledger.subbooks.items() for s_, v in bk.items() if abs(v) >= 10 and not s_.startswith(("manual", "fmm:", "rot:", "pairset:")) and e in eng.book]
+        self.assertTrue(sel and len(sel) < len(cand), "only what covers the 2k gap")
+        self.assertLessEqual(max(ev(k) for k in sel), min(ev(k) for k in cand if k not in sel) + 1e-9, "C114 / Piero 11:40: the lowest EV/$ first (no longer non-core first)")
+        # C114: the elastic 15k — only at >= fair - 5c (the bid if it is there, else resting at max(touch, fair - 5c))
+        eng.conv_keep, eng.conv_elastic = set(), set()
+        eng.el_firm = lambda now: 0.0; eng.el_elastic = lambda now: 1e9
+        f_engine.WIND_DOWN = dict(f_engine.WIND_DOWN, conv_no_ev_floor="2000-01-01 00:00:00")
+        sel = eng.conv_select(time.time())
+        self.assertIn((b, f"dump:{b}:yes:1"), eng.conv_elastic)
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertEqual(plan[b]["why"], "elastic"); self.assertAlmostEqual(plan[b]["px"], 0.94, places=3, msg="fair 0.99 - 5c: never cheaper (the bid 0.900 is under it)")
 
 
 

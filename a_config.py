@@ -552,9 +552,13 @@ ROT_REPEG_UP_C = 0.02                     # item 2: a rotation exit re-pegs UP w
 FMM_ROOM = dict(on=True, until="2026-10-28 23:59:59", race_cap=8_000.0, cf_race_cap=4_000.0, inv_cap=40_000.0, min_clip=800, cf_clip=667)
 CARRY_FIRST = {"1077": ("no", 0.845)}   # item 1: the unused free cash goes to carry bids, Rhode Island Senate R NO (<= 0.845) first, then the all-NO sets
 # C103 (docs/cash_calendar.md §3 + Piero's §5 decisions of 15:55 Oct 17, moved by Piero 15:15 Oct 21 item C: the ramp starts Oct 28)
-ELECTION_RESERVE = dict(on=True, steps=(("2026-10-28 00:00:00", 20_000.0), ("2026-10-31 00:00:00", 30_000.0), ("2026-11-01 00:00:00", 40_000.0),
-                                        ("2026-11-02 00:00:00", 50_000.0), ("2026-11-03 00:00:00", 60_000.0)),
-                        until="2026-11-04 09:00:00")   # usable cash (cash - 5k floor - 2k reserve) no entry layer may spend; the election sniper / drift use it
+ELECTION_RESERVE = dict(on=True, steps=(("2026-10-28 00:00:00", 20_000.0), ("2026-10-30 00:00:00", 25_000.0), ("2026-10-31 00:00:00", 30_000.0),
+                                        ("2026-11-01 00:00:00", 35_000.0), ("2026-11-02 00:00:00", 40_000.0), ("2026-11-03 12:00:00", 45_000.0)),
+                        until="2026-11-04 09:00:00",   # usable cash (cash - 5k floor - 2k reserve) no entry layer may spend; the election sniper / drift use it
+                        # C114 (Piero 14:00 Oct 23): 45k usable FIRM by Nov 3 12:00 (the ramp above, lowest EV/$ first) + 15k ELASTIC (45k -> 60k), raised
+                        # Nov 2-3 only from lots that sell at >= PM fair - 5c (at the bid, or resting at the touch), lowest EV/$ first, never cheaper; what
+                        # doesn't fill stays held, the favourites of states whose last poll close is <= 17:00 PT kept last (wave recycling after their calls)
+                        elastic=15_000.0, elastic_from="2026-11-02 00:00:00", elastic_below_fair=0.05, elastic_keep_close="17:00", fav_min=0.75)
 WIND_DOWN = dict(on=True, rot_buys_stop="2026-10-27 00:00:00", locks_stop="2026-10-29 00:00:00", fmm_caps=(("2026-10-29 00:00:00", 15_000.0), ("2026-10-31 00:00:00", 5_000.0)),
                  fmm_no_bids="2026-11-01 12:00:00", carry_bids_stop="2026-10-30 00:00:00", rot_exit_touch="2026-10-30 00:00:00", conv_from="2026-10-29 00:00:00",   # C110 (Piero 11:40 Oct 22 item 3): from Oct 29
                  conv_no_ev_floor="2026-10-29 00:00:00",   # the 5% (fair / 1.05) floor holds until Oct 28 23:59; from Oct 29 the ramp overrides it for the convergence asks
