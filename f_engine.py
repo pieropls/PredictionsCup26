@@ -75,7 +75,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, CASH_FLOOR_RESUME, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
-                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM, SELL_HOLD, SELL_KEEP_LAYERS, CARRY_BIDSELL, SELL_EV_MAX, FMM_CF, ENGINE_ERR_EXTERNAL, ENGINE_ERR_RESUME_S, ELECTION, ELECTION_RESERVE, WIND_DOWN, FMM_ROOM, CARRY_FIRST,
+                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM, SELL_HOLD, SELL_KEEP_LAYERS, CARRY_BIDSELL, SELL_EV_MAX, FMM_CF, ENGINE_ERR_EXTERNAL, ENGINE_ERR_RESUME_S, ELECTION, ELECTION_RESERVE, WIND_DOWN, FMM_ROOM, CARRY_FIRST, FMM_OLD_LOT_S, ROT_REPEG_UP_C,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -437,6 +437,7 @@ class Engine:
         self.el_logq, self.el_shadowq, self.el_hour = collections.deque(maxlen=5000), collections.deque(maxlen=20000), collections.Counter()
         self.drift_now, self.drift_view, self.drift_logged = {}, {}, {}
         self.callexit_now, self.callexit_logged = {}, set()
+        self.rot_fairbased = {}
         self.el_sent, self.el_fill_seen = {}, set()
         self.el_taken = {}
         self.fmm_refill_wait, self.fmm_lat_plan = {}, []   # C100: per sell order, since when the others' best ask sits below ours; the FMM hour; churn window
@@ -4944,7 +4945,8 @@ class Engine:
             first = max(floor_, bots.tick_up(round(top + (FMM["exit_ring_c"] if ring else FMM["exit_c"]), 6)))
             oa = self.fmm_others_ask(ex, side)
             have = cur.get(sub)
-            if self.gapmm_live():                            # C99c: the gap-median exit, live after the 10:00 gate (docs/gapmm.md §7)
+            age = now - float((self.ledger.tranches.get(sub) or {}).get("ts") or now)
+            if self.gapmm_live() and age < FMM_OLD_LOT_S:   # C99c: the gap-median exit (docs/gapmm.md §7); C113: lots >= 24 h old exit at the old rule
                 gpx = self.gap_exit_px(ex, side, top, avg, now)
                 gfl = self.gap_floor(top, avg)
                 if have is None:
@@ -5531,6 +5533,7 @@ class Engine:
                     self.rot_logged.add(k_)
                     msg = f"ROT SWAP {self.name(ex)} {side.upper()} {q:,.0f}: ask at the touch {px:.3f} ({why})"
                     self.event("ROT", msg); self.night.line(msg)
+            self.rot_fairbased[sub] = (why == "fair - 1.5c")    # C113: only a fair-based target may re-peg the exit up (never the touch)
             self.rot_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg, why=why))
 
     def rot_fill_events(self, fills):
@@ -11633,6 +11636,9 @@ class Engine:
                     if (o.get("layer") == "release" and new_ask > old_ask and SELL_EV_MAX < 1 and fs_ is not None
                             and old_ask < bots.tick_up(round(fs_ / (1 + SELL_EV_MAX), 6)) - 1e-9):
                         keep_c.append(o)                    # C101 item C: an ask under fair / 1.05 (a sale above 5% EV/$) moves up to it at once
+                        continue
+                    if (o.get("layer") == "rotexit" and new_ask >= old_ask + ROT_REPEG_UP_C - 1e-9 and self.rot_fairbased.get(str(w.get("sub") or ""))):
+                        keep_c.append(o)                    # C113 (Piero 10:55 Oct 23 item 2): the fair - 1.5c target rose >= 2c: re-peg up (the attribution: ~1.7c a share given up)
                         continue
                     if new_ask > old_ask or t_u is None or now - t_u < SALE_REPEG_S:
                         want_keys[k] -= 1

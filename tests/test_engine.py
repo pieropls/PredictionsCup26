@@ -7259,5 +7259,41 @@ class C111Tests(EngineCase):
         self.assertEqual([(o["side"], o["price"], o["qty"]) for o in probe], [("yes", 0.93, a_config.MIN_QTY)], "a genuine bid at the touch, minimum size")
 
 
+
+class C113Tests(EngineCase):
+    """C113 (Piero 10:55 Oct 23): FMM min new clip 50 shares; FMM lots >= 24 h old exit at the old rule (max(fill + 0.5c, best ask), re-pegged
+    down), fresh lots keep the gap-median exit; a rotation exit re-pegs UP when its fair - 1.5c target rose >= 2c (never for a touch target)."""
+
+    def test_old_fmm_lots_exit_at_the_old_rule_fresh_ones_at_the_gap_median(self):
+        fake, eng, mk = FMMTests.rig(self)
+        a = mk[0]
+        C94Tests.c95_market(self, eng, fake, a, 0.90, (0.85, 0.86, 0.855), race="RX")
+        FMMTests.live(self, eng)
+        eng.gapmm_live = lambda: True
+        eng.gap_exit_px = lambda ex, side, top, avg, now: 0.95          # the gap-median target sits well above the touch
+        self.assertEqual(a_config.FMM["min_new"], 50)
+        for sub, age, want in ((f"fmm:{a}:yes:0.850", 3600, 0.95), (f"fmm:{a}:yes:0.840", 25 * 3600, 0.86)):
+            eng.ledger.subbooks.setdefault(a, {})[sub] = 1000.0
+            eng.ledger.tranches[sub] = dict(ex=a, side="yes", kind="fmm", state="open", ts=time.time() - age, t="x", avg=float(sub.split(":")[-1]), qty=1000.0)
+        eng.track_fmm(time.time())
+        got = {x["sub"]: x["px"] for x in eng.fmm_view[a]}
+        self.assertAlmostEqual(got[f"fmm:{a}:yes:0.850"], 0.95, places=3, msg="fresh: the gap-median exit")
+        self.assertAlmostEqual(got[f"fmm:{a}:yes:0.840"], 0.86, places=3, msg=">= 24 h: max(fill + 0.5c = 0.845, best ask 0.86)")
+
+    def test_rotation_exit_repegs_up_only_on_a_2c_rise_of_its_fair_target(self):
+        fake, eng, favs = C93Tests.rig(self)
+        b = eng.bots[0]
+        sub = f"rot:{b.ex}:yes"
+        o = dict(id="880101", ex=b.ex, side="no", action="buy", price=0.45, qty=1000.0, layer="rotexit", sub=sub)   # ask 0.550
+        up2 = dict(side="no", action="buy", px=0.43, qty=1000, layer="rotexit", sub=sub)                            # ask 0.570
+        up1 = dict(up2, px=0.44)                                                                                     # ask 0.560
+        now = time.time()
+        eng.rot_fairbased[sub] = True
+        self.assertEqual(eng.repeg_grace(b, [o], [up2], now), ([o], [up2]), "fair - 1.5c rose 2c: re-peg up")
+        self.assertEqual(eng.repeg_grace(b, [o], [up1], now), ([], []), "1c: keeps its place")
+        eng.rot_fairbased[sub] = False
+        self.assertEqual(eng.repeg_grace(b, [o], [up2], now), ([], []), "a touch target (swap / exit-to-touch): never chased up")
+
+
 if __name__ == "__main__":
     unittest.main()

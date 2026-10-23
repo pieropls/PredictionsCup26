@@ -504,7 +504,7 @@ ROTATION = dict(on=True, gap_min=0.04, gap_ext=0.03, keep_gap=0.03, pm_skip_c=0.
 ROT_TTL_S = 24 * 3600
 
 # ---- FMM (fmm_spec Oct 16 18:20 + Piero 18:30 item 4): favourite-side market maker + two-book NO+NO locks
-FMM = dict(on=True, fav_min=0.75, edge=0.02, levels=(0, 1, 2, 3), level_step=0.01, min_clip=500, min_new=100, race_cap=5_000.0,
+FMM = dict(on=True, fav_min=0.75, edge=0.02, levels=(0, 1, 2, 3), level_step=0.01, min_clip=500, min_new=50, race_cap=5_000.0,
            race_caps={"Rhode Island Senate": 15_000.0},     # Piero 21:15 item 2: RI Senate's inventory clears daily (25 round trips/day in the replay)
            lock_free_share=0.30, hedge_after_s=7_200,        # Piero 21:15 item 1: new locks <= 30% of engine free cash, from cash FMM's ladders don't need; stuck lots (>= 2 h) hedged first
            k_live=3.0, k_step=5.0, k5_ok=True, inv_cap_live=35_000.0, inv_cap_step=35_000.0, cap_tol=250.0,   # Piero 15:55 Oct 17 item 2: 30k now (Sunday's step brought forward)
@@ -545,6 +545,9 @@ ELECTION = dict(on=True, shadow_from="2026-10-22 06:00:00", election_day="2026-1
                 drift_move=0.03, drift_anchor_s=3600,   # C110 (Piero 11:40 Oct 22 item 1): the drift trades the CHANGE — PM moved >= 3c since the close and the
                                                         # SIG - PM gap >= 3c beyond its 6-h median before the close; exit when the gap is back within 1c of it
                 recycle_bid=0.98, recycle_target=20_000.0)   # item 8 (C7): a strict-called winner sells into bids >= max(0.98, lot avg + 0.5c) while usable < 20k
+# C113 (Piero 10:55 Oct 23): FMM min new clip 100 -> 50 shares (FMM min_new); FMM lots older than FMM_OLD_LOT_S exit at the old rule
+FMM_OLD_LOT_S = 24 * 3600                 # max(fill + 0.5c, best ask), re-pegged down; fresh lots keep the gap-median exits
+ROT_REPEG_UP_C = 0.02                     # item 2: a rotation exit re-pegs UP when its fair - 1.5c target rose >= 2c (never to chase the touch, never < lot avg + 0.5c)
 # C106 (Piero 02:50 Oct 22 item 1): more FMM room until Oct 28 23:59 (then the cash calendar steps FMM down as approved); clips scale with the caps
 FMM_ROOM = dict(on=True, until="2026-10-28 23:59:59", race_cap=8_000.0, cf_race_cap=4_000.0, inv_cap=40_000.0, min_clip=800, cf_clip=667)
 CARRY_FIRST = {"1077": ("no", 0.845)}   # item 1: the unused free cash goes to carry bids, Rhode Island Senate R NO (<= 0.845) first, then the all-NO sets
