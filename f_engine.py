@@ -4152,6 +4152,8 @@ class Engine:
         """C101 item B (Piero 15:15 Oct 21): FMM claims min(15k, what it can deploy under its caps) of the free cash; the rest goes to the
         carry bids, then the all-NO sets (idle cash above floor + reserve ~0)."""
         dep = getattr(self, "fmm_deploy", None)
+        if dep is not None:
+            dep += getattr(self, "fmm_taper_hold", 0.0)      # C115b: the taper's freed room stays claimed until the ramp begins
         return min(max(0.0, free), float(ALLOC["fmm_priority_free"]), float("inf") if dep is None else max(0.0, dep))
 
     def rot_reserve(self):
@@ -4586,11 +4588,14 @@ class Engine:
     def fmm_k(self):
         return float(self.fmm_state().get("K") or FMM["k_live"])
 
-    def fmm_inv_cap(self):
+    def fmm_cap_untapered(self):
         cap = float(self.fmm_state().get("inv_cap") or FMM["inv_cap_live"])
         if self.fmm_room_on():
             cap = max(cap, float(FMM_ROOM["inv_cap"]))       # C106: 40k until Oct 28 23:59
-        return min(cap, self.wd_fmm_cap(time.time()))      # C103: the cash calendar's FMM wind-down (15k Oct 29, 5k Oct 31)
+        return cap
+
+    def fmm_inv_cap(self):
+        return min(self.fmm_cap_untapered(), self.wd_fmm_cap(time.time()))   # C103 / C115: the FMM wind-down (35k Oct 26 ... 5k Oct 31)
 
     def fmm_room_on(self, now=None):
         """C106: the larger FMM caps until Oct 28 23:59."""
@@ -4780,8 +4785,13 @@ class Engine:
         mclip = float(FMM_ROOM["min_clip"]) if self.fmm_room_on(now) else float(FMM["min_clip"])      # C106: clips scale with the caps
         cfclip = float(FMM_ROOM["cf_clip"]) if self.fmm_room_on(now) else float(FMM_CF["clip"])
         # C101 item B: what FMM can still deploy under its caps (its claim on free cash is min(15k, this))
-        self.fmm_deploy = max(0.0, min(cap - inv_tot, sum(max(0.0, (rcap(r) if any((l[0], l[1]) not in cf for l in legs) else min(rcap(r), rcf - inv_cf[r] + inv[r])) - inv[r])
-                                                            for r, legs in books.items())))
+        room_r = sum(max(0.0, (rcap(r) if any((l[0], l[1]) not in cf for l in legs) else min(rcap(r), rcf - inv_cf[r] + inv[r])) - inv[r]) for r, legs in books.items())
+        self.fmm_deploy = max(0.0, min(cap - inv_tot, room_r))
+        # C115b: before the firm ramp begins (Oct 26-27) the cash the taper frees is not the other layers': FMM keeps claiming what it could
+        # deploy under the untapered cap, so carry (RI Senate R NO first, never sold) and the sets don't take it and it stays for the ramp
+        self.fmm_taper_hold = 0.0
+        if not paper and self.el_firm(now) <= 0 and abs(cap - self.wd_fmm_cap(now)) < 1e-6:     # the taper is the cap that binds
+            self.fmm_taper_hold = max(0.0, min(self.fmm_cap_untapered() - inv_tot, room_r) - self.fmm_deploy)
         cur = collections.defaultdict(dict)                  # (ex, side) -> {px: (qty, age key)}
         if paper:
             for (ex, side, px), o in P["orders"].items():
@@ -5482,7 +5492,8 @@ class Engine:
         cv = getattr(self, "fmm_cov", None) or {}
         cov = (f"coverage {cv.get('quoted', 0)} of {cv.get('eligible', 0)} books quoted (coin flips {cv.get('cf_quoted', 0)} of {cv.get('cf_eligible', 0)}), "
                f"resting {cv.get('rest', 0):,} of K {cv.get('K', self.fmm_k()):g} x free {cv.get('allow', 0):,} (free {cv.get('free', 0):,}; deployable under the caps {cv.get('deploy', 0):,}, "
-               f"claim {self.fmm_claim_first(cv.get('free', 0)):,.0f})")
+               f"claim {self.fmm_claim_first(cv.get('free', 0)):,.0f}"
+               + (f", of which the taper's freed room held for the ramp {getattr(self, 'fmm_taper_hold', 0.0):,.0f}" if getattr(self, "fmm_taper_hold", 0.0) > 0.5 else "") + ")")
         lp = sorted(getattr(self, "fmm_lat_plan", []) or [])
         latx = (f"refill latency (sweep received -> refill order placed, n {len(lat)}) p50 {'n/a' if p50 is None else f'{p50:.1f} s'} p90 {'n/a' if p90 is None else f'{p90:.1f} s'}"
                 + (f", of which sweep -> planned p50 {lp[len(lp) // 2]:.1f} s" if lp else ""))

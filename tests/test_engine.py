@@ -7104,6 +7104,29 @@ class C103Tests(EngineCase):
         self.assertFalse(eng.wd_after("entries_stop", self.ts("2026-11-02 16:59:00")))
         self.assertTrue(eng.wd_after("entries_stop", self.ts("2026-11-02 17:00:00")))
 
+    def test_c115b_the_taper_freed_room_stays_claimed_until_the_ramp_begins(self):
+        fake, eng, mk = FMMTests.rig(self)
+        f_engine.FMM_CF = dict(a_config.FMM_CF, on=False)
+        a = mk[0]
+        C94Tests.c95_market(self, eng, fake, a, 0.90, (0.85, 0.86, 0.855), race="TP-A", vol=100_000.0)
+        f_engine.FMM_ROOM = dict(a_config.FMM_ROOM, until="2099-01-01 00:00:00")      # the 40k room (8k a race)
+        eng.wd_fmm_cap = lambda now: 3_000.0                   # the day's taper cap binds: 3k of the race's 8k room
+        eng.el_firm = lambda now: 0.0                          # Oct 26-27: before the firm ramp
+        eng.fmm_targets(time.time(), paper=False)
+        self.assertAlmostEqual(eng.fmm_deploy, 3_000.0, places=0, msg="FMM deploys only under the taper cap")
+        self.assertAlmostEqual(eng.fmm_taper_hold, 37_000.0, places=0, msg="the untapered 40k less the taper's 3k (the race rooms are larger) stays claimed")
+        self.assertAlmostEqual(eng.fmm_claim_first(20_000.0), 15_000.0, places=0, msg="carry / sets don't get the freed room (claim still <= 15k)")
+        self.assertAlmostEqual(eng.fmm_claim_first(6_000.0), 6_000.0, places=0)
+        self.assertIn("held for the ramp 37,000", eng.fmm_status(time.time()))
+        eng.el_firm = lambda now: 20_000.0                     # Oct 28: the ramp's reserve governs from here
+        eng.fmm_targets(time.time(), paper=False)
+        self.assertEqual(eng.fmm_taper_hold, 0.0)
+        self.assertAlmostEqual(eng.fmm_claim_first(20_000.0), 3_000.0, places=0)
+        eng.el_firm = lambda now: 0.0
+        eng.fmm_inv_cap = lambda: 2_000.0                      # some other cap binds (not the taper): no hold
+        eng.fmm_targets(time.time(), paper=False)
+        self.assertEqual(eng.fmm_taper_hold, 0.0)
+
     def test_c115_backstop_reprices_fmm_and_rotation_exits_for_the_shortfall_only(self):
         fake, eng, mk = FMMTests.rig(self)
         a, b = mk[:2]
