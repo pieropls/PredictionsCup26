@@ -5425,9 +5425,15 @@ class Engine:
         for v in lots.values():
             by_race[self.rot_race(v[0])] += v[2] * v[3]
         cap = self.fmm_inv_cap(); tol = float(FMM["cap_tol"])
-        if inv_tot > cap + tol:
+        bids = self.fmm_bids()
+        rest_tot = sum(o["qty"] * o["price"] for o in bids)
+        rest_race = collections.Counter()
+        for o in bids:
+            rest_race[self.rot_race(o["ex"])] += o["qty"] * o["price"]
+        if not self.fmm_cap_ok("inventory", inv_tot, cap, rest_tot, tol, self.fmm_cap_untapered()):
             why = why or f"inventory cap broken: {inv_tot:,.0f} at cost > {cap:,.0f}"
-        big = [r for r, v in by_race.items() if v > self.fmm_race_cap(r) + tol]
+        big = [r for r, v in by_race.items()
+               if not self.fmm_cap_ok(f"race:{r}", v, self.fmm_race_cap(r), rest_race[r], tol, max(self.fmm_race_cap(r), float(FMM_ROOM["race_cap"])))]
         if big:
             why = why or f"race cap broken: {big[0]} {by_race[big[0]]:,.0f} at cost > {self.fmm_race_cap(big[0]):,.0f}"
         raw = min(self.cash_raw_hist) if getattr(self, "cash_raw_hist", None) else None
@@ -5459,6 +5465,30 @@ class Engine:
             msg = (f"FMM STEP {t[11:16]}: " + (f"inventory cap -> {FMM['inv_cap_step']:,.0f}, K -> {FMM['k_step']:g}" if ok else f"held at cap {cap:,.0f}, K {self.fmm_k():g}")
                    + f" (live realized {float(lv.get('realized') or 0):+,.0f}, caps held, funds events {len(funds)}, replay 5-s measure {'supports' if FMM.get('k5_ok') else 'does not support'} K 5)")
             self.event("FMM", msg); self.night.line(msg)
+
+    def fmm_cap_ok(self, key, inv, cap, resting, tol, first_prev):
+        """C116 (Piero 00:20 Oct 26 item 4): a cap the calendar lowered under the inventory (the taper, FMM_ROOM's end on Oct 28 23:59)
+        is not a breach: fmm_targets gives no room, so no new bids; the exits keep running and the bids come back by themselves once the
+        inventory is under the cap. The breaker trips only when the inventory rises over the cap: above both the cap and its level when
+        the cap was cut (+ the bids resting then, which may still fill), a reference that ratchets down as the exits sell. Over a cap
+        that was not cut is a breach at once. `first_prev`: the cap before this one when the engine has no earlier reading (a restart)."""
+        refs = self.__dict__.setdefault("fmm_cut_ref", {})
+        prevs = self.__dict__.setdefault("fmm_cap_prev", {})
+        prev = prevs.get(key, first_prev)
+        prevs[key] = cap
+        if inv <= cap + tol:
+            refs.pop(key, None)
+            return True
+        ref = refs.get(key)
+        if ref is None:
+            if cap >= prev - 1e-6:
+                return False                                 # over a cap that was not lowered: FMM bought through it
+            ref = inv + resting
+            msg = (f"FMM over the {key} cap after the cash calendar lowered it ({prev:,.0f} -> {cap:,.0f}): {inv:,.0f} at cost; no new bids, "
+                   f"exits keep running, bids resume once under the cap (not a stop: Piero 00:20 Oct 26)")
+            self.event("FMM", msg); self.night.line(msg)
+        refs[key] = min(ref, inv + resting)
+        return inv <= refs[key] + tol
 
     def fmm_status10(self, now):
         """FMM live or not and why; locks taken; the Rhode Island Senate ladder resting; the fast path's p50."""
@@ -13203,8 +13233,34 @@ class EngineControls:
         raise ValueError(f"unknown action {action}")
 
 
+STOP = threading.Event()                                   # C116 (Piero 00:20 Oct 26 item 3): a clean SIGTERM stop
+STOP_DEADLINE_S = 45                                       # systemd kills at 60 s (TimeoutStopSec): the watchdog saves and exits first
+_ENG = []
+
+
 def _stop(*_):
-    raise KeyboardInterrupt
+    """SIGTERM: flag the stop and wake the loop; the loop ends between steps (never mid-step, unlike the old KeyboardInterrupt, which
+    Oct 23 15:30 / Oct 24 06:05 showed could be lost or leave the process hanging until systemd's SIGKILL)."""
+    if STOP.is_set():
+        return
+    STOP.set()
+    try:
+        os.write(2, f"{time.strftime('%H:%M:%S')} SIGTERM: stopping (the loop ends, at-risk quotes pulled, ledger saved)\n".encode())
+    except OSError:
+        pass
+    if _ENG:
+        _ENG[0].wake.set()
+    threading.Thread(target=_stop_watchdog, name="stop-watchdog", daemon=True).start()
+
+
+def _stop_watchdog():
+    time.sleep(STOP_DEADLINE_S)
+    try:
+        os.write(2, f"{time.strftime('%H:%M:%S')} stop took > {STOP_DEADLINE_S} s: saving the ledger and exiting\n".encode())
+        if _ENG:
+            _ENG[0].ledger.save()
+    finally:
+        os._exit(0)
 
 
 def main():
@@ -13226,6 +13282,7 @@ def main():
     while True:                                            # SIG can be slow or down at startup: keep trying, never exit
         try:
             eng, i = Engine(only), 0
+            _ENG.append(eng)
             break
         except (KeyboardInterrupt, SystemExit):
             raise
@@ -13252,7 +13309,7 @@ def main():
     except Exception as e:
         print("dashboard not started:", repr(e), flush=True)
     try:
-        while loops is None or i < loops:
+        while (loops is None or i < loops) and not STOP.is_set():
             t, i = time.time(), i + 1
             try:
                 eng.step()
@@ -13275,12 +13332,13 @@ def main():
                 with eng.rt_lock:
                     ours = any(k != "pm_move" for _, k, _ in eng.rt_pending)
                 gap = loop_gap(reads, ours, time.time())
-                time.sleep(max(0.0, gap - (time.time() - t)))
+                STOP.wait(max(0.0, gap - (time.time() - t)))   # C116: a SIGTERM ends the wait at once
     except KeyboardInterrupt:
         pass
     finally:
+        t_stop = time.time()
         try:
-            eng.pull_at_risk(limit_s=60)
+            eng.pull_at_risk(limit_s=20 if STOP.is_set() else 60)   # C116: inside systemd's 60 s with the save after it
             print("engine stopped: at-risk engine quotes cancelled; the rest expire on SIG; position exits and manual orders untouched", flush=True)
         except Exception as e:
             print("ERR while stopping (engine quotes will expire on SIG by themselves):", repr(e), flush=True)
@@ -13289,6 +13347,9 @@ def main():
             dash.stop()
         eng.ledger.save()
         eng.write_state(bool(eng.fair_t) and time.time() - eng.fair_t <= PM_MAX_AGE_S, stopped=True)
+        if STOP.is_set():
+            print(f"engine stopped cleanly on SIGTERM in {time.time() - t_stop:.1f} s (ledger and state saved)", flush=True)
+            os._exit(0)                                     # C116: no thread (feeds, lanes) keeps the process alive past the save
 
 
 if __name__ == "__main__":

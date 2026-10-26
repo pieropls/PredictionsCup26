@@ -6375,6 +6375,87 @@ class Piero2115Tests(EngineCase):
         eng.fmm_gate(time.time())
         self.assertIn("after FMM fills", (eng.controls.d["fmm"].get("stopped") or {}).get("why", ""), "FMM's own 5,100 of fills did it: stop")
 
+    def test_c116_a_taper_cut_under_the_inventory_is_not_a_stop_but_buying_over_it_is(self):
+        fake, eng, mk = FMMTests.rig(self)
+        FMMTests.live(self, eng)
+        f_engine.FMM_CF = dict(a_config.FMM_CF, on=False)
+        a, b = mk[:2]
+        def lot(ex, px, q):
+            sub = f"fmm:{ex}:yes:{px:.3f}"
+            eng.ledger.subbooks.setdefault(ex, {})[sub] = eng.ledger.subbooks.get(ex, {}).get(sub, 0.0) + q
+            eng.ledger.tranches[sub] = dict(ex=ex, side="yes", kind="fmm", state="open", ts=time.time(), t="x", avg=px, qty=q)
+        lot(a, 0.90, 2_000.0); lot(b, 0.90, 2_000.0)          # 3,600 at cost in two races
+        eng.fmm_pnl_fair = lambda: 0.0                          # only the cap rule is under test
+        eng.fmm_race_cap = lambda r: 8_000.0
+        eng.fmm_cap_untapered = lambda: 40_000.0
+        eng.fmm_inv_cap = lambda: 40_000.0
+        eng.fmm_gate(time.time())
+        self.assertFalse(eng.controls.d["fmm"].get("stopped"))
+        eng.fmm_inv_cap = lambda: 3_000.0                      # 00:00: the taper cuts the cap under the inventory
+        eng.fmm_gate(time.time())
+        self.assertFalse(eng.controls.d["fmm"].get("stopped"), "a calendar cut is not a breach (Piero 00:20 Oct 26 item 4)")
+        self.assertTrue(any("not a stop" in e["text"] for e in eng.events))
+        eng.ledger.subbooks[a][f"fmm:{a}:yes:0.900"] -= 500.0  # exits sell 450 at cost: the reference ratchets down
+        eng.fmm_gate(time.time())
+        self.assertFalse(eng.controls.d["fmm"].get("stopped"))
+        lot(a, 0.90, 400.0)                                     # FMM buys 360 over its lowered level (> the 250 tolerance)
+        eng.fmm_gate(time.time())
+        self.assertIn("inventory cap broken", (eng.controls.d["fmm"].get("stopped") or {}).get("why", ""))
+
+    def test_c116_over_a_cap_that_was_not_cut_still_stops_at_once_and_race_caps_follow_the_same_rule(self):
+        fake, eng, mk = FMMTests.rig(self)
+        FMMTests.live(self, eng)
+        f_engine.FMM_CF = dict(a_config.FMM_CF, on=False)
+        a = mk[0]
+        sub = f"fmm:{a}:yes:0.900"
+        eng.ledger.subbooks.setdefault(a, {})[sub] = 7_000.0
+        eng.ledger.tranches[sub] = dict(ex=a, side="yes", kind="fmm", state="open", ts=time.time(), t="x", avg=0.90, qty=7_000.0)
+        eng.fmm_pnl_fair = lambda: 0.0
+        eng.fmm_cap_untapered = lambda: 40_000.0
+        eng.fmm_inv_cap = lambda: 40_000.0
+        eng.fmm_race_cap = lambda r: 8_000.0
+        eng.fmm_gate(time.time())
+        eng.fmm_race_cap = lambda r: 5_000.0                   # Oct 28 23:59: FMM_ROOM ends, 8k -> 5k a race: a cut, not a breach
+        eng.fmm_gate(time.time())
+        self.assertFalse(eng.controls.d["fmm"].get("stopped"), "6,300 at cost over a race cap the calendar cut")
+        fake2, eng2, mk2 = FMMTests.rig(self)
+        FMMTests.live(self, eng2)
+        f_engine.FMM_CF = dict(a_config.FMM_CF, on=False)
+        a2 = mk2[0]
+        sub2 = f"fmm:{a2}:yes:0.900"
+        eng2.ledger.subbooks.setdefault(a2, {})[sub2] = 50_000.0
+        eng2.ledger.tranches[sub2] = dict(ex=a2, side="yes", kind="fmm", state="open", ts=time.time(), t="x", avg=0.90, qty=50_000.0)
+        eng2.fmm_pnl_fair = lambda: 0.0
+        eng2.fmm_cap_untapered = lambda: 40_000.0
+        eng2.fmm_inv_cap = lambda: 40_000.0
+        eng2.fmm_race_cap = lambda r: 100_000.0
+        eng2.fmm_gate(time.time())
+        self.assertIn("inventory cap broken", (eng2.controls.d["fmm"].get("stopped") or {}).get("why", ""), "45k over a 40k cap nobody lowered")
+
+    def test_c116_sigterm_flags_the_stop_wakes_the_loop_and_arms_the_watchdog(self):
+        fake, eng, mk = FMMTests.rig(self)
+        started = []
+        real_wd, real_thread = f_engine._stop_watchdog, f_engine.threading.Thread
+        class T:
+            def __init__(self, target=None, name=None, daemon=None):
+                started.append((name, daemon))
+            def start(self):
+                pass
+        f_engine.threading.Thread = T
+        try:
+            f_engine._ENG[:] = [eng]
+            eng.wake.clear()
+            f_engine.STOP.clear()
+            f_engine._stop(15, None)
+            self.assertTrue(f_engine.STOP.is_set())
+            self.assertTrue(eng.wake.is_set(), "the loop's wait ends at once")
+            self.assertEqual(started, [("stop-watchdog", True)])
+            f_engine._stop(15, None)                            # a second SIGTERM changes nothing
+            self.assertEqual(len(started), 1)
+        finally:
+            f_engine.threading.Thread = real_thread
+            f_engine.STOP.clear(); f_engine._ENG[:] = []
+
     def test_an_sm_fast_refill_reconciles_against_its_sm_sub_books(self):
         fake, eng, ex = FastPathTests.rig(self)
         eng.fast_orders[(ex, "sm")] = time.time() - 30
