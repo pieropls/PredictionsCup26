@@ -439,6 +439,7 @@ class Engine:
         self.callexit_now, self.callexit_logged = {}, set()
         self.rot_fairbased = {}
         self.conv_backstop = {}
+        self.el_recycle = {}
         self.el_sent, self.el_fill_seen = {}, set()
         self.el_taken = {}
         self.fmm_refill_wait, self.fmm_lat_plan = {}, []   # C100: per sell order, since when the others' best ask sits below ours; the FMM hour; churn window
@@ -4971,6 +4972,9 @@ class Engine:
             bp = (getattr(self, "conv_backstop", None) or {}).get((str(ex), sub))
             if bp is not None:
                 px = max(floor_, min(px, bp))                # C115: the backstop re-prices the lot's own exit (never under its floor)
+            rp = (getattr(self, "el_recycle", None) or {}).get((str(ex), sub))
+            if rp is not None:
+                px = max(floor_, min(px, rp))                # C117: wave recycling sells the lot into the bid (its own exit, no second ask)
             self.fmm_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg))
 
     def gap6(self, now):
@@ -5581,6 +5585,9 @@ class Engine:
             bp = (getattr(self, "conv_backstop", None) or {}).get((str(ex), sub))
             if bp is not None:
                 px, why = max(floor_, min(px, bp)), "backstop (cash short of the day's ramp)"   # C115
+            rp = (getattr(self, "el_recycle", None) or {}).get((str(ex), sub))
+            if rp is not None:
+                px, why = max(floor_, min(px, rp)), "wave recycling (strict call, bid >= 0.97)"   # C117
             self.rot_fairbased[sub] = (why == "fair - 1.5c")    # C113: only a fair-based target may re-peg the exit up (never the touch)
             self.rot_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg, why=why))
 
@@ -9147,13 +9154,13 @@ class Engine:
             bidsell = (NIGHT_SELL.get("on") and NIGHT_SELL["since"] <= time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) < NIGHT_SELL["until"]
                        and self.fmm_mode(now) == "live" and self.fmm_free() < float(NIGHT_SELL["fmm_free_target"]) and self.night_sold() < float(NIGHT_SELL["cap"]))
             E_ = self.election
-            need = self.el_recycle_need() if (E_ is not None and self.el_mode_cached == "live" and E_.strict_for(str(ex), side)) else 0.0   # C102 item 8
+            rec = getattr(self, "el_recycle", None) or {}     # C117: the recycle scan's picks (live only)
             cbs = (not bidsell and self.carry_bidsell_on(now) and str(ex) not in (CARRY_BIDSELL.get("exclude") or ())
                    and (self.carry_ev_held(ex, side) if self.carry_ev_held(ex, side) is not None else 1.0) <= CARRY_BIDSELL["ev_max"] + 1e-9)   # C100 item 4
             for sub, v in subs_iter:
                 if sub == "inventory" and fresh_inv:
                     continue
-                if v * q <= 0 or sub.startswith(("manual", "pairset:", "fmm:", "fmmlock:")) or (not allow_all and (sub.startswith(("sleeve:", "swing:")) or sub in res_subs)) or ((str(ex), sub) in self.core_set and str(ex) not in rot_left and str(ex) not in fund_left and need <= 0 and (str(ex), sub) not in conv):
+                if v * q <= 0 or sub.startswith(("manual", "pairset:", "fmm:", "fmmlock:")) or (not allow_all and (sub.startswith(("sleeve:", "swing:")) or sub in res_subs)) or ((str(ex), sub) in self.core_set and str(ex) not in rot_left and str(ex) not in fund_left and (str(ex), sub) not in rec and (str(ex), sub) not in conv):
                     continue                                # never a core lot (unless Piero named the market for the rotation, C94), his manual / pair / sleeve lots, or the RI reservoir
                 key = f"{ex}|{sub}"
                 sig_avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
@@ -9175,8 +9182,8 @@ class Engine:
                 floor_ = bots.tick_up(round(float(avg) + RULE0_MARGIN, 6))
                 if sub == "inventory" and sig_avg:
                     floor_ = max(floor_, bots.tick_up(round(sig_avg + RULE0_MARGIN, 6)))   # C99e: 'inventory' has no lots of its own (its tranche key is shared): never under SIG's position average + 0.5c (Delaware 02:2x)
-                if need > 0 and bid is not None and bid >= max(float(ELECTION["recycle_bid"]), floor_) - 1e-9:
-                    px, reason = bid, "recycle at the bid"   # C102 item 8 (C7): wave recycling of a strict-called winner (core included)
+                if (str(ex), sub) in rec and bid is not None and bid >= floor_ - 1e-9:
+                    px, reason = bid, "recycle at the bid"   # C117 (C7): wave recycling of a strict-called winner at >= 0.97 (core included)
                 elif (str(ex), sub) in getattr(self, "conv_elastic", set()) and (str(ex), sub) in conv:
                     fl_e = max(floor_, bots.tick_up(round(fs - float(ELECTION_RESERVE["elastic_below_fair"]), 6)))   # C114: the elastic 15k, never under fair - 5c
                     px, reason = (bid, "elastic bid") if (bid is not None and bid >= fl_e - 1e-9) else (max(ask, fl_e), "elastic")
@@ -9243,7 +9250,7 @@ class Engine:
                 if reason.startswith("fund sale"):
                     take = min(take, int(fund_left[str(ex)]))
                 if reason == "recycle at the bid":
-                    take = min(take, int(need / max(px, 0.01)) + 1)
+                    pass                                    # C117: the scan sized it (whole lots inside the wave's 30k); rule 0 clips it above
                 elif reason.endswith("at the bid"):
                     left_ = (float(NIGHT_SELL["cap"]) - self.night_sold()) if bidsell else (float(CARRY_BIDSELL["day_cap"]) - self.carry_bid_sold_today(now))
                     take = min(take, int(max(0.0, left_) / max(px, 0.01)))
@@ -9260,8 +9267,6 @@ class Engine:
                         fund_left[str(ex)] -= take          # C97: the market's fund target is shared by its sub-books
                     if reason.endswith("at the bid") and not bidsell and reason != "recycle at the bid":
                         self.carry_bid_sent(now, ex, px)     # C100 item 4: the day's 7.5k counts these orders' fills
-                    if reason == "recycle at the bid":
-                        need -= take * px
             if not split:
                 if anc_wait and not any(str(o["ex"]) == str(ex) and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "release" for o in self.open):
                     self.sale_anchor.pop(str(ex), None)      # C100: no lot clears the kept price and nothing rests: the next post starts a new anchor
@@ -11194,6 +11199,11 @@ class Engine:
             self.callexit_plan(now)                         # C102 item 4: RULE0-CALLED exits of lots a strict call says lose
         except Exception as err:
             self.event("ERR", f"drift plan: {err!r}")
+        try:
+            self.el_recycle_scan(now)                       # C117: wave recycling of strict-called winners at >= 0.97
+        except Exception as err:
+            self.el_recycle = {}
+            self.event("ERR", f"recycle scan: {err!r}")
         if not self.controls.paused and E.queue:
             E.run_queue(now, cash, pos)
         if WIND_DOWN.get("on") and not getattr(self, "el_checklist_done", False) and time.strftime("%Y-%m-%d %H:%M", time.localtime(now)) >= f"{ELECTION['election_day']} {WIND_DOWN['checklist_at'][11:]}":
@@ -11227,9 +11237,97 @@ class Engine:
                 while self.el_shadowq:
                     fh.write(json.dumps(self.el_shadowq.popleft(), default=str) + "\n")
 
-    def el_recycle_need(self):
-        """C7: the cash the next wave still needs — usable (cash - 5k - 2k) under ELECTION['recycle_target']."""
-        return max(0.0, float(ELECTION["recycle_target"]) - (self.el_snap["cash"] - el.CASH_FLOOR))
+    def el_recycle_mode(self):
+        cfg = ELECTION.get("recycle") or {}
+        return str(((self.controls.d.get("election") or {}).get("recycle_mode")) or cfg.get("mode") or "off")
+
+    def el_sub_avg(self, ex, side, sub):
+        """A sub-book lot's average: the price in an FMM key, else the ledger's FIFO lots, the tranche record, SIG's position average."""
+        if sub.startswith("fmm:"):
+            try:
+                return float(sub.split(":")[3])
+            except (IndexError, ValueError):
+                pass
+        lots = [l for l in self.lots(ex, side, sub) if l[0] > 0]
+        tot = sum(l[0] for l in lots)
+        if tot > 0:
+            return sum(l[0] * l[1] for l in lots) / tot
+        a = (self.ledger.tranches.get(sub) or {}).get("avg")
+        return float(a) if a else (float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0) or None)
+
+    def el_recycle_scan(self, now):
+        """C117 (Piero 00:20 Oct 26 item 5; docs/night_recycle.md), C7 rebuilt: from the first strict call (rule B, not reversed), our lots of
+        the called side sell into SIG's existing bids at >= max(0.97, lot avg + 0.5c), lowest lot average first, at most 30k a wave (a race's
+        last poll close) counting the sales of called sides at >= 0.97 since their calls. Every lot but Piero's manual book, pair-set / lock
+        legs and exclude_ex. -> self.el_recycle {(ex, sub): bid} for the sellers (live only); shadow logs each decision instead."""
+        cfg = ELECTION.get("recycle") or {}
+        E, mode = self.election, self.el_recycle_mode()
+        self.el_recycle = {}
+        if E is None or mode == "off" or self.el_mode_cached not in ("shadow", "live"):
+            return {}
+        live = mode == "live" and self.el_mode_cached == "live"
+        T, cap = float(cfg.get("bid", 0.97)), float(cfg.get("wave_cap", 30_000.0))
+        excl = {str(x) for x in (cfg.get("exclude_ex") or ())}
+        with E.lock:
+            calls = {str(ex): dict(c) for ex, c in E.calls.items() if c.get("strict") and not c.get("reversed")}
+        if not calls:
+            return {}
+        wave = lambda ex: E.close.get(E.race(ex))
+        done = collections.Counter()
+        for f in self.ledger.fills[-4000:]:                  # recycled so far: sales of a called side at >= T since its call
+            ex = str(f.get("ex")); c = calls.get(ex)
+            if not c or f.get("action") != "buy" or f.get("layer") not in self.REDUCING or f.get("side") == c["side"]:
+                continue
+            try:
+                ft = time.mktime(time.strptime(str(f.get("t")), "%Y-%m-%d %H:%M:%S"))
+            except ValueError:
+                continue
+            if ft >= c["t"] - 1 and 1 - float(f["price"]) >= T - 1e-9:
+                done[wave(ex)] += float(f["qty"]) * (1 - float(f["price"]))
+        cands = []
+        for ex, c in calls.items():
+            if ex in excl:
+                continue
+            side = c["side"]
+            bid = self.rot_touch(ex, side)[0]
+            sig_avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
+            for sub, q in list((self.ledger.subbooks.get(ex) or {}).items()):
+                if abs(q) < MIN_QTY or (q > 0) != (side == "yes") or sub == "manual" or str(sub).startswith(("pairset:", "fmmlock:")):
+                    continue
+                avg = self.el_sub_avg(ex, side, sub)
+                if not avg:
+                    continue
+                floor_ = bots.tick_up(round(avg + RULE0_MARGIN, 6))
+                if sub == "inventory" and sig_avg:
+                    floor_ = max(floor_, bots.tick_up(round(sig_avg + RULE0_MARGIN, 6)))
+                cands.append((avg, ex, side, sub, abs(q), floor_, bid, c["t"]))
+        out, rows = {}, []
+        for avg, ex, side, sub, q, floor_, bid, t_call in sorted(cands):
+            w = wave(ex)
+            if bid is None or bid < max(T, floor_) - 1e-9:
+                verdict = f"hold: bid {'none' if bid is None else f'{bid:.3f}'} < max({T:.2f}, floor {floor_:.3f})"
+            elif done[w] + q * bid > cap + 1e-6:
+                verdict = f"hold: the wave's {cap:,.0f} recycled ({done[w]:,.0f} so far)"
+            else:
+                done[w] += q * bid
+                out[(ex, sub)] = bid
+                verdict = "sell"
+            rows.append((ex, side, sub, q, avg, floor_, bid, w, t_call, verdict))
+        seen = self.__dict__.setdefault("el_recycle_seen", set())
+        for ex, side, sub, q, avg, floor_, bid, w, t_call, verdict in rows:
+            k = (ex, sub, round(t_call), verdict[:4], live)
+            if k in seen:
+                continue
+            seen.add(k)
+            self.el_shadowq.append(dict(t=stamp(), kind="recycle", why="recycle", mode="live" if live else "shadow", ex=ex, side=side, sub=sub,
+                                        qty=round(q), avg=round(avg, 4), floor=floor_, bid=bid, threshold=T, wave=w, verdict=verdict))
+            if verdict == "sell":
+                self.el_log("RECYCLE", f"{self.name(ex)} {side.upper()} {q:,.0f} ({sub}, lot avg {avg:.3f}) {'sold' if live else 'would sell'} into the "
+                                       f"bid {bid:.3f} (>= {T:.2f}; wave {time.strftime('%H:%M', time.localtime(w)) if w else '?'} recycled {done[w]:,.0f} of {cap:,.0f})")
+        if len(seen) > 20_000:
+            self.el_recycle_seen = set(list(seen)[-5_000:])
+        self.el_recycle = out if live else {}
+        return out
 
     def el_fill_events(self, fills):
         """night_reconcile §4 item 9: each fill of an election layer (call snipe, drift, call exit, settle) -> one NIGHT line and a row of
@@ -13182,6 +13280,16 @@ class EngineControls:
                 c.d.setdefault("election", {})["rearm_req"] = dict(t=stamp(), race=race)
                 c.save()
             return f"election_rearm queued for the next loop: {race or 'every race and the kill switch'}"
+        if action == "election_recycle":                   # C117: wave recycling off / shadow / live without a push
+            m = str(args.get("mode") or "")
+            if m not in ("off", "shadow", "live"):
+                raise ValueError("mode must be off, shadow or live")
+            with c.lock:
+                c.d.setdefault("election", {})["recycle_mode"] = m
+                c.save()
+            msg = f"election_recycle -> {m} (sells only while election_mode is live)"
+            self.eng.event("NIGHT", msg); self.eng.night.line(f"ELECTION {msg}")
+            return msg
         if action == "fmm_restart":                        # Piero 01:05 Oct 18 item 2: FMM back on after a stop (cap / K as given)
             st = c.d.setdefault("fmm", {})
             if st.get("decision") != "live":

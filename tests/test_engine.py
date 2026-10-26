@@ -7071,22 +7071,74 @@ class C102Tests(EngineCase):
         eng.rule0_fill_check([f])
         self.assertTrue(any(e["text"].startswith("RULE0-CALLED") for e in eng.events)); self.assertFalse(any(e["text"].startswith("RULE0 BROKEN") for e in eng.events))
 
-    def test_wave_recycling_sells_a_strict_winner_into_098_bids_only_for_the_cash_the_next_wave_needs(self):
+    def test_c117_wave_recycling_sells_a_strict_winner_into_097_bids_from_the_first_call_with_no_usable_gate(self):
         fake, eng, a = self.rig(mode="live")
         f_engine.SELL_EV_MAX = 0.05
-        C93Tests.lot(self, eng, fake, a, f"callsnipe:{a}:yes", 20_000, 0.95, (0.985, 0.99, 0.9875), 0.995)
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], mode="live"))
+        C93Tests.lot(self, eng, fake, a, f"callsnipe:{a}:yes", 20_000, 0.95, (0.975, 0.98, 0.9775), 0.995)
         loop(eng, fake); loop(eng, fake)
         eng.ledger.subbooks[a] = {f"callsnipe:{a}:yes": 20_000.0}; eng.lots_cache = (None, {})
         E = eng.election
         E.calls[a] = dict(side="yes", t=time.time(), signal_t=time.time(), rule="B", strict=True, bought=0.0, cost=0.0, fails=0, stopped=False, reversed=False)
         eng.el_mode_cached = "live"
-        eng.el_snap = dict(cash=a_config.CASH_RESERVE + 2_000 + 12_000.0, pos={})   # usable 12k: the next wave needs 8k more
+        eng.el_snap = dict(cash=a_config.CASH_RESERVE + 2_000 + 50_000.0, pos={})   # 50k usable: C7's old 20k gate would have held
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle, {(a, f"callsnipe:{a}:yes"): 0.975}, "19.5k of a 30k wave: the whole lot")
         plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
-        self.assertEqual((plan[a]["why"], plan[a]["px"]), ("recycle at the bid", 0.985))
-        self.assertLessEqual(sum(plan[a]["subs"].values()) * 0.985, 8_000 + 1)
-        eng.el_snap = dict(cash=a_config.CASH_RESERVE + 2_000 + 25_000.0, pos={})   # enough cash: hold (recycling = 0 in the plan)
-        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
-        self.assertFalse(a in plan and plan[a]["why"] == "recycle at the bid")
+        self.assertEqual((plan[a]["why"], plan[a]["px"]), ("recycle at the bid", 0.975))
+        self.assertTrue(any("RECYCLE" in str(k) for k, _ in eng.el_logq))
+        E.calls[a]["strict"] = False                           # rule A only: no recycling (C7 needs the strict call)
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle, {})
+        E.calls[a]["strict"] = True
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], mode="shadow"))
+        eng.el_shadowq.clear()
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle, {}, "shadow: nothing for the sellers")
+        self.assertEqual([r["verdict"] for r in eng.el_shadowq if r.get("kind") == "recycle"], ["sell"], "shadow: the decision is logged")
+        msg = f_engine.EngineControls(eng).apply("election_recycle", dict(mode="live"))
+        self.assertIn("live", msg)
+        eng.el_recycle_scan(time.time())
+        self.assertIn((a, f"callsnipe:{a}:yes"), eng.el_recycle, "the control overrides the config")
+        with self.assertRaises(ValueError):
+            f_engine.EngineControls(eng).apply("election_recycle", dict(mode="on"))
+
+    def test_c117_recycling_keeps_the_097_bar_rule_0_the_wave_cap_and_never_sells_the_manual_book(self):
+        fake, eng, a = self.rig(mode="live")
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], mode="live", wave_cap=1_500.0))
+        E = eng.election
+        eng.el_mode_cached = "live"
+        E.calls[a] = dict(side="yes", t=time.time(), signal_t=time.time(), rule="B", strict=True, bought=0.0, cost=0.0, fails=0, stopped=False, reversed=False)
+        eng.ledger.subbooks[a] = {f"carry:{a}:yes": 1_000.0, f"fmm:{a}:yes:0.972": 500.0, "manual": 4_000.0, f"dump:{a}:yes:L0": 1_000.0}
+        avgs = {f"carry:{a}:yes": 0.90, f"dump:{a}:yes:L0": 0.93}
+        eng.lots = lambda ex, side, sub: [(1000.0, avgs[sub], "engine")] if sub in avgs else []
+        eng.rot_touch = lambda ex, side: (0.968, 0.972, 0.99)
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle, {}, "bid 0.968 < 0.97: hold")
+        eng.rot_touch = lambda ex, side: (0.975, 0.98, 0.99)
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(set(eng.el_recycle), {(a, f"carry:{a}:yes")},
+                         "lowest avg first; the 30k cap (here 1,500) takes 975 of it, the dump lot (+975) would pass it; the FMM lot's floor 0.98 > 0.975; never the manual book")
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], mode="live", exclude_ex=(a,)))
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle, {}, "exclude_ex (RI Senate R NO, the SELL_HOLD lots)")
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], mode="live"))
+        f = dict(key="r:1", order="9101", ex=a, side="no", action="buy", qty=30_000.0, price=0.02, layer="release", t=time.strftime("%Y-%m-%d %H:%M:%S"))
+        eng.ledger.fills.append(f)                              # 30k x 0.98 of this wave already recycled since the call
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle, {}, "the wave's 30k is used")
+
+    def test_c117_an_fmm_lot_recycles_through_its_own_exit_at_the_bid(self):
+        fake, eng, mk = FMMTests.rig(self)
+        a = mk[0]
+        C94Tests.c95_market(self, eng, fake, a, 0.90, (0.85, 0.86, 0.855), race="RA")
+        FMMTests.live(self, eng)
+        eng.fmm_lots = lambda: {f"fmm:{a}:yes:0.840": (a, "yes", 1000.0, 0.84)}
+        eng.ledger.tranches[f"fmm:{a}:yes:0.840"] = dict(ex=a, side="yes", kind="fmm", state="open", ts=time.time(), t="x", avg=0.84, qty=1000.0)
+        eng.gapmm_live = lambda: True; eng.gap_exit_px = lambda ex, side, top, avg, now: 0.99
+        eng.track_fmm(time.time()); self.assertAlmostEqual(eng.fmm_view[a][0]["px"], 0.99, places=3)
+        eng.el_recycle = {(a, f"fmm:{a}:yes:0.840"): 0.975}
+        eng.track_fmm(time.time()); self.assertAlmostEqual(eng.fmm_view[a][0]["px"], 0.975, places=3, msg="recycled into the bid")
 
     def test_the_call_lane_sends_the_snipe_off_the_loop_and_keeps_5_writes_for_it(self):
         fake, eng, a = self.rig(mode="live")

@@ -544,7 +544,13 @@ ELECTION = dict(on=True, shadow_from="2026-10-22 06:00:00", election_day="2026-1
                 drift_gap=0.03, drift_exit_gap=0.01, drift_ttl_s=120, drift_cap_mult=2.0, drift_every_s=1800, drift_clip=2_000,
                 drift_move=0.03, drift_anchor_s=3600,   # C110 (Piero 11:40 Oct 22 item 1): the drift trades the CHANGE — PM moved >= 3c since the close and the
                                                         # SIG - PM gap >= 3c beyond its 6-h median before the close; exit when the gap is back within 1c of it
-                recycle_bid=0.98, recycle_target=20_000.0)   # item 8 (C7): a strict-called winner sells into bids >= max(0.98, lot avg + 0.5c) while usable < 20k
+                recycle_bid=0.98, recycle_target=20_000.0,   # item 8 (C7, until C117): a strict-called winner sold into bids >= max(0.98, lot avg + 0.5c) while usable < 20k
+                # C117 (Piero 00:20 Oct 26 item 5; docs/night_recycle.md): C7 at 0.97 from the first strict call (no usable gate), at most
+                # 30k recycled a wave (a race's last poll close); every lot of the called side (snipes, carry, FMM, rotation, core) but Piero's
+                # manual book, pair-set / lock legs and exclude_ex; into existing bids only, never under lot avg + 0.5c. mode: off / shadow
+                # (decisions to shadow.jsonl, would-be sales to RUN_LOG) / live (sells only while election_mode is live); the
+                # `election_recycle` control overrides it.
+                recycle=dict(mode="shadow", bid=0.97, wave_cap=30_000.0, exclude_ex=("1077", "894", "1045")))
 # C113 (Piero 10:55 Oct 23): FMM min new clip 100 -> 50 shares (FMM min_new); FMM lots older than FMM_OLD_LOT_S exit at the old rule
 FMM_OLD_LOT_S = 24 * 3600                 # max(fill + 0.5c, best ask), re-pegged down; fresh lots keep the gap-median exits
 ROT_REPEG_UP_C = 0.02                     # item 2: a rotation exit re-pegs UP when its fair - 1.5c target rose >= 2c (never to chase the touch, never < lot avg + 0.5c)
