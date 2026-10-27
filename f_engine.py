@@ -12,6 +12,7 @@ Every loop:
   F5  record    data/ledger.json, data/state.json, data/dashboard.html, data/pnl.csv
 """
 import collections
+import functools
 import hashlib
 import itertools
 import csv
@@ -146,6 +147,13 @@ LAYERS = ["position", "recycler", "release", "mm", "scalp", "tm", "sm", "rot", "
 TMM_ENABLED = True              # afternoon D-C: the engine's MM is the turnover MM (False: classic MM v2, tests only)
 LAYER_STATES = ("off", "pilot", "full")
 
+
+
+@functools.lru_cache(maxsize=1 << 16)
+def ts_s(s):
+    """C119 (spec Oct 27 item 3, the night profile: strptime + mktime were ~40% of the loop): 'YYYY-MM-DD HH:MM:SS' PT -> epoch, each
+    string parsed once (fills / orders keep their time strings). Raises ValueError like time.strptime on a bad string."""
+    return time.mktime(time.strptime(s, "%Y-%m-%d %H:%M:%S"))
 
 class Controls:
     """data/overrides.json: every flag and control setting, so a restart keeps the current stage. Edited by the engine
@@ -1140,7 +1148,9 @@ class Engine:
                         f"(focus {len(self.focus)}) | cancels queued {n_cancel} | placements queued {n_place} | deferred {deferred} | pair sets {shots} | "
                         f"risk filled {filled:,.0f}, committed {used['committed']:,.0f}, budget {budget:,.0f} | executor {self.ex.stats()['queue']} | "
                         f"account {self.acct.get('totalAccountValue', 0):,.0f} | took {self.t['loop']:.0f}s "
-                        f"(read {self.t['read']:.0f}, pairs {self.t['pairs']:.0f}, orders {self.t['orders']:.0f})")
+                        f"(read {self.t['read']:.0f}, pairs {self.t['pairs']:.0f}, orders {self.t['orders']:.0f})"
+                        + (lambda h: f" | sig w/min {h.get('writes_last_min', 0)} r/min {h.get('reads_last_min', 0)} 429/10m {h.get('throttled') or 0} "
+                                     f"rest-books {getattr(self, 'el_rest_n', 0)}")(api.health(600)))   # C118 (spec Oct 27 items 4 / 7): the night API budget
         print(self.summary, flush=True)
         self.ledger.save()
         self.write_state(fresh)
@@ -1313,7 +1323,7 @@ class Engine:
             if "t_close" not in r and (o.get("closed") or full):
                 r["t_close"] = o.get("closed") or stamp(); r["outcome"] = "filled" if full else o.get("status"); r["filled"] = o.get("filled") or 0
                 try:
-                    r["life_s"] = round(time.mktime(time.strptime(r["t_close"], "%Y-%m-%d %H:%M:%S")) - r["t_place"])
+                    r["life_s"] = round(ts_s(r["t_close"]) - r["t_place"])
                 except Exception:
                     r["life_s"] = None
             if "t_close" in r and len(r["marks"]) == len(LIFECYCLE_MARKS_S) or now - r["t_place"] > 3 * 3600:
@@ -2472,7 +2482,7 @@ class Engine:
             if only and oid not in only:
                 continue
             ttl = o.get("ttl") or self.LAYER_TTL.get(o.get("layer"), RECYCLE_REST_TTL_S)
-            age = time.mktime(time.strptime(o["closed"], "%Y-%m-%d %H:%M:%S")) - o.get("ts", 0)
+            age = ts_s(o["closed"]) - o.get("ts", 0)
             if ttl and age >= ttl - 90:
                 continue
             q = o["qty"] - (o.get("filled") or 0)
@@ -2648,7 +2658,7 @@ class Engine:
         ev = []
         for f in self.fills_since(now - BUFFER_WINDOW_S):
             if f["layer"] == "dump" and f["action"] == "buy":
-                ev.append((time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S")), f["qty"] * f["price"]))
+                ev.append((ts_s(f["t"]), f["qty"] * f["price"]))
         ev.sort()
         vals, t = [], now - BUFFER_WINDOW_S
         while t <= now + 1e-6:
@@ -3622,7 +3632,7 @@ class Engine:
             end = now
             if o.get("status") in ("done", "cancelled", "rejected") and o.get("closed"):
                 try:
-                    end = time.mktime(time.strptime(o["closed"], "%Y-%m-%d %H:%M:%S"))
+                    end = ts_s(o["closed"])
                 except ValueError:
                     pass
             lo, hi = max(ts, cut), min(end, now)
@@ -3706,7 +3716,7 @@ class Engine:
             end = t1
             if o.get("status") in ("done", "cancelled", "rejected") and o.get("closed"):
                 try:
-                    end = time.mktime(time.strptime(o["closed"], "%Y-%m-%d %H:%M:%S"))
+                    end = ts_s(o["closed"])
                 except ValueError:
                     pass
             lo, hi = max(ts, t0), min(end, t1)
@@ -3714,7 +3724,7 @@ class Engine:
                 st[self.edge_arm("H1", o["ex"], o["layer"])]["rest_h"] += (hi - lo) / 3600
         for f in self.fills_since(t0):
             try:
-                ft = time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S"))
+                ft = ts_s(f["t"])
             except ValueError:
                 continue
             if ft > t1 or f.get("layer") not in ("tm", "sm") or f.get("action") != "buy" or not self.h1_in_study(f["ex"], f["layer"]):
@@ -5416,7 +5426,7 @@ class Engine:
                       f"(its cap {ROTATION['total_cap']:,.0f} -> {FMM['rot_cap_live']:,.0f}); Piero's manual reserve counts as {FMM['manual_reserve_live']:,.0f} for FMM: "
                       f"{st.get('reserve_release', 0):,.0f} of it goes to FMM only, the other layers keep the full reserve (item 4)" if ok else ""))
             self.event("FMM", msg); self.night.line(msg); self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
-        if st.get("decided") and not st.get("status10") and now - time.mktime(time.strptime(st["decided"], "%Y-%m-%d %H:%M:%S")) >= 600:
+        if st.get("decided") and not st.get("status10") and now - ts_s(st["decided"]) >= 600:
             with c.lock:
                 st["status10"] = stamp(); c.save()
             msg = self.fmm_status10(now)                     # Piero 21:15 item 4: the 10:00 status line (10 min after the decision, the ladder resting)
@@ -6108,7 +6118,7 @@ class Engine:
             if f.get("before_engine") or f.get("action") not in ("buy", "sell") or f.get("edge") is None:
                 continue
             try:
-                t = time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S"))
+                t = ts_s(f["t"])
             except ValueError:
                 continue
             rec = self.ledger.orders.get(str(f.get("order") or "")) or {}
@@ -6285,7 +6295,7 @@ class Engine:
                 if not tq:
                     continue
                 avg = sum(f["qty"] * f["price"] for f in fs) / tq
-                first = min(time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S")) for f in fs)
+                first = min(ts_s(f["t"]) for f in fs)
                 h = [v for t, v in (self.mid24.get(ex) or []) if t >= now - 6 * 3600]
                 med = None
                 if h:
@@ -6298,7 +6308,7 @@ class Engine:
 
     def long_exit_ok(self, f):
         """Gate check: a longshot fill got its exit order within 30 s (the ledger's exit orders on that sub)."""
-        t0 = time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S"))
+        t0 = ts_s(f["t"])
         sub = (self.ledger.orders.get(f["order"]) or {}).get("sub")
         return any(o.get("sub") == sub and o.get("layer") == "longexit" and t0 - 5 <= o.get("ts", 0) <= t0 + 30
                    for o in list(self.ledger.orders.values()))
@@ -6467,9 +6477,8 @@ class Engine:
     def night_lite(self, now):
         """C118 (Piero spec Oct 27 item 3): Nov 3 14:30 -> Nov 4 09:00 PT the night CPU budget — no FMM / carry / rotation / catcher
         planners (their bids are pulled anyway; the exits run on), the dashboard / state payload every 5 min, the leaders logger every 30."""
-        a, b = ELECTION.get("night_lite") or ("", "")
         t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
-        return bool(a) and a <= t < b
+        return any(w and w[0] <= t < w[1] for w in [ELECTION.get("night_lite")] + list(ELECTION.get("night_lite_test") or ()))
 
     def el_night_rule_on(self, now):
         """C118 (Piero spec Oct 27 item 2): Nov 3 14:45 -> Nov 4 09:00 PT an engine_errors pause stops the passive layers only."""
@@ -6832,7 +6841,7 @@ class Engine:
             r = (c.d.get("ratchet") or {}).get("dump") or {}
             hist = r.get("history") or []
             if hist:
-                t0 = time.mktime(time.strptime(hist[0]["t"], "%Y-%m-%d %H:%M:%S"))
+                t0 = ts_s(hist[0]["t"])
                 level, hold_until, t, rows = 0, 0.0, t0, []
                 while t <= now:
                     if t >= hold_until:
@@ -7732,7 +7741,7 @@ class Engine:
             q = f["qty"] * (1 if (f["side"] == "yes") == (f["action"] == "buy") else -1)
             was, net = net, net + q
             if abs(was) < 1 <= abs(net) or was * net < 0:
-                first = time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S"))
+                first = ts_s(f["t"])
         return first
 
     def return_per_day(self, ctf):
@@ -7919,7 +7928,7 @@ class Engine:
             why = f"24-h p10 of NO prints {p10:.3f} >= {r['trig_p10']}"
         elif f is not None and r.get("fair0") is not None and abs(f - float(r["fair0"])) >= r["trig_fair_move"] - 1e-9:
             why = f"PM fair moved {abs(f - float(r['fair0'])) * 100:.1f}c from the deploy ({float(r['fair0']):.3f} -> {f:.3f})"
-        elif now >= time.mktime(time.strptime(r["trig_date"], "%Y-%m-%d %H:%M:%S")):
+        elif now >= ts_s(r["trig_date"]):
             why = f"{r['trig_date']} reached"
         if why:
             r["mode"] = "rebuild"; r["rebuild_t"] = stamp(); r["rebuild_why"] = why
@@ -8581,7 +8590,7 @@ class Engine:
             return False
         hh, mm = int(lc[:2]), int(lc[3:5])
         day = 4 if lc.endswith("+1") else 3
-        close = time.mktime(time.strptime(f"2026-11-{day:02d} {hh:02d}:{mm:02d}:00", "%Y-%m-%d %H:%M:%S")) - 3 * 3600   # ET -> PT (server clock = PT)
+        close = ts_s(f"2026-11-{day:02d} {hh:02d}:{mm:02d}:00") - 3 * 3600   # ET -> PT (server clock = PT)
         return now >= close - FM_POLL_PULL_S
 
     def fm_plan(self, now, cash):
@@ -8770,7 +8779,7 @@ class Engine:
         bought, sold = collections.Counter(), collections.Counter()
         for f in self.fills_since(now - 86400):
             if f["layer"] == "tm":
-                t = time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S"))
+                t = ts_s(f["t"])
                 if t <= now - TM_RT_GRACE_S:
                     bought[f["ex"]] += f["qty"]
             elif f["layer"] == "tmexit":
@@ -8896,7 +8905,7 @@ class Engine:
                 return {}                                   # C87 / C89: no TM entries (resting bids go; exits keep running)
             h1_only = True                                  # C93b / C93c: the 10k pause, the inventory stop and the ring stops lifted inside the H1 sleeve only
         sz = self.tm_sizes()
-        glide = now >= time.mktime(time.strptime(TM_GLIDE_START, "%Y-%m-%d %H:%M:%S"))
+        glide = now >= ts_s(TM_GLIDE_START)
         cap_cost = 0.0 if glide else self.tm_cap(now)       # Piero 22:15 (C82 item 2): base + max(0, free - BUFFER)
         e_min = self.tm_e_min()                             # (item 1): 2c above BUFFER, 4c below
         profile = self.tm_market_profile(now)               # (item 3): per-market clip / cap from the 24-h round-trip share
@@ -9740,7 +9749,7 @@ class Engine:
         if self.entry_budget(cash) <= 0:
             return {}
         sz = self.sm_sizes()
-        glide = now >= time.mktime(time.strptime(SM_GLIDE_START, "%Y-%m-%d %H:%M:%S"))
+        glide = now >= ts_s(SM_GLIDE_START)
         cap_sh = 0 if glide else sz["cap_sh"]
         universe = self.sm_universe(now)
         inv_exs = [ex for ex, books in list(self.ledger.subbooks.items()) if abs(books.get(f"sm:{ex}", 0.0)) >= MIN_QTY]
@@ -10287,7 +10296,7 @@ class Engine:
             rows = list(csv.DictReader(fh))
         if not rows:
             return
-        ts = lambda r: time.mktime(time.strptime(r["time"], "%Y-%m-%d %H:%M:%S"))
+        ts = lambda r: ts_s(r["time"])
         t1 = ts(rows[-1])
         if t1 - ts(rows[0]) < 6 * 3600:
             return
@@ -11377,7 +11386,7 @@ class Engine:
             if not c or f.get("action") != "buy" or f.get("layer") not in self.REDUCING or f.get("side") == c["side"]:
                 continue
             try:
-                ft = time.mktime(time.strptime(str(f.get("t")), "%Y-%m-%d %H:%M:%S"))
+                ft = ts_s(str(f.get("t")))
             except ValueError:
                 continue
             if ft >= c["t"] - 1 and 1 - float(f["price"]) >= T - 1e-9:
@@ -11457,7 +11466,7 @@ class Engine:
             if E is not None and f["layer"] in ("callsnipe", "settle"):
                 E.on_fill(ex, float(f["qty"]), float(f["price"]))   # sim: a filled snipe's cash hold goes (no double count)
             try:
-                t_fill = time.mktime(time.strptime(str(f["t"]), "%Y-%m-%d %H:%M:%S"))
+                t_fill = ts_s(str(f["t"]))
             except ValueError:
                 t_fill = time.time()
             sig, call, sent = c.get("signal_t"), c.get("t"), self.el_sent.get(ex)
@@ -11725,6 +11734,7 @@ class Engine:
                 for oid, rec in list(self.ledger.orders.items()):
                     if rec.get("ex") == ex and rec.get("sub") == sub and rec.get("status") in ("open", "live", "acked", "queued"):
                         rec["sub"] = dst
+                        self.ledger.rev += 1                # C119: tranche_avg's cache
                 qm = abs(self.ledger.move_sub(ex, sub, dst))
                 tr = self.ledger.tranches.get(dst)
                 if tr is None:
@@ -12228,7 +12238,7 @@ class Engine:
             if f["before_engine"]:
                 continue
             try:
-                t = time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S"))
+                t = ts_s(f["t"])
             except ValueError:
                 continue
             if t + 1 > since:                               # fill times have 1 s resolution
@@ -12539,7 +12549,7 @@ class Engine:
         t0 = min(since.values()) if isinstance(since, dict) and since else (since if not isinstance(since, dict) else time.time())
         for f in self.fills_since(t0):
             l = self.strategy_of(f["bot"], f["layer"])
-            if isinstance(since, dict) and time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S")) + 1 <= since.get(l, t0):
+            if isinstance(since, dict) and ts_s(f["t"]) + 1 <= since.get(l, t0):
                 continue                                    # fill times have 1 s resolution
             r = row(l)
             r["fills"] += 1
@@ -12576,7 +12586,7 @@ class Engine:
         series = {}
         for r in rows:
             if r["name"] in names:
-                t = time.mktime(time.strptime(r["time"], "%Y-%m-%d %H:%M:%S"))
+                t = ts_s(r["time"])
                 series.setdefault(r["name"], dict(name=r["name"], ours=r["ours"] == "1", points=[]))["points"].append((t, float(r["value"])))
         return dict(series=list(series.values()), latest=[dict(rank=r["rank"], name=r["name"], value=float(r["value"]),
                                                              trades=r["trades"], ours=r["ours"] == "1") for r in latest])
@@ -12591,7 +12601,7 @@ class Engine:
             night.update(day=day, day_fair=round(fair_now))
         k, why = self.kappa() if self.book else (None, "")
         start = night.get("start_t")
-        night_t = time.mktime(time.strptime(start, "%Y-%m-%d %H:%M:%S")) if start else self.started
+        night_t = ts_s(start) if start else self.started
         since = {l: (c.layer(l).get("since") or night_t) if c.on(l) else night_t for l in LAYERS}
         stats = self.layer_stats(since)
         bot_24h = sum(self.fill_pnl_fair(f) for f in self.fills_since(time.time() - 86400)
@@ -12722,7 +12732,7 @@ class Engine:
         out = []
         for r in rows:
             try:
-                out.append(dict(t=time.mktime(time.strptime(r["time"], "%Y-%m-%d %H:%M:%S")), date=r["time"][:10],
+                out.append(dict(t=ts_s(r["time"]), date=r["time"][:10],
                                 sig=float(r["account_value"]), fair=float(r["account_pm"] or r["account_value"]),
                                 unreal=float(r["unrealized"] or 0)))
             except (ValueError, KeyError):
@@ -13037,7 +13047,7 @@ class Engine:
             with open(path, newline="") as fh:
                 for r in csv.DictReader(fh):
                     if r["ours"] == "1" and r["rank"]:
-                        rank_t.append(time.mktime(time.strptime(r["time"], "%Y-%m-%d %H:%M:%S")))
+                        rank_t.append(ts_s(r["time"]))
                         rank.append(int(r["rank"]))
         return dict(t=[p["t"] for p in pts], account_sig=[p["sig"] for p in pts], account_fair=[p["fair"] for p in pts],
                     rank_t=rank_t[-300:], rank=rank[-300:])

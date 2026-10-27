@@ -30,6 +30,7 @@ class Ledger:
         self.persist = persist
         self.orders = d.get("orders", {})       # order id -> {bot, layer, ex, side, action, price, qty, filled, cost, status, ...}
         self.fills = d.get("fills", [])         # oldest first
+        self.rev = 0                            # C119: bumped by any in-place change tranche_avg's cache can't see (adopt, sub moves)
         self.baskets = d.get("baskets", [])     # pair-bot sets: {race, side, legs, orders[], margin, repaired}
         self.subbooks = d.get("subbooks", {})   # I3: ex -> {"manual" | "inventory" | "pairset:<id>" | "tranche:<id>": signed YES shares}
         self.tranches = d.get("tranches", {})   # A1/A5: tranche sub-book id -> {ex, side, level, ref_side, off, fair_side, t, state}
@@ -64,6 +65,7 @@ class Ledger:
 
     def adopt(self, oid, bot, sub, layer, o):
         """An order the REST audit found for an UNKNOWN write: record it as ours."""
+        self.rev += 1                                       # C119: tranche_avg's cache
         with self.lock:
             if str(oid) not in self.orders:
                 self.placed(bot, o, True, {"orderId": oid}, layer, note="adopted by audit", sub=sub)
@@ -132,14 +134,30 @@ class Ledger:
 
     def tranche_avg(self, sub, layer="ladder", ex=None, side=None, since=None):
         """Average fill price of the entry fills (ladder, or dump) that built a tranche (orders placed into that sub-book).
-        Without those order records (pruned), the layer's buy fills on that market and side since the tranche started."""
-        ids = {i for i, o in list(self.orders.items()) if o.get("sub") == sub and o.get("layer") == layer}
-        fs = [f for f in self.fills if f["order"] in ids]
+        Without those order records (pruned), the layer's buy fills on that market and side since the tranche started.
+        C119 (the night profile: 14% of the loop, 134 calls a loop each scanning every order and fill): an index of orders by (sub, layer)
+        and fills by order, and the answers, kept until the ledger changes (orders added, the fills list replaced / grown, `rev`)."""
+        fills = self.fills
+        ver = (len(self.orders), id(fills), len(fills), self.rev)
+        if getattr(self, "_ta_ver", None) != ver:
+            by_sl, by_o = {}, {}
+            for i, o in list(self.orders.items()):
+                by_sl.setdefault((o.get("sub"), o.get("layer")), set()).add(i)
+            for f in list(fills):
+                by_o.setdefault(f["order"], []).append(f)
+            self._ta_idx, self._ta_memo, self._ta_ver = (by_sl, by_o), {}, ver
+        k = (sub, layer, ex, side, since)
+        memo = self._ta_memo
+        if k in memo:
+            return memo[k]
+        by_sl, by_o = self._ta_idx
+        fs = [f for i in by_sl.get((sub, layer), ()) for f in by_o.get(i, ())]
         if not fs and ex is not None and since is not None:
-            fs = [f for f in self.fills if f["ex"] == ex and f.get("layer") == layer and f["side"] == side and f.get("action") == "buy"
+            fs = [f for f in list(fills) if f["ex"] == ex and f.get("layer") == layer and f["side"] == side and f.get("action") == "buy"
                   and f["t"] >= since]
         q = sum(f["qty"] for f in fs)
-        return sum(f["qty"] * f["price"] for f in fs) / q if q else None
+        memo[k] = res = sum(f["qty"] * f["price"] for f in fs) / q if q else None
+        return res
 
     def audit_subbooks(self, positions, log=print, skip=()):
         """I3: the REST position is the truth. Any difference from the sum of sub-books goes to 'inventory' (logged).

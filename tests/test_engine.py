@@ -4301,6 +4301,43 @@ class FeedTests(EngineCase):
         f.connected_t = t0
         return f, clock
 
+    def test_c119_the_cached_tranche_avg_matches_a_full_scan_through_ledger_changes_and_ts_s_parses_once(self):
+        import random
+        import d_ledger
+        L = d_ledger.Ledger(persist=False)
+        rng = random.Random(7)
+
+        def brute(sub, layer, ex=None, side=None, since=None):
+            ids = {i for i, o in L.orders.items() if o.get("sub") == sub and o.get("layer") == layer}
+            fs = [f for f in L.fills if f["order"] in ids]
+            if not fs and ex is not None and since is not None:
+                fs = [f for f in L.fills if f["ex"] == ex and f.get("layer") == layer and f["side"] == side and f.get("action") == "buy" and f["t"] >= since]
+            q = sum(f["qty"] for f in fs)
+            return sum(f["qty"] * f["price"] for f in fs) / q if q else None
+        subs = [f"dump:{i}:yes:L0" for i in range(5)]
+        for step in range(300):
+            r = rng.random()
+            if r < 0.3:
+                oid = str(len(L.orders) + 1)
+                L.orders[oid] = dict(id=oid, sub=rng.choice(subs), layer=rng.choice(["dump", "ladder"]), ex=str(rng.randint(0, 4)), side="yes", status="open")
+            elif r < 0.7 and L.orders:
+                oid = rng.choice(list(L.orders))
+                L.fills.append(dict(order=oid, qty=float(rng.randint(1, 100)), price=round(rng.random(), 3), ex=L.orders[oid]["ex"], side="yes",
+                                    layer=L.orders[oid]["layer"], action="buy", t=f"2026-10-27 0{rng.randint(0, 9)}:00:00"))
+            elif r < 0.8:
+                L.fills = L.fills[-50:]                     # the trim / dedup replace the list
+            elif r < 0.9 and L.orders:
+                L.orders[rng.choice(list(L.orders))]["sub"] = rng.choice(subs)
+                L.rev += 1                                  # an in-place move (the C98 migration) bumps the revision
+            for sub in subs:
+                for layer in ("dump", "ladder"):
+                    self.assertEqual(L.tranche_avg(sub, layer), brute(sub, layer), (step, sub, layer))
+                    self.assertEqual(L.tranche_avg(sub, layer, ex="1", side="yes", since="2026-10-27 05:00:00"),
+                                     brute(sub, layer, ex="1", side="yes", since="2026-10-27 05:00:00"))
+        self.assertEqual(f_engine.ts_s("2026-10-27 01:00:00"), time.mktime(time.strptime("2026-10-27 01:00:00", "%Y-%m-%d %H:%M:%S")))
+        with self.assertRaises(ValueError):
+            f_engine.ts_s("not a time")
+
     def test_c118_the_feed_calls_on_book_with_the_exchanges_whose_book_changed(self):
         from datetime import datetime, timezone
         t0 = datetime(2026, 10, 8, 23, 11, 46, tzinfo=timezone.utc).timestamp()

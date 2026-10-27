@@ -253,6 +253,7 @@ class Election:
     def _miss(self, ex, c, reason, now, layer="callsnipe", detail=""):
         """C118 (Piero spec Oct 27 item 1): every snipe that places nothing says why — a MISS row (calls.jsonl, at most one per book and
         reason every 30 s) and one MISS line per call and reason. -> None"""
+        c["miss_t"] = now                                   # C118: the last failed attempt (the order's wait is counted from it)
         k = (ex, reason)
         if now - self.miss_t.get(k, -1e18) >= MISS_EVERY_S:
             self.miss_t[k] = now
@@ -352,6 +353,10 @@ class Election:
             return None
         if layer == "callsnipe":
             self.sent.append((c.get("signal_t", now), self.clock()))
+            if not c.get("ordered_t"):                      # C118 (spec Oct 27 item 4): call -> first order, from the first takeable ask
+                c["ordered_t"] = self.clock()
+                self.records.append(dict(t=now, kind="ORDER", ex=ex, race=race, side=side, since_call_s=round(c["ordered_t"] - c["t"], 3),
+                                         wait_s=round(c["ordered_t"] - max(c["t"], c.get("miss_t") or c["t"]), 3), price=round(limit, 3), qty=qty))
         self.committed.append([now, qty * limit, key, ex])
         self.pending[key] = dict(ex=ex, qty=qty, cost=qty * limit, t=now)
         c["bought"] += qty
