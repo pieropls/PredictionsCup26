@@ -252,6 +252,7 @@ class Controls:
 
     def set_paused(self, paused, reason, by="engine"):
         with self.lock:
+            (self.d.get("auto_pause") or {}).pop("scope", None)   # C118: every pause / resume clears the night's passive-only scope
             if bool(self.d.get("paused")) == bool(paused):
                 return False
             self.d["paused"] = bool(paused)
@@ -442,6 +443,7 @@ class Engine:
         self.el_recycle = {}
         self.el_sent, self.el_fill_seen = {}, set()
         self.el_taken = {}
+        self.el_rest_lock, self.el_rest_cache, self.el_rest_t, self.el_rest_n = threading.Lock(), {}, [], 0   # C118: the lane's REST book reads
         self.fmm_refill_wait, self.fmm_lat_plan = {}, []   # C100: per sell order, since when the others' best ask sits below ours; the FMM hour; churn window
         self.gap_paper = dict(asks={}, realized=0.0, fills=0, done=0)                                 # C99c: the gap-median exit on paper
         self.tm_behind, self.sm_behind, self.paper, self.paper_seen, self.edge_t, self.edge_hour, self.h4_used = {}, {}, {}, set(), 0.0, None, 0.0   # C90: the edge program
@@ -741,7 +743,7 @@ class Engine:
             pos[ex], rows[ex] = pos.get(ex, 0) + api.net(p), p
         self.open, self.px = got["open"], got["px"]
         prev = {ex: (b["pos"], b["row"]) for ex, b in self.book.items()}
-        catch_open = {oid for oid, o in self.ledger.orders.items() if o["status"] == "open" and o.get("layer") in self.CATCHERS}
+        catch_open = {oid for oid, o in list(self.ledger.orders.items()) if o["status"] == "open" and o.get("layer") in self.CATCHERS}
         fill_exs, new_orders, proj = set(), set(), collections.Counter()
         if got.get("fills"):
             dash5.archive_append(got["fills"], self.ledger.orders)   # dashboard v5 §0: the append-only fills archive (complete since Oct 1)
@@ -924,7 +926,7 @@ class Engine:
             self.event("ERR", f"rotation plan: {err!r}")
         self.entry_left = self.entry_budget(cash)             # Oct 5 23:35: the 2 x free budget, allocated dump L1-L4 -> L0 -> scalper -> fat-finger
         try:
-            self.dump_now = self.dump_plan(now, cash, used)
+            self.dump_now = {} if self.night_lite(now) else self.dump_plan(now, cash, used)   # C118: the catcher's bids are pulled on the night
         except Exception as err:
             self.dump_now = {}
             self.event("ERR", f"dump plan: {err!r}")
@@ -1290,7 +1292,7 @@ class Engine:
     def track_lifecycle(self, now):
         """ideas_backlog (Oct 8): for every SM / TM order and dump L0 level: queue ahead at placement, time to fill or expiry, mid and
         fair at +1 / 5 / 30 min; written to data/intel/orders/<day>.jsonl once the order is closed and the 30-min mark is in."""
-        for oid, o in self.ledger.orders.items():
+        for oid, o in list(self.ledger.orders.items()):
             ts = float(o.get("ts") or 0)
             if ts < self.lifecycle_seen_ts - 1 or oid in self.lifecycle or oid in self.lifecycle_done or (o.get("layer") not in LIFECYCLE_LAYERS and not (o.get("layer") == "dump" and str(o.get("sub", "")).endswith(":L0"))):
                 continue
@@ -1494,6 +1496,7 @@ class Engine:
                 self.mkt_feed = rt.SigMarketFeed(lambda: api._req("POST", "/realtime/token", json={}), api.T["id"], on_sweep=self.on_feed_sweep,
                                                  log=lambda k, s: self.event(k, s), sweep_ticks=FEED_SWEEP_TICKS, sweep_shares=FEED_SWEEP_SHARES,
                                                  sweep_window_s=FEED_SWEEP_WINDOW_S)
+                self.mkt_feed.on_book = self.el_on_book      # C118: a fresh book for a called market wakes the call lane
                 self.mkt_feed.start()
                 self.event("FEED", f"SIG markets feed started (mode {self.feed_mode()}): tournament:{api.T['id']}:markets")
         except Exception as e:
@@ -1678,7 +1681,7 @@ class Engine:
                 u["dump_resting"] += n
             elif l == "longshot":
                 u["long_resting"] += n
-        for ex, books in self.ledger.subbooks.items():
+        for ex, books in list(self.ledger.subbooks.items()):
             for sub, v in books.items():
                 if sub.startswith("fatfinger:"):
                     u["fat_filled"] += abs(v) * float(sub.rsplit(":", 1)[1])
@@ -1699,12 +1702,12 @@ class Engine:
                 u["dump_resting"] += n
             elif l == "longshot":
                 u["long_resting"] += n
-        for ex, books in self.ledger.subbooks.items():
+        for ex, books in list(self.ledger.subbooks.items()):
             q = books.get("mm", 0)
             f = self.fair.get(ex)
             if q and f is not None:
                 u["mm"] += abs(q) * (f if q > 0 else 1 - f)
-        for sub, t in self.ledger.tranches.items():
+        for sub, t in list(self.ledger.tranches.items()):
             if t["state"] == "open":
                 q = self.ledger.subbooks.get(t["ex"], {}).get(sub, 0)
                 u["ladder_filled"] += abs(q) * (self.ledger.tranche_avg(sub) or 0.5)
@@ -2321,7 +2324,7 @@ class Engine:
             self.truth_live_t = now
         book = self.controls.d.get("truth_mode", "shadow") == "book"   # shadow: compute and log, book nothing (validation)
         before = dict(before)
-        for oid, rec in self.ledger.orders.items():        # acked after the last snapshot and gone before this one
+        for oid, rec in list(self.ledger.orders.items()):        # acked after the last snapshot and gone before this one
             if oid not in before and oid not in cur and rec.get("ts", 0) >= (prev_t or now) - 2 and rec.get("status") in ("open", "done"):
                 before[oid] = rec["qty"] - (rec.get("filled") or 0)
         cand = collections.defaultdict(list)
@@ -2463,7 +2466,7 @@ class Engine:
             if a and last and t0s < last < ends:
                 aud[a.group(1)] += float(a.group(2).replace(",", ""))
         cand = collections.defaultdict(list)
-        for oid, o in self.ledger.orders.items():
+        for oid, o in list(self.ledger.orders.items()):
             if o.get("status") != "done" or not o.get("closed") or not (t0s < o["closed"] < ends) or o.get("truth_q"):
                 continue
             if only and oid not in only:
@@ -2528,7 +2531,7 @@ class Engine:
             if not h or now - h[-1][0] >= 300:
                 h.append((now, v))
         inv = 0.0
-        for ex, books in self.ledger.subbooks.items():
+        for ex, books in list(self.ledger.subbooks.items()):
             q = books.get("mm", 0)
             if abs(q) < MIN_QTY:
                 self.mm_since.pop(ex, None)
@@ -2744,7 +2747,7 @@ class Engine:
     def l0_held(self):
         """L0 tranches held at cost across all sides (the 8k L0 budget)."""
         return sum(abs(q) * float((self.ledger.tranches.get(sub) or {}).get("avg") or self.sig_mark(ex, "yes" if q > 0 else "no") or 0)
-                   for ex, books in self.ledger.subbooks.items() for sub, q in books.items() if sub.endswith(":L0") and abs(q) >= 1)
+                   for ex, books in list(self.ledger.subbooks.items()) for sub, q in books.items() if sub.endswith(":L0") and abs(q) >= 1)
 
     def race_room(self, ex, side, fs):
         """Day 7 §2.2-2.3: the room under the race cap (20k at fair >= 0.95, 15k at 0.90-0.95, 12k below) for new levels on
@@ -2780,7 +2783,7 @@ class Engine:
 
     def l0_refills(self, sub, now):
         """Fills of an L0 level in the last 10 min (the sweep-follow limit)."""
-        ids = {i for i, o in self.ledger.orders.items() if o.get("sub") == sub and o.get("layer") == "dump"}
+        ids = {i for i, o in list(self.ledger.orders.items()) if o.get("sub") == sub and o.get("layer") == "dump"}
         return sum(1 for f in self.fills_since(now - DUMP_L0_WINDOW_S) if f["order"] in ids and f["action"] == "buy")
 
     def side_cost(self, ex, side, bids=True):
@@ -2873,7 +2876,7 @@ class Engine:
     def catcher_new_cost(self):
         """C97 item 4a: the catcher's lots opened since the allocation (at cost) — the older catcher lots are holdings."""
         out = 0.0
-        for ex, books in self.ledger.subbooks.items():
+        for ex, books in list(self.ledger.subbooks.items()):
             for sub, q in books.items():
                 if not sub.startswith("dump:") or abs(q) < 1:
                     continue
@@ -3052,7 +3055,7 @@ class Engine:
                     why = None
                 if why is None:
                     cut_off = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 600))
-                    last = max((r for r in self.ledger.orders.values() if r.get("layer") == "dump" and r["ex"] == ex and r["side"] == side
+                    last = max((r for r in list(self.ledger.orders.values()) if r.get("layer") == "dump" and r["ex"] == ex and r["side"] == side
                                 and (r.get("closed") or "") >= cut_off), key=lambda r: r["closed"], default=None)
                     why = ({"done": "filled: its tranche is selling back", "expired": "TTL expired without a replacement",
                             "cancelled": "cancelled (plan change)"}.get((last or {}).get("status"), "placement lag (queued / write pacing)"))
@@ -3154,7 +3157,7 @@ class Engine:
     def sleeve_held(self, ex=None, side=None):
         """Sleeve holdings at cost (all, or one target's)."""
         out = 0.0
-        for e, books in self.ledger.subbooks.items():
+        for e, books in list(self.ledger.subbooks.items()):
             for sub, q in books.items():
                 if not sub.startswith("sleeve:") or abs(q) < 1:
                     continue
@@ -3610,7 +3613,7 @@ class Engine:
         at fill; control also gets its paper fills per resting-hour."""
         cut = now - hours * 3600
         st = {a: dict(rest_h=0.0, fills=0, shares=0.0, mo=[], edge=[], paper_fills=0, paper_rest_h=0.0) for a in ("A", "B")}
-        for o in self.ledger.orders.values():
+        for o in list(self.ledger.orders.values()):
             if o.get("layer") not in ("tm", "sm") or o.get("action") != "buy":
                 continue
             ts = float(o.get("ts") or 0)
@@ -3694,7 +3697,7 @@ class Engine:
     def h1_window_stats(self, t0, t1):
         """h1_arm_stats over an absolute window [t0, t1]."""
         st = {a: dict(rest_h=0.0, fills=0, shares=0.0, mo=[], edge=[], paper_fills=0) for a in ("A", "B")}
-        for o in self.ledger.orders.values():
+        for o in list(self.ledger.orders.values()):
             if o.get("layer") not in ("tm", "sm") or o.get("action") != "buy" or not self.h1_in_study(o["ex"], o["layer"]):
                 continue
             ts = float(o.get("ts") or 0)
@@ -4054,7 +4057,7 @@ class Engine:
     def rot_lots(self):
         """{sub: (ex, side, shares, avg entry)} of the rotation's inventory."""
         out = {}
-        for ex, books in self.ledger.subbooks.items():
+        for ex, books in list(self.ledger.subbooks.items()):
             for sub, q in books.items():
                 if sub.startswith("rot:") and abs(q) >= 1:
                     side = "yes" if q > 0 else "no"
@@ -4333,6 +4336,9 @@ class Engine:
         within 8k per race (12k Senate control) and 65k in all; the >= 3c tier only once the >= 4c one is full. -> {ex: [want-spec]}"""
         c = self.controls
         if not ROTATION.get("on") or self.fills_blind:
+            return {}
+        if self.night_lite(now):
+            self.track_rot(now)                             # C118 (spec Oct 27 item 3): the night keeps the exits, not the candidate search
             return {}
         cands = self.rot_candidates(now)
         self.track_rot(now)                                 # the exits keep running in a pause (C94f)
@@ -4654,7 +4660,7 @@ class Engine:
     def fmm_lots(self):
         """{sub: (ex, side, shares, avg)} FMM inventory, one sub-book per fill price ('fmm:<ex>:<side>:<px>'); locks excluded."""
         out = {}
-        for ex, books in self.ledger.subbooks.items():
+        for ex, books in list(self.ledger.subbooks.items()):
             for sub, q in books.items():
                 if sub.startswith("fmm:") and abs(q) >= 1:
                     side = "yes" if q > 0 else "no"
@@ -4924,6 +4930,8 @@ class Engine:
         """-> {ex: [want-spec]} in live mode; in paper mode the same targets become simulated orders and nothing is sent."""
         mode = self.fmm_mode(now)
         self.track_fmm(now)                                  # exits keep running whatever the mode (live lots only)
+        if self.night_lite(now):
+            return {}                                        # C118: no FMM planner on the night (its bids stopped Nov 1 12:00)
         if mode not in ("paper", "live") or self.fills_blind or (mode == "live" and (self.controls.paused or self.controls.state("fmm") == "off")):
             return {}
         if self.wd_after("fmm_no_bids", now):
@@ -5587,7 +5595,7 @@ class Engine:
                 px, why = max(floor_, min(px, bp)), "backstop (cash short of the day's ramp)"   # C115
             rp = (getattr(self, "el_recycle", None) or {}).get((str(ex), sub))
             if rp is not None:
-                px, why = max(floor_, min(px, rp)), "wave recycling (strict call, bid >= 0.97)"   # C117
+                px, why = max(floor_, min(px, rp)), "wave recycling (strict call, bid >= the threshold)"   # C117
             self.rot_fairbased[sub] = (why == "fair - 1.5c")    # C113: only a fair-based target may re-peg the exit up (never the touch)
             self.rot_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg, why=why))
 
@@ -6264,14 +6272,14 @@ class Engine:
         """Filled longshot levels -> exits: half at 3x entry, half at max(3x entry, the side's SIG 6-h median); never below
         3x entry (A2 exception, as the dump rebound); unsold after 72 h: kept, flagged (dashboard)."""
         self.long_view = {}
-        for ex, books in self.ledger.subbooks.items():
+        for ex, books in list(self.ledger.subbooks.items()):
             for sub, q in books.items():
                 if not sub.startswith("longshot:") or abs(q) < MIN_QTY:
                     continue
                 side = sub.split(":")[2]
                 if (q > 0) != (side == "yes"):
                     continue                                # wrong side (an exit oversold): no exit of its own
-                ids = {i for i, o in self.ledger.orders.items() if o.get("sub") == sub and o.get("layer") == "longshot"}
+                ids = {i for i, o in list(self.ledger.orders.items()) if o.get("sub") == sub and o.get("layer") == "longshot"}
                 fs = [f for f in self.ledger.fills if f["order"] in ids and f["action"] == "buy"]
                 tq = sum(f["qty"] for f in fs)
                 if not tq:
@@ -6293,7 +6301,7 @@ class Engine:
         t0 = time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S"))
         sub = (self.ledger.orders.get(f["order"]) or {}).get("sub")
         return any(o.get("sub") == sub and o.get("layer") == "longexit" and t0 - 5 <= o.get("ts", 0) <= t0 + 30
-                   for o in self.ledger.orders.values())
+                   for o in list(self.ledger.orders.values()))
 
     # ------------------------------------------------------------------------------------------------ I4 self-cross guard
     @staticmethod
@@ -6401,6 +6409,14 @@ class Engine:
             self.auto_pause(kind, f"{kind}: {why}", now)
             msg = f"PAUSE ({kind}): {why} — new risk paused; exits keep running; resumes itself when clear"
             self.alerts.append(f"{time.strftime('%H:%M')} {msg}"); self.event("PAUSE", msg); self.night.line(msg)
+            if kind == "engine_errors" and self.el_night_rule_on(now):
+                el_errs = [e for e in self.err_events(now) if self.err_is_election(e)]
+                with c.lock:
+                    c.d.setdefault("auto_pause", {})["scope"] = "all" if el_errs else "passive"
+                    c.save()
+                msg = ("NIGHT ERR-PAUSE (passive only): the passive layers pause; the call lane, the snipes, the exits and RULE0-CALLED keep running"
+                       if not el_errs else f"NIGHT ERR-PAUSE (the call lane too): {len(el_errs)} of the errors come from election code ({el_errs[0][:120]})")
+                self.event("PAUSE", msg); self.night.line(msg)
 
     def travel(self, on, now=None):
         """Day 6 §4.2 `./travel.sh`: on -> pull every engine order except position exits and longshot bids (exits and
@@ -6444,6 +6460,47 @@ class Engine:
         bad = (h.get("read") or {}).get("bad_rate")
         return (now - self.wake_t >= 120 and (bad is None or bad == 0) and self.fills_health(now)[0] and bool(self.fair)
                 and (not self.pm_feed or self.pm_feed.last_msg_t is None or now - self.pm_feed.last_msg_t < 120))
+
+    EL_ERR_CODE = re.compile(r" at (n_election|j_executor)\.py:\d+| at f_engine\.py:\d+ (el_\w+|callexit_plan|drift_plan|drift_baseline|settlement)\b"
+                             r"|^(call lane|recycle scan|drift plan|election):|ELECTION|call lane error")
+
+    def night_lite(self, now):
+        """C118 (Piero spec Oct 27 item 3): Nov 3 14:30 -> Nov 4 09:00 PT the night CPU budget — no FMM / carry / rotation / catcher
+        planners (their bids are pulled anyway; the exits run on), the dashboard / state payload every 5 min, the leaders logger every 30."""
+        a, b = ELECTION.get("night_lite") or ("", "")
+        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+        return bool(a) and a <= t < b
+
+    def el_night_rule_on(self, now):
+        """C118 (Piero spec Oct 27 item 2): Nov 3 14:45 -> Nov 4 09:00 PT an engine_errors pause stops the passive layers only."""
+        a, b = ELECTION.get("night_err_rule") or ("", "")
+        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+        return bool(a) and a <= t < b
+
+    def err_events(self, now, window=600):
+        """The texts of the engine's own ERR events in the last `window` s (the ones errors_10m counts)."""
+        out, lt = [], time.localtime(now)
+        for e in self.events[-400:]:
+            txt = str(e.get("text", ""))
+            if e.get("kind") != "ERR" or "429" in txt or "RATE_LIMITED" in txt or any(x in txt for x in ENGINE_ERR_EXTERNAL):
+                continue
+            try:
+                hh, mm, ss = (int(x) for x in str(e.get("t", "")).split(":"))
+            except ValueError:
+                continue
+            if 0 <= now - time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, hh, mm, ss, 0, 0, -1)) <= window:
+                out.append(txt)
+        return out
+
+    def err_is_election(self, txt):
+        return bool(self.EL_ERR_CODE.search(str(txt)))
+
+    def el_lane_paused(self):
+        """The call lane stops in a pause, except a night engine_errors pause whose errors are not election code (scope passive)."""
+        if not self.controls.paused:
+            return False
+        ap = self.controls.d.get("auto_pause") or {}
+        return not (ap.get("scope") == "passive" and ap.get("kind") == "engine_errors" and self.el_night_rule_on(time.time()))
 
     def auto_pause(self, kind, reason, now):
         """Day 4 §1.3: a safety pause the engine lifts itself once its condition is gone (manual pauses wait for Piero).
@@ -6598,7 +6655,7 @@ class Engine:
     def scalp_cost(self, ex=None):
         """Scalper inventory at cost (its tranche's average entry), one market or all."""
         out = 0.0
-        for e, books in self.ledger.subbooks.items():
+        for e, books in list(self.ledger.subbooks.items()):
             if ex is not None and e != ex:
                 continue
             for sub, q in books.items():
@@ -6816,7 +6873,7 @@ class Engine:
 
     def wall_cost(self):
         return sum(abs(q) * float((self.ledger.tranches.get(sub) or {}).get("avg") or self.sig_mark(ex, "yes" if q > 0 else "no") or 0)
-                   for ex, books in self.ledger.subbooks.items() for sub, q in books.items() if sub.startswith("wall:") and abs(q) >= 1)
+                   for ex, books in list(self.ledger.subbooks.items()) for sub, q in books.items() if sub.startswith("wall:") and abs(q) >= 1)
 
     def wall_plan(self, now, cash):
         """{ex: [want-spec]}: each active wall rests as one order at its price; its quantity is cut so that a full fill leaves
@@ -6974,7 +7031,7 @@ class Engine:
     def touch_cost(self, ex=None):
         """Touch inventory at cost (its tranche's average entry), one market or all."""
         out = 0.0
-        for e, books in self.ledger.subbooks.items():
+        for e, books in list(self.ledger.subbooks.items()):
             if ex is not None and e != ex:
                 continue
             for sub, q in books.items():
@@ -7128,8 +7185,8 @@ class Engine:
         now_gap = [(self.side_fair(f["ex"], f["side"]) or f["price"]) - f["price"] for f in buys]   # mark-out at fair (now vs entry)
         held = self.touch_cost()
         ev = sum(abs(q) * ((self.side_fair(ex, "yes" if q > 0 else "no") or 0) - ((self.ledger.tranches.get(sub) or {}).get("avg") or 0))
-                 for ex, books in self.ledger.subbooks.items() for sub, q in books.items() if sub.startswith("touch:") and abs(q) >= MIN_QTY)
-        trips = sum(1 for t in self.ledger.tranches.values() if t.get("kind") == "touch" and t.get("state") == "closed" and (t.get("closed_ts") or 0) >= since)
+                 for ex, books in list(self.ledger.subbooks.items()) for sub, q in books.items() if sub.startswith("touch:") and abs(q) >= MIN_QTY)
+        trips = sum(1 for t in list(self.ledger.tranches.values()) if t.get("kind") == "touch" and t.get("state") == "closed" and (t.get("closed_ts") or 0) >= since)
         return dict(fills=len(buys), shares=sum(f["qty"] for f in buys), cost=round(sum(f["qty"] * f["price"] for f in buys)),
                     avg_gap=round(sum(gaps) / len(gaps), 4) if gaps else None, markout_fair=round(sum(now_gap) / len(now_gap), 4) if now_gap else None,
                     round_trips=trips, realized=round(sum(f.get("realized") or 0 for f in sells), 2), held_cost=round(held), ev_settle=round(ev))
@@ -7186,7 +7243,7 @@ class Engine:
         """Dump v3 KPIs since `since`: fills, round trips, realized, edge vs fair at fill, median hold (min), mark-out 30m."""
         fills = [f for f in self.fills_since(since) if f["layer"] == "dump" and f["action"] == "buy"]
         exits = [f for f in self.fills_since(since) if f["layer"] == "dumpexit"]
-        holds = [t.get("hold_min") for t in self.ledger.tranches.values()
+        holds = [t.get("hold_min") for t in list(self.ledger.tranches.values())
                  if t.get("kind") == "dump" and t.get("state") == "closed" and (t.get("closed_ts") or 0) >= since and t.get("hold_min") is not None]
         mo = [f["mo30"] for f in fills if f.get("mo30") is not None]
         return dict(fills=len(fills), shares=sum(f["qty"] for f in fills), cost=round(sum(f["qty"] * f["price"] for f in fills)),
@@ -8478,7 +8535,7 @@ class Engine:
             del self.fast_orders[(ex, sub)]
             same = lambda r: r.get("sub") == sub or sub == "fm" or (sub == "sm" and r.get("layer") in ("sm", "smexit"))   # Piero 21:15 item 3: the SM key is "sm", its subs "sm:<ex>..."
             ok = any(o["ex"] == ex and same(self.ledger.orders.get(o["id"]) or {}) for o in self.open) or \
-                 any(r["ex"] == ex and same(r) and (r.get("ts") or 0) >= t0 - 1 and (r.get("status") in ("done", "cancelled") or (r.get("filled") or 0) > 0) for r in self.ledger.orders.values())
+                 any(r["ex"] == ex and same(r) and (r.get("ts") or 0) >= t0 - 1 and (r.get("status") in ("done", "cancelled") or (r.get("filled") or 0) > 0) for r in list(self.ledger.orders.values()))
             if not ok:
                 self.fast_slow[ex] = now + FAST_SLOW_S
                 self.fast_stats["mismatch"] += 1
@@ -8496,7 +8553,7 @@ class Engine:
     def fm_cost(self):
         """The FM's leftover lots at cost (its fm:{ex} sub-books)."""
         out = 0.0
-        for ex, books in self.ledger.subbooks.items():
+        for ex, books in list(self.ledger.subbooks.items()):
             q = books.get(f"fm:{ex}", 0.0)
             if abs(q) >= 1:
                 avg = (self.ledger.tranches.get(f"fm:{ex}") or {}).get("avg") or self.sig_mark(ex, "yes" if q > 0 else "no") or 0.5
@@ -8509,7 +8566,7 @@ class Engine:
 
     def fm_writes_last_min(self, now):
         """FM writes in the last minute = distinct placement seconds (one batch write places up to 50 orders)."""
-        return len({int(o["ts"]) for o in self.ledger.orders.values() if o.get("layer") in ("fm", "fmexit") and (o.get("ts") or 0) >= now - 60})
+        return len({int(o["ts"]) for o in list(self.ledger.orders.values()) if o.get("layer") in ("fm", "fmexit") and (o.get("ts") or 0) >= now - 60})
 
     def fm_poll_block(self, ex, now):
         """mm_plan §1 election glide: no quotes on a market from its state's last poll close - 10 min (data/election/poll_close.json)."""
@@ -8622,7 +8679,7 @@ class Engine:
 
     def fm_view(self):
         st = self.controls.d.get("fm_stats") or {}
-        inv = {ex: float(books.get(f"fm:{ex}", 0.0)) for ex, books in self.ledger.subbooks.items() if abs(books.get(f"fm:{ex}", 0.0)) >= 1}
+        inv = {ex: float(books.get(f"fm:{ex}", 0.0)) for ex, books in list(self.ledger.subbooks.items()) if abs(books.get(f"fm:{ex}", 0.0)) >= 1}
         return dict(fills=st.get("fills", 0), realized=round(st.get("realized", 0.0), 2), edge=round(st.get("edge", 0.0), 2),
                     inventory=inv, cost=round(self.fm_cost(), 2), mo30=self.fm_markout(1800), writes_last_min=self.fm_writes_last_min(time.time()), on=False, retired=True)
 
@@ -8653,7 +8710,7 @@ class Engine:
 
     def tm_cost(self, ex=None):
         out = 0.0
-        for e, books in self.ledger.subbooks.items():
+        for e, books in list(self.ledger.subbooks.items()):
             if ex is not None and e != ex:
                 continue
             for sub, q in books.items():
@@ -8735,7 +8792,7 @@ class Engine:
         """TM writes in the last minute: distinct placement seconds (a batch is one write) + cancels (one write each)."""
         secs, cancels = set(), 0
         cut = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 60))
-        for o in self.ledger.orders.values():
+        for o in list(self.ledger.orders.values()):
             if o.get("layer") not in ("tm", "tmexit"):
                 continue
             if (o.get("ts") or 0) >= now - 60:
@@ -9067,7 +9124,7 @@ class Engine:
     def tm_view_stats(self):
         st = self.controls.d.get("tm_stats") or {}
         inv = {}
-        for ex, books in self.ledger.subbooks.items():
+        for ex, books in list(self.ledger.subbooks.items()):
             for sub, q in books.items():
                 if sub.startswith("tm:") and abs(q) >= 1:
                     inv[sub] = q
@@ -9432,7 +9489,7 @@ class Engine:
     def sm_cost(self):
         """SM inventory at cost: |shares| x the held side's average entry (the tranche avg is in that side's price)."""
         out = 0.0
-        for ex, books in self.ledger.subbooks.items():
+        for ex, books in list(self.ledger.subbooks.items()):
             q = books.get(f"sm:{ex}", 0.0)
             if abs(q) >= 1:
                 avg = self.sm_avg(ex) or self.sig_mark(ex, "yes" if q > 0 else "no") or 0.5
@@ -9447,7 +9504,7 @@ class Engine:
     def sm_writes_last_min(self, now):
         secs, cancels = set(), 0
         cut = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 60))
-        for o in self.ledger.orders.values():
+        for o in list(self.ledger.orders.values()):
             if o.get("layer") not in ("sm", "smexit"):
                 continue
             if (o.get("ts") or 0) >= now - 60:
@@ -9581,7 +9638,7 @@ class Engine:
         part counts in full)."""
         real = sum(f.get("realized") or 0.0 for f in self.fills_since(since) if f["layer"] in ("sm", "smexit") and (ex is None or f["ex"] == ex))
         unreal = 0.0
-        for e, books in self.ledger.subbooks.items():
+        for e, books in list(self.ledger.subbooks.items()):
             if ex is not None and e != ex:
                 continue
             q = books.get(f"sm:{e}", 0.0)
@@ -9686,7 +9743,7 @@ class Engine:
         glide = now >= time.mktime(time.strptime(SM_GLIDE_START, "%Y-%m-%d %H:%M:%S"))
         cap_sh = 0 if glide else sz["cap_sh"]
         universe = self.sm_universe(now)
-        inv_exs = [ex for ex, books in self.ledger.subbooks.items() if abs(books.get(f"sm:{ex}", 0.0)) >= MIN_QTY]
+        inv_exs = [ex for ex, books in list(self.ledger.subbooks.items()) if abs(books.get(f"sm:{ex}", 0.0)) >= MIN_QTY]
         exs = list(dict.fromkeys(list(universe) + inv_exs))    # C87: inventory outside today's universe still exits
         stale = [ex for ex in exs if now - float((self.sm_regime.get(ex) or {}).get("t") or 0) >= SM_REGIME_EVERY_S]
         if stale:
@@ -9859,7 +9916,7 @@ class Engine:
 
     def sm_view_stats(self):
         st = self.controls.d.get("sm_stats") or {}
-        inv = {ex: books.get(f"sm:{ex}") for ex, books in self.ledger.subbooks.items() if abs(books.get(f"sm:{ex}", 0.0)) >= 1}
+        inv = {ex: books.get(f"sm:{ex}") for ex, books in list(self.ledger.subbooks.items()) if abs(books.get(f"sm:{ex}", 0.0)) >= 1}
         return dict(stats=st, inventory=inv, cost=round(self.sm_cost(), 2), cov=self.sm_cov, mo30=self.sm_markout30(), on=self.controls.on("sm"), state=self.controls.state("sm"),
                     universe=self.sm_universe(time.time()) if self.controls.on("sm") else [])
 
@@ -10112,13 +10169,14 @@ class Engine:
                         f"{1 - AK_RELEASE:.0%} (ref {old:,} -> {ak.ref:,}); 0.10 spike bid kept")
 
     def log_leaders(self, now):
-        """Every 10 min (night plan §5.6): the top 20 and our own row -> data/leaders.csv (2 reads)."""
-        if now - self.leaders_t < LEADERS_EVERY_S or not self.controls.on("leaders") or not api.spare_reads():
+        """Every 15 min (30 on the night): the top 70 (C118), #100 and our own row -> data/leaders.csv (4 reads)."""
+        if now - self.leaders_t < (1800 if self.night_lite(now) else LEADERS_EVERY_S) or not self.controls.on("leaders") or not api.spare_reads():
             return
         self.leaders_t = now
         try:
             d = api.leaderboard(50)                         # top 50 (day 2 §5.1), #100, and our own row: 3 reads / 10 min
             rows = [dict(r, ours=0) for r in d["leaderboard"]]
+            rows += [dict(r, ours=0) for r in api.leaderboard(20, offset=50)["leaderboard"] if r.get("rank") and 50 < int(r["rank"]) <= 70]   # C118 item 6: the top 70
             total = d.get("total")
             if total and total >= 100:
                 rows += [dict(r, ours=0) for r in api.leaderboard(1, offset=99)["leaderboard"][:1] if r.get("rank") == 100]
@@ -10553,8 +10611,8 @@ class Engine:
     def carry_plan(self, now):
         """{ex: [want-spec]}: one resting bid per candidate book at the touch (<= fair - 5c), sized to the race cap (12k at cost; RI Senate
         30k) and the cash left; a resting bid keeps its place and size."""
-        if not CARRY.get("on") or self.controls.state("carry") == "off" or self.controls.paused or self.fills_blind:
-            return {}
+        if not CARRY.get("on") or self.controls.state("carry") == "off" or self.controls.paused or self.fills_blind or self.night_lite(now):
+            return {}                                        # C118: no carry planner on the night (its bids stopped Oct 30)
         cands = self.carry_candidates(now)
         self.carry_refresh(now, cands)
         if self.wd_after("carry_bids_stop", now):
@@ -10908,8 +10966,35 @@ class Engine:
         px = self.px.get(str(ex)) or self.px.get(ex)
         return None if not px else (px[0], px[1], 0)
 
+    EL_REST_PER_MIN, EL_REST_EVERY_S, EL_REST_CACHE_S = 20, 3.0, 2.0   # C118: the call lane's own REST book reads (SIG allows 100 reads a minute)
+
+    def el_rest_book(self, ex):
+        """C118 (Piero spec Oct 27 item 1): the feed has no fresh book for a called market (a quiet market's book is 'stale' after 10 s:
+        Oct 26 rehearsal, 7 of 18 first orders 7-24 s late, Massachusetts 285 s) -> one immediate REST read from the call lane, <= 20 a
+        minute, one per market every 3 s, the answer reused for 2 s. -> (bids, asks) or None"""
+        now = time.time()
+        with self.el_rest_lock:
+            cache = self.el_rest_cache.get(ex)
+            if cache and now - cache[0] <= self.EL_REST_CACHE_S:
+                return cache[1]
+            self.el_rest_t = [t for t in self.el_rest_t if now - t < 60]
+            if len(self.el_rest_t) >= self.EL_REST_PER_MIN or (cache and now - cache[0] < self.EL_REST_EVERY_S):
+                return None
+            self.el_rest_t.append(now)
+        try:
+            bk = api.orderbook(ex, depth=10)
+        except Exception as err:                            # noqa: BLE001 - a failed read is a MISS reason, never an exception in the lane
+            self.el_log("LANE", f"REST book read for {self.name(ex)} failed: {str(err)[:80]}")
+            return None
+        with self.el_rest_lock:
+            self.el_rest_cache[ex] = (time.time(), bk)
+            self.el_rest_n += 1
+        return bk
+
     def el_levels(self, ex, side):
         fb = self.feed_book(str(ex))
+        if fb is None:
+            fb = self.el_rest_book(str(ex))                  # C118: never wait for the main loop or the feed's next update
         if fb is None:
             return None
         lv = list(fb[1]) if side == "yes" else [(round(1 - p, 3), q) for p, q in fb[0]]
@@ -10950,7 +11035,7 @@ class Engine:
             if self.election is not None:                    # and the book was re-sniped about once a minute)
                 self.election.confirm(key, [("shadow", tuple(items[0]), True, {"orderId": "shadow"})])
             return key
-        if self.controls.paused:
+        if self.el_lane_paused():
             return None
         out = [(self.owner[ex].name, f"{layer}:{ex}:{side}", layer, (ex, side, action, round(px, 3), int(q))) for ex, side, action, px, q in items if ex in self.owner]
         box = {}
@@ -10979,11 +11064,23 @@ class Engine:
         if not injected and any(j["ex"] == str(ex) and now >= j["t0"] for j in (getattr(self, "el_injs", None) or [])):
             return                                          # C111: an injected book hears only its synthetic path
         snap = self.el_snap
-        if E.on_pm(str(ex), (b + a) / 2, now, snap["cash"], snap["pos"], pm_bid=b, pm_ask=a, defer=True) == "queued":
+        queued = E.on_pm(str(ex), (b + a) / 2, now, snap["cash"], snap["pos"], pm_bid=b, pm_ask=a, defer=True) == "queued"
+        n = E.requeue(E.race_books(E.race(str(ex))), now) if E.calls else 0   # C118: every PM quote of the race re-tries its unbought calls
+        if queued or n:
             lane = getattr(self, "el_lane_ev", None)
             if lane is not None:
                 lane.set()                                  # C104 item 7: the call lane sends the snipe now (C106: shadow too)
             self.rt_event("call", {str(ex)}, now)
+
+    def el_on_book(self, exs):
+        """C118 (item 1): SIG market feed thread — a fresh book for a market with an unbought call re-tries its snipe from the call lane."""
+        E = self.election
+        if E is None or self.el_mode_cached == "off" or not E.calls:
+            return
+        if E.requeue([str(x) for x in exs], time.time()):
+            lane = getattr(self, "el_lane_ev", None)
+            if lane is not None:
+                lane.set()
 
     def el_inject_start(self, now, inj, t0=None, tag=None):
         """C104 / C111 (item 10): start a synthetic path — the race treated as closed (shadow) from t0 (or with close_at seconds after t0), its
@@ -11115,7 +11212,7 @@ class Engine:
         """C104 (night item 7, latency.md §3): one pass of the call lane — the queued snipes go out from here, off the loop, through the
         executor (its locks; the last 5 writes are the lane's while the election is live). -> orders placed."""
         E = self.election
-        if E is None or self.el_mode_cached == "off" or self.controls.paused or not E.queue:
+        if E is None or self.el_mode_cached == "off" or self.el_lane_paused() or not E.queue:
             return 0                                         # C106: in shadow too (it only writes would-be orders there): the lane's latency is measured
         snap = self.el_snap
         return E.run_queue(time.time(), snap["cash"], snap["pos"])
@@ -11204,7 +11301,7 @@ class Engine:
         except Exception as err:
             self.el_recycle = {}
             self.event("ERR", f"recycle scan: {err!r}")
-        if not self.controls.paused and E.queue:
+        if not self.el_lane_paused() and E.queue:
             E.run_queue(now, cash, pos)
         if WIND_DOWN.get("on") and not getattr(self, "el_checklist_done", False) and time.strftime("%Y-%m-%d %H:%M", time.localtime(now)) >= f"{ELECTION['election_day']} {WIND_DOWN['checklist_at'][11:]}":
             self.el_checklist_done = True                   # C102 item 5 (v1 §6): the pre-night checklist, once at 14:45 PT
@@ -11257,7 +11354,8 @@ class Engine:
 
     def el_recycle_scan(self, now):
         """C117 (Piero 00:20 Oct 26 item 5; docs/night_recycle.md), C7 rebuilt: from the first strict call (rule B, not reversed), our lots of
-        the called side sell into SIG's existing bids at >= max(0.97, lot avg + 0.5c), lowest lot average first, at most 30k a wave (a race's
+        the called side sell into SIG's existing bids at >= max(0.95 (C118), lot avg + 0.5c) while the later waves' uncalled races need more
+        than the cash on hand (C118), lowest lot average first, at most 30k a wave (a race's
         last poll close) counting the sales of called sides at >= 0.97 since their calls. Every lot but Piero's manual book, pair-set / lock
         legs and exclude_ex. -> self.el_recycle {(ex, sub): bid} for the sellers (live only); shadow logs each decision instead."""
         cfg = ELECTION.get("recycle") or {}
@@ -11302,10 +11400,24 @@ class Engine:
                     floor_ = max(floor_, bots.tick_up(round(sig_avg + RULE0_MARGIN, 6)))
                 cands.append((avg, ex, side, sub, abs(q), floor_, bid, c["t"]))
         out, rows = {}, []
+        gate = cfg.get("later_need")
+        usable = float((getattr(self, "el_snap", None) or {}).get("cash") or 0.0) - el.CASH_FLOOR
+        called_r = {E.race(e) for e in list(E.calls)}
+        need_after = {}
+
+        def later(w):
+            """C118 item 5: the projected snipe need of the uncalled races whose last close is after wave w."""
+            if w not in need_after:
+                per = lambda t: float(gate.get(time.strftime("%H:%M", time.localtime(t)), cfg.get("later_need_default", 4_000.0)))
+                need_after[w] = sum(per(t) for r, t in list(E.close.items()) if t is not None and w is not None and t > w
+                                    and r not in called_r and r not in E.race_stop)
+            return need_after[w]
         for avg, ex, side, sub, q, floor_, bid, t_call in sorted(cands):
             w = wave(ex)
             if bid is None or bid < max(T, floor_) - 1e-9:
                 verdict = f"hold: bid {'none' if bid is None else f'{bid:.3f}'} < max({T:.2f}, floor {floor_:.3f})"
+            elif gate and later(w) <= usable + 1e-6:
+                verdict = f"hold: the later waves' uncalled races need {later(w):,.0f} <= usable {usable:,.0f}"
             elif done[w] + q * bid > cap + 1e-6:
                 verdict = f"hold: the wave's {cap:,.0f} recycled ({done[w]:,.0f} so far)"
             else:
@@ -11396,7 +11508,7 @@ class Engine:
     def drift_lots(self):
         """{sub: (ex, side, shares, lot avg)} of the night drift's lots (sub 'drift:<ex>:<side>')."""
         out = {}
-        for ex, books in self.ledger.subbooks.items():
+        for ex, books in list(self.ledger.subbooks.items()):
             for sub, q in books.items():
                 if sub.startswith("drift:") and abs(q) >= MIN_QTY:
                     side = "yes" if q > 0 else "no"
@@ -11543,7 +11655,7 @@ class Engine:
     def manual_line(self):
         """Piero 01:05 item 7: his manual tickets, next to the party line — SIG's position vs the manual sub-book."""
         rows = []
-        for ex, books in self.ledger.subbooks.items():
+        for ex, books in list(self.ledger.subbooks.items()):
             m = float(books.get("manual", 0.0) or 0.0)
             if abs(m) < 1:
                 continue
@@ -11610,7 +11722,7 @@ class Engine:
                     continue                                 # the catcher's slice
                 avg = float(t.get("avg") or 0) or float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0) or float(self.sig_mark(ex, side) or 0)
                 dst = f"carry:{ex}:{side}"
-                for oid, rec in self.ledger.orders.items():
+                for oid, rec in list(self.ledger.orders.items()):
                     if rec.get("ex") == ex and rec.get("sub") == sub and rec.get("status") in ("open", "live", "acked", "queued"):
                         rec["sub"] = dst
                 qm = abs(self.ledger.move_sub(ex, sub, dst))
@@ -12057,7 +12169,7 @@ class Engine:
 
         def at_risk(cands):
             """Engine-owned market/pair buys within 3c of their side's best bid, closest first."""
-            owned = {i for i, o in self.ledger.orders.items() if o["status"] == "open" and o["bot"] not in keep and o["bot"] != "manual"}
+            owned = {i for i, o in list(self.ledger.orders.items()) if o["status"] == "open" and o["bot"] not in keep and o["bot"] != "manual"}
             out = []
             for o in cands:
                 if o["id"] not in owned or o["action"] != "buy" or self.ledger.orders[o["id"]]["layer"] in self.REDUCING:
@@ -12088,7 +12200,7 @@ class Engine:
                 time.sleep(0.2)
         risky = first + late
         done = sum(1 for o in risky if self.ledger.orders.get(o["id"], {}).get("status") == "cancelled")
-        left = sum(1 for o in self.ledger.orders.values() if o["status"] == "open" and o["bot"] not in keep)
+        left = sum(1 for o in list(self.ledger.orders.values()) if o["status"] == "open" and o["bot"] not in keep)
         self.event("PULL", f"dropped {dropped} queued placements; cancelled {done}/{len(risky)} engine orders within 3c of the "
                            f"touch ({len(late)} landed by a write on the wire at the stop); {left - done} other engine "
                            f"orders left to expire; {sum(1 for o in orders if (self.ledger.orders.get(o['id']) or {}).get('bot', 'manual') in keep | {'manual'} or o['id'] not in self.ledger.orders)} "
@@ -12192,7 +12304,7 @@ class Engine:
         buys = [f for f in self.fills_since(t0) if f["layer"] in ("dump", "touch") and f["action"] == "buy"]
         cost = sum(f["qty"] * f["price"] for f in buys)
         edge = sum(f["qty"] * ((f.get("fair") if f.get("fair") is not None else f["price"]) - f["price"]) for f in buys)
-        trips = sum(1 for t in self.ledger.tranches.values() if t.get("kind") in ("dump", "touch") and t.get("state") == "closed"
+        trips = sum(1 for t in list(self.ledger.tranches.values()) if t.get("kind") in ("dump", "touch") and t.get("state") == "closed"
                     and (t.get("closed_ts") or 0) >= t0)
         realized = sum(f.get("realized") or 0 for f in self.fills_since(t0) if f["layer"] in ("dumpexit", "touchexit"))
         h = api.health(3600)
@@ -12227,7 +12339,7 @@ class Engine:
         return (row["marketValue"] - cost, None if mid is None else abs(q) * mid - cost, None if fair is None else abs(q) * fair - cost)
 
     def write_state(self, fresh, stopped=False):
-        if not stopped and self.last_state is not None and time.time() - getattr(self, "dash_t", 0.0) < DASH_EVERY_S:
+        if not stopped and self.last_state is not None and time.time() - getattr(self, "dash_t", 0.0) < (300 if self.night_lite(time.time()) else DASH_EVERY_S):
             return                                          # Piero 21:15 item 3: built once a minute (docs/latency.md: ~4.5 s of the ~6 s fill -> next order)
         self.dash_t = time.time()
         orders = self.ledger.orders
@@ -12241,7 +12353,7 @@ class Engine:
         per = {}
         for o in open_rows:
             per.setdefault(o["bot"], dict(resting=0, placed=0, fills=0, filled=0.0, edge=0.0, sig_edge=0.0))["resting"] += 1
-        for o in orders.values():
+        for o in list(orders.values()):
             per.setdefault(o["bot"], dict(resting=0, placed=0, fills=0, filled=0.0, edge=0.0, sig_edge=0.0))["placed"] += 1
         for f in fills:
             d = per.setdefault(f["bot"], dict(resting=0, placed=0, fills=0, filled=0.0, edge=0.0, sig_edge=0.0))
@@ -13009,11 +13121,11 @@ class Engine:
                 dict(rule="rejects <= 20% of last 50", value=f"{rej * 100:.0f}%", hit=rej > 0.20)]
 
     def reject_rate(self, layer):
-        recs = [o for o in self.ledger.orders.values() if self.strategy_of(o["bot"], o["layer"]) == layer][-50:]
+        recs = [o for o in list(self.ledger.orders.values()) if self.strategy_of(o["bot"], o["layer"]) == layer][-50:]
         return sum(1 for o in recs if o["status"] == "rejected") / len(recs) if recs else 0.0
 
     def market_detail(self, ex):
-        orders = sorted((o for o in self.ledger.orders.values() if o["ex"] == ex), key=lambda o: o["placed"], reverse=True)[:100]
+        orders = sorted((o for o in list(self.ledger.orders.values()) if o["ex"] == ex), key=lambda o: o["placed"], reverse=True)[:100]
         fills = [f for f in reversed(self.ledger.fills) if f["ex"] == ex][:100]
         try:
             book = dash5.market_book(self, ex)

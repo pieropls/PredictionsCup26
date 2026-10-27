@@ -45,6 +45,40 @@ class Rig:
         return self.E.on_pm(ex, (bid + ask) / 2, t, cash, pos or {}, pm_bid=bid, pm_ask=ask, defer=defer)
 
 
+class C118Tests(unittest.TestCase):
+    """C118 (Piero spec Oct 27 item 1): a snipe that places nothing says why; an unbought call re-tries on events; a retry never sends
+    while the previous order is unanswered."""
+
+    def test_a_snipe_that_places_nothing_says_why_and_the_book_retries_when_an_ask_comes_under_the_cap(self):
+        r = Rig(levels={"yes": [(0.99, 5_000)], "no": []})
+        r.pm("1", 0.985, 0.99, 10_001)                       # strict call after the close; cap min(0.97, 0.985 - 0.03) = 0.955
+        self.assertEqual(r.placed, [])
+        miss = [x for x in r.E.records if x["kind"] == "MISS"]
+        self.assertEqual((miss[-1]["reason"], miss[-1]["ex"]), ("no ask under the cap", "1"))
+        self.assertIn("best ask 0.990", miss[-1]["detail"])
+        self.assertTrue(any(k == "MISS" for k, _ in r.logs))
+        r.lv["yes"] = [(0.95, 5_000)]                        # a takeable ask appears: the event re-queues the unbought call
+        self.assertEqual(r.E.requeue(["1"], 10_002), 1)
+        r.t[0] = 10_002
+        r.E.run_queue(10_002, 200_000, {})
+        self.assertEqual(len(r.placed), 1)
+        self.assertEqual(r.E.requeue(["1"], 10_003), 0, "bought: no more event retries")
+        self.assertEqual(sorted(r.E.race_books("Ohio Senate")), ["1", "2"])
+
+    def test_a_retry_waits_for_the_previous_order_and_a_book_with_no_depth_says_so(self):
+        r = Rig(levels={"yes": [(0.95, 300)]})
+        r.pm("1", 0.985, 0.99, 10_001)
+        self.assertEqual(len(r.placed), 1)                    # sent, not answered yet (pending)
+        r.lv["yes"] = [(0.95, 5_000)]
+        r.pm("1", 0.99, 0.995, 10_002)                       # a quote on the called book re-tries it
+        self.assertEqual(len(r.placed), 1, "never twice into the same asks while unanswered")
+        self.assertEqual([x["reason"] for x in r.E.records if x["kind"] == "MISS"][-1], "the previous order is not answered yet")
+        r2 = Rig(levels={}, book=(0.80, 0.82, 0))             # no feed levels; the fallback book has no depth
+        r2.pm("1", 0.985, 0.99, 10_001)
+        self.assertEqual(r2.placed, [])
+        self.assertTrue(any(x["kind"] == "MISS" and x["reason"].startswith("no SIG book depth") for x in r2.E.records))
+
+
 class CallTests(unittest.TestCase):
     def test_rule_a_needs_the_bid_held_at_095_for_20_s(self):
         r = Rig()

@@ -2516,7 +2516,7 @@ class LeadersTests(EngineCase):
         loop(eng, fake)
         with open(os.path.join(TMP, "leaders.csv")) as fh:
             rows = list(csv.DictReader(fh))
-        self.assertEqual(len(rows), 32, "the fake's 30 leaders, #100 and our own row")
+        self.assertEqual(len(rows), 33, "the fake's 30 leaders, its answer to the 51-70 page (C118: one row), #100 and our own row")
         self.assertEqual(sum(r["ours"] == "1" for r in rows), 1)
         self.assertTrue(eng.dash_state()["leaders"]["series"])
         with open(os.path.join(TMP, "leaders.csv"), "a", newline="") as fh:   # a sample 6 h later
@@ -4300,6 +4300,20 @@ class FeedTests(EngineCase):
         f = i_realtime.SigMarketFeed(lambda: {}, self.TID, clock=lambda: clock[0], log=lambda *a: None)
         f.connected_t = t0
         return f, clock
+
+    def test_c118_the_feed_calls_on_book_with_the_exchanges_whose_book_changed(self):
+        from datetime import datetime, timezone
+        t0 = datetime(2026, 10, 8, 23, 11, 46, tzinfo=timezone.utc).timestamp()
+        f, clock = self.feed(t0)
+        got = []
+        f.on_book = lambda exs: got.append(set(exs))
+        f.handle(self.batch("270", 10, 9, books=[("959", 100, [(0.48, 500)], [(0.49, 700)]), ("960", 5, [(0.5, 1)], [(0.51, 1)])]))
+        self.assertEqual(got, [{"959", "960"}])
+        f.handle(self.batch("270", 11, 10, trades=[("959", "2026-10-08T23:11:45.000+00:00", 0.49, 10)]))
+        self.assertEqual(len(got), 1, "no book in the batch: no call")
+        f.on_book = lambda exs: 1 / 0                          # a broken hook never breaks the feed
+        f.handle(self.batch("270", 12, 11, books=[("959", 101, [(0.48, 1)], [(0.49, 1)])]))
+        self.assertEqual(f.book("959")[1], [(0.49, 1.0)])
 
     def test_parser_books_lag_duplicates_and_gaps(self):
         from datetime import datetime, timezone
@@ -7071,10 +7085,107 @@ class C102Tests(EngineCase):
         eng.rule0_fill_check([f])
         self.assertTrue(any(e["text"].startswith("RULE0-CALLED") for e in eng.events)); self.assertFalse(any(e["text"].startswith("RULE0 BROKEN") for e in eng.events))
 
+    def test_c118_no_fresh_feed_book_means_one_rest_read_from_the_lane_inside_its_budget(self):
+        fake, eng, a = self.rig(mode="live")
+        eng.el_mode_cached = "live"
+        eng.feed_book = lambda ex: None                         # a quiet market: the feed's book is older than 10 s
+        reads = []
+        f_engine.api.orderbook = lambda ex, depth=10: (reads.append(ex), ([(0.93, 100.0)], [(0.95, 500.0)]))[1]
+        self.assertEqual(eng.el_levels(a, "yes"), [(0.95, 500.0)], "the REST book, at once")
+        self.assertEqual(eng.el_levels(a, "no"), [(0.07, 100.0)])
+        self.assertEqual(len(reads), 1, "the answer reused for 2 s")
+        eng.el_rest_cache[a] = (time.time() - 2.5, eng.el_rest_cache[a][1])
+        self.assertIsNone(eng.el_levels(a, "yes"), "older than 2 s but under 3 s: no second read of the same market yet")
+        eng.el_rest_cache[a] = (time.time() - 3.5, eng.el_rest_cache[a][1])
+        self.assertIsNotNone(eng.el_levels(a, "yes")); self.assertEqual(len(reads), 2)
+        eng.el_rest_t = [time.time()] * eng.EL_REST_PER_MIN
+        self.assertIsNone(eng.el_levels("999", "yes"), "20 a minute at most")
+        E = eng.election                                        # the snipe goes out through it
+        E.close[E.race(a)] = E.first[E.race(a)] = time.time() - 60
+        eng.el_rest_t, eng.el_rest_cache = [], {}
+        eng.el_quote(a, 0.985, 0.99, time.time())
+        eng.el_lane_once()
+        self.assertTrue(any(r.get("layer") == "callsnipe" for r in eng.ledger.orders.values()) or eng.ex.queue,
+                        "the call's snipe was handed to the executor off a REST book")
+
+    def test_c118_a_book_update_or_a_pm_quote_of_the_race_retries_an_unbought_call(self):
+        fake, eng, a = self.rig(mode="shadow")
+        E = eng.election
+        eng.el_lane_ev = threading.Event()
+        E.calls[a] = dict(side="yes", t=time.time(), signal_t=time.time(), rule="B", strict=True, bought=0.0, cost=0.0, fails=0, stopped=False, reversed=False)
+        eng.el_on_book({a})
+        self.assertIn(a, E.queue); self.assertTrue(eng.el_lane_ev.is_set())
+        E.queue.clear(); eng.el_lane_ev.clear()
+        E.meta["999"] = dict(race=E.race(a), party="D", state="Ohio")   # the race's other book
+        eng.el_quote("999", 0.02, 0.03, time.time())
+        self.assertIn(a, E.queue, "a PM quote of the race re-tries the unbought call")
+        E.queue.clear()
+        E.calls[a]["bought"] = 500.0
+        eng.el_on_book({a})
+        self.assertNotIn(a, E.queue, "bought: no event retry")
+
+    def test_c118_the_night_err_pause_stops_only_the_passive_layers_unless_election_code_errs(self):
+        fake, eng, a = self.rig(mode="live")
+        f_engine.ELECTION = dict(f_engine.ELECTION, night_err_rule=("2000-01-01 00:00:00", "2099-01-01 00:00:00"))
+        hms = time.strftime("%H:%M:%S")
+        eng.events += [dict(kind="ERR", t=hms, text=f"#{i} RuntimeError('dictionary changed size during iteration') at d_ledger.py:136 tranche_avg")
+                       for i in range(6)]
+        eng.hard_pauses(time.time())
+        self.assertTrue(eng.controls.paused)
+        self.assertEqual(eng.controls.d["auto_pause"]["scope"], "passive")
+        self.assertFalse(eng.el_lane_paused(), "the call lane runs on")
+        self.assertTrue(any("NIGHT ERR-PAUSE (passive only)" in e["text"] for e in eng.events))
+        eng.controls.set_paused(True, "Piero", by="dashboard")
+        self.assertTrue(eng.el_lane_paused(), "Piero's own pause stops everything")
+        eng.controls.set_paused(False, "clear", by="test")
+        eng.events = [dict(kind="ERR", t=hms, text=f"#{i} KeyError('x') at n_election.py:300 _buy") for i in range(6)]
+        eng.hard_pauses(time.time())
+        self.assertEqual(eng.controls.d["auto_pause"]["scope"], "all")
+        self.assertTrue(eng.el_lane_paused(), "errors in election code: the lane pauses too")
+        self.assertTrue(any("NIGHT ERR-PAUSE (the call lane too)" in e["text"] for e in eng.events))
+        eng.controls.set_paused(False, "clear", by="test")
+        f_engine.ELECTION = dict(f_engine.ELECTION, night_err_rule=("2000-01-01 00:00:00", "2000-01-02 00:00:00"))
+        eng.events = [dict(kind="ERR", t=hms, text=f"#{i} RuntimeError('x') at d_ledger.py:136 tranche_avg") for i in range(6)]
+        eng.hard_pauses(time.time())
+        self.assertTrue(eng.el_lane_paused(), "outside the night: a pause stops the lane as before")
+
+    def test_c118_the_night_cpu_budget_skips_the_bid_planners_and_keeps_the_exits(self):
+        fake, eng, a = self.rig(mode="live")
+        f_engine.ELECTION = dict(f_engine.ELECTION, night_lite=("2000-01-01 00:00:00", "2099-01-01 00:00:00"))
+        f_engine.ROTATION = dict(a_config.ROTATION, on=True)
+        boom = lambda *a_, **k_: (_ for _ in ()).throw(AssertionError("planner ran on the night"))
+        eng.carry_candidates = boom; eng.rot_candidates = boom; eng.fmm_targets = boom
+        exits = []
+        eng.track_rot = lambda now: exits.append("rot"); eng.track_fmm = lambda now: exits.append("fmm")
+        self.assertEqual(eng.carry_plan(time.time()), {})
+        self.assertEqual(eng.rot_plan(time.time(), 50_000.0), {})
+        self.assertEqual(eng.fmm_plan(time.time()), {})
+        self.assertEqual(exits, ["rot", "fmm"], "the exits keep running")
+        eng.leaders_t = time.time() - 1000                      # 15 min have not passed in the night's 30
+        f_engine.api.leaderboard = boom
+        eng.log_leaders(time.time())
+
+    def test_c118_the_leaders_logger_keeps_the_top_70(self):
+        fake, eng, a = self.rig(mode="shadow")
+        def lb(limit=20, offset=0, period="all"):
+            if offset == 99:
+                return dict(leaderboard=[dict(rank=100, username="h", pnl=1.0, tradesCount=1, volume=1.0, roi=1.0)], total=1700, myRank=89)
+            if offset == 88:
+                return dict(leaderboard=[dict(rank=89, username="us", pnl=1.0, tradesCount=1, volume=1.0, roi=1.0)], total=1700, myRank=89)
+            return dict(leaderboard=[dict(rank=offset + i + 1, username=f"u{offset + i + 1}", pnl=1.0, tradesCount=1, volume=1.0, roi=1.0)
+                                     for i in range(limit)], total=1700, myRank=89)
+        f_engine.api.leaderboard = lb
+        eng.leaders_t = 0.0
+        eng.log_leaders(time.time())
+        rows = list(csv.DictReader(open(os.path.join(TMP, "leaders.csv"))))
+        ranks = {int(r["rank"]) for r in rows if r.get("rank")}
+        self.assertTrue({1, 50, 51, 70, 100, 89} <= ranks, sorted(ranks)[-8:])
+        self.assertNotIn(71, ranks)
+
     def test_c117_wave_recycling_sells_a_strict_winner_into_097_bids_from_the_first_call_with_no_usable_gate(self):
         fake, eng, a = self.rig(mode="live")
         f_engine.SELL_EV_MAX = 0.05
-        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], mode="live"))
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], bid=0.97, later_need=None, mode="live"))
         C93Tests.lot(self, eng, fake, a, f"callsnipe:{a}:yes", 20_000, 0.95, (0.975, 0.98, 0.9775), 0.995)
         loop(eng, fake); loop(eng, fake)
         eng.ledger.subbooks[a] = {f"callsnipe:{a}:yes": 20_000.0}; eng.lots_cache = (None, {})
@@ -7091,7 +7202,7 @@ class C102Tests(EngineCase):
         eng.el_recycle_scan(time.time())
         self.assertEqual(eng.el_recycle, {})
         E.calls[a]["strict"] = True
-        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], mode="shadow"))
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], bid=0.97, later_need=None, mode="shadow"))
         eng.el_shadowq.clear()
         eng.el_recycle_scan(time.time())
         self.assertEqual(eng.el_recycle, {}, "shadow: nothing for the sellers")
@@ -7105,7 +7216,7 @@ class C102Tests(EngineCase):
 
     def test_c117_recycling_keeps_the_097_bar_rule_0_the_wave_cap_and_never_sells_the_manual_book(self):
         fake, eng, a = self.rig(mode="live")
-        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], mode="live", wave_cap=1_500.0))
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], bid=0.97, later_need=None, mode="live", wave_cap=1_500.0))
         E = eng.election
         eng.el_mode_cached = "live"
         E.calls[a] = dict(side="yes", t=time.time(), signal_t=time.time(), rule="B", strict=True, bought=0.0, cost=0.0, fails=0, stopped=False, reversed=False)
@@ -7119,14 +7230,36 @@ class C102Tests(EngineCase):
         eng.el_recycle_scan(time.time())
         self.assertEqual(set(eng.el_recycle), {(a, f"carry:{a}:yes")},
                          "lowest avg first; the 30k cap (here 1,500) takes 975 of it, the dump lot (+975) would pass it; the FMM lot's floor 0.98 > 0.975; never the manual book")
-        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], mode="live", exclude_ex=(a,)))
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], bid=0.97, later_need=None, mode="live", exclude_ex=(a,)))
         eng.el_recycle_scan(time.time())
         self.assertEqual(eng.el_recycle, {}, "exclude_ex (RI Senate R NO, the SELL_HOLD lots)")
-        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], mode="live"))
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], bid=0.97, later_need=None, mode="live"))
         f = dict(key="r:1", order="9101", ex=a, side="no", action="buy", qty=30_000.0, price=0.02, layer="release", t=time.strftime("%Y-%m-%d %H:%M:%S"))
         eng.ledger.fills.append(f)                              # 30k x 0.98 of this wave already recycled since the call
         eng.el_recycle_scan(time.time())
         self.assertEqual(eng.el_recycle, {}, "the wave's 30k is used")
+
+    def test_c118_recycling_at_095_only_while_the_later_waves_need_more_than_the_cash_on_hand(self):
+        fake, eng, a = self.rig(mode="live")
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], mode="live"))
+        self.assertEqual(f_engine.ELECTION["recycle"]["bid"], 0.95)
+        E = eng.election
+        eng.el_mode_cached = "live"
+        w = time.time() - 600
+        E.close[E.race(a)] = w
+        E.calls[a] = dict(side="yes", t=time.time(), signal_t=time.time(), rule="B", strict=True, bought=0.0, cost=0.0, fails=0, stopped=False, reversed=False)
+        eng.ledger.subbooks[a] = {f"carry:{a}:yes": 1_000.0}
+        eng.lots = lambda ex, side, sub: [(1000.0, 0.90, "engine")] if sub.startswith("carry:") else []
+        eng.rot_touch = lambda ex, side: (0.95, 0.955, 0.99)
+        eng.el_snap = dict(cash=el_mod.CASH_FLOOR + 10_000.0, pos={})   # usable 10k
+        later = time.mktime(time.strptime(time.strftime("%Y-%m-%d") + " 23:59:00", "%Y-%m-%d %H:%M:%S")) if time.localtime().tm_hour < 23 else w + 3600
+        E.close.update({"Later 1": later, "Later 2": later, "Later 3": later})   # 3 uncalled later races x 4,000 (default) = 12k > 10k
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle, {(a, f"carry:{a}:yes"): 0.95}, "0.95 sells while the later waves need more than usable")
+        eng.el_snap = dict(cash=el_mod.CASH_FLOOR + 20_000.0, pos={})   # usable 20k >= their 12k: hold
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle, {})
+        self.assertTrue(any(r.get("kind") == "recycle" and "later waves" in r.get("verdict", "") for r in eng.el_shadowq))
 
     def test_c117_an_fmm_lot_recycles_through_its_own_exit_at_the_bid(self):
         fake, eng, mk = FMMTests.rig(self)

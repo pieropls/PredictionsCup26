@@ -16,6 +16,7 @@ import time
 
 # ---- C1 the call rules (the sniper): the PM side BID (not the mid), after the state's LAST poll close
 CALL_HOLD, CALL_HOLD_S = 0.95, 20.0     # A: >= 0.95 held 20 s
+MISS_EVERY_S = 30                       # C118: a book's MISS row (why its snipe placed nothing) at most every 30 s per reason
 CALL_STRICT = 0.98                      # B: >= 0.98 once (strict: the only call that may trigger RULE0-CALLED and wave recycling)
 GUARD_SPREAD = 0.03                     # PM spread <= 3c
 GUARD_COMPLEMENT = 0.04                 # the race's other books' PM <= 0.04 when a candidate is called to win
@@ -80,6 +81,7 @@ class Election:
         self.precall_t = {}
         self.run0 = {}                                      # (ex, side) -> start of the unbroken run of quotes past 0.95
         self.pending = {}                                   # order key -> dict(ex, qty, cost, t): sent to the executor, not yet answered
+        self.miss_t = {}                                    # C118: (ex, reason) -> last MISS row; (ex, call t, reason) -> its MISS line
         self.settle_t = {}                                  # ex -> last settlement order t (one order per book per TTL)
         self.last_quote_t = None
         self._placing = None
@@ -248,6 +250,19 @@ class Election:
         called = {self.race(e) for e, c in self.calls.items() if not c.get("reversed")}
         return max(1, len((races - called) | {self.race(ex)}))
 
+    def _miss(self, ex, c, reason, now, layer="callsnipe", detail=""):
+        """C118 (Piero spec Oct 27 item 1): every snipe that places nothing says why — a MISS row (calls.jsonl, at most one per book and
+        reason every 30 s) and one MISS line per call and reason. -> None"""
+        k = (ex, reason)
+        if now - self.miss_t.get(k, -1e18) >= MISS_EVERY_S:
+            self.miss_t[k] = now
+            self.records.append(dict(t=now, kind="MISS", ex=ex, race=self.race(ex), side=c["side"], layer=layer, reason=reason, detail=detail))
+        k1 = (ex, round(c.get("t") or 0), reason)
+        if k1 not in self.miss_t:
+            self.miss_t[k1] = now
+            self._log("MISS", f"{self.race(ex)}: {c['side'].upper()} {layer} placed nothing: {reason}" + (f" ({detail})" if detail else ""), now)
+        return None
+
     def _snipe(self, ex, c, now, free_cash, pos, dry=False):
         """Buy the called side at <= min(0.97, PM side bid - 2c), walking the SIG book, sized min(15k shares a race, the wave share), <= 20k
         at cost a state, usable cash = free - floor (7k) - the unanswered / unfilled orders; 120-s orders; stop after 3 failed writes."""
@@ -255,8 +270,26 @@ class Election:
             return None
         sb = self._side_bid(ex, c["side"])
         if sb is None:
-            return None
+            return None if dry else self._miss(ex, c, "no PM side bid", now)
+        if not dry and any(p_["ex"] == ex for p_ in self.pending.values()):
+            return self._miss(ex, c, "the previous order is not answered yet", now)   # C118: a retry never sends into the same asks twice
         return self._buy(ex, c, round(min(PRICE_CAP, sb - PRICE_UNDER_PM), 3), now, free_cash, pos, "callsnipe", dry=dry, sb=sb, wave=True)
+
+    def requeue(self, exs, now):
+        """C118 (item 1): the event-driven retry — a called book still unbought goes back to the call lane's queue (every SIG book update
+        for its market, every PM quote of its race). -> how many were queued"""
+        n = 0
+        with self.lock:
+            for ex in exs:
+                c = self.calls.get(ex)
+                if (c and not c.get("reversed") and not c["stopped"] and self.race(ex) not in self.race_stop and c["bought"] < MIN_QTY
+                        and ex not in self.queue and ex not in self.manual):
+                    self.queue[ex] = now
+                    n += 1
+        return n
+
+    def race_books(self, race):
+        return [e for e, m in self.meta.items() if m.get("race") == race]
 
     def _buy(self, ex, c, cap, now, free_cash, pos, layer, dry=False, sb=None, wave=True):
         side = c["side"]
@@ -268,16 +301,21 @@ class Election:
                                    f"a strict call sells our lot by RULE0-CALLED; the race's other book can still be bought)", now)
             return None                                     # v2 §4.4 b: never a buy that nets our own losing lot
         lv = self.levels(ex, side) if self.levels else None
-        if not lv:
+        if lv is None:
             bk = self.book(ex)
             if not bk:
-                return None
+                return None if dry else self._miss(ex, c, "no SIG book (the feed's is stale and no REST read)", now, layer)
             bid_y, ask_y, depth = bk[:3]
             ask = ask_y if side == "yes" else (1 - bid_y if bid_y is not None else None)
             lv = [] if ask is None else [(round(ask, 3), depth or 0)]
+            if not depth:
+                return None if dry else self._miss(ex, c, "no SIG book depth (the feed's is stale and no REST read)", now, layer,
+                                                   f"last read: best ask {ask:.3f}" if ask is not None else "")
         take = [(p, q) for p, q in lv if p <= cap + 1e-9 and q > 0]
         if not take:
-            return None
+            best = min((p for p, q in lv if q > 0), default=None)
+            return None if dry else self._miss(ex, c, "no ask under the cap", now, layer,
+                                               f"cap {cap:.3f}, best ask {'none' if best is None else f'{best:.3f}'}")
         limit = max(p for p, _ in take)
         avail = sum(q for _, q in take)
         race, st = self.race(ex), self.state(ex)
@@ -290,7 +328,12 @@ class Election:
         cash = min(share - cost_race, STATE_CAP - cost_state, usable)
         qty = int(min(avail, RACE_SHARES - sh_race, max(0.0, cash) / limit))
         if qty < MIN_QTY:
-            return None
+            if dry:
+                return None
+            why = ("size < 10 on the book" if avail < MIN_QTY else "the race's 15k shares are taken" if RACE_SHARES - sh_race < MIN_QTY
+                   else "cash")
+            return self._miss(ex, c, why, now, layer, f"on the book {avail:,.0f} under {limit:.3f}; usable {usable:,.0f}, wave share {share:,.0f}, "
+                                                      f"race cost {cost_race:,.0f}, state cost {cost_state:,.0f}")
         items = [(ex, side, "buy", round(limit, 3), qty)]
         if dry:
             return self.place_dry(items, layer, TTL_S, "precall") if self.place_dry else None
@@ -300,6 +343,7 @@ class Election:
         finally:
             pl, self._placing = self._placing, None
         if key is None:
+            self._miss(ex, c, "the write was refused", now, layer)
             c["fails"] += 1
             if c["fails"] >= WRITES_FAIL_STOP:
                 c["stopped"] = True

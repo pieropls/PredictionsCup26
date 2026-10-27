@@ -145,6 +145,7 @@ class SigMarketFeed:
         self.stats = dict(messages=0, batches=0, markets=0, books=0, trades=0, gaps=0, duplicates=0, reconnects=0, errors=0, sweeps=0)
         self.running, self.thread, self.ws = False, None, None
         self.lock = threading.Lock()
+        self.on_book = None                                 # C118: called (feed thread, outside the lock) with the exchanges whose book changed
 
     @staticmethod
     def _ts(iso):
@@ -169,7 +170,7 @@ class SigMarketFeed:
         now = self.clock()
         self.last_msg_t = now
         self.stats["messages"] += 1
-        out = []
+        out, booked = [], set()
         with self.lock:
             for e in entries or []:
                 b = e.get("batch") or {}
@@ -195,6 +196,7 @@ class SigMarketFeed:
                                           bids=[(float(x["price"]), float(x["quantity"])) for x in bk.get("bids") or []],
                                           asks=[(float(x["price"]), float(x["quantity"])) for x in bk.get("asks") or []])
                     self.stats["books"] += 1
+                    booked.add(ex)
                     if at is not None:
                         self.lags.append(now - at)
                         if len(self.lags) > 5000:
@@ -221,6 +223,11 @@ class SigMarketFeed:
             if self.on_sweep:
                 self.on_sweep(sw)
         self.sweeps = self.sweeps[-500:]
+        if booked and self.on_book:
+            try:
+                self.on_book(booked)
+            except Exception as e:                          # noqa: BLE001 - the hook never breaks the feed
+                self.log("ERR", f"on_book hook: {e!r}")
         return "batch"
 
     def _sweep(self, ex, now):

@@ -42,7 +42,7 @@ class Ledger:
             for k, v in dict(fair=None, edge=None, sig_mid=None, sig_edge=None, layer="", action=None, before_engine=True,
                              mo5=None, mo30=None, realized=0.0).items():
                 f.setdefault(k, v)
-        for o in self.orders.values():
+        for o in list(self.orders.values()):
             for k, v in dict(cost=0.0, layer="", filled=0.0, left=0, closed=None, note="", sub="").items():
                 o.setdefault(k, v)
         self.seen, self.n, self.synced = {f["key"] for f in self.fills}, 0, bool(d)
@@ -133,7 +133,7 @@ class Ledger:
     def tranche_avg(self, sub, layer="ladder", ex=None, side=None, since=None):
         """Average fill price of the entry fills (ladder, or dump) that built a tranche (orders placed into that sub-book).
         Without those order records (pruned), the layer's buy fills on that market and side since the tranche started."""
-        ids = {i for i, o in self.orders.items() if o.get("sub") == sub and o.get("layer") == layer}
+        ids = {i for i, o in list(self.orders.items()) if o.get("sub") == sub and o.get("layer") == layer}
         fs = [f for f in self.fills if f["order"] in ids]
         if not fs and ex is not None and since is not None:
             fs = [f for f in self.fills if f["ex"] == ex and f.get("layer") == layer and f["side"] == side and f.get("action") == "buy"
@@ -191,7 +191,7 @@ class Ledger:
         as_of: when the open-orders read started. The executor places orders while the engine reads, so an order acked
         after that may be missing from the snapshot: it is only closed once a snapshot taken well after it misses it."""
         live = {o["id"]: o for o in open_orders}
-        for o in self.orders.values():
+        for o in list(self.orders.values()):
             if o["id"] in live:
                 if o["status"] == "done":                           # an older snapshot missed it: it is resting
                     o.update(status="open", closed=None)
@@ -238,9 +238,9 @@ class Ledger:
             if not history:
                 new.append(rec)
         self.fills = self.fills[-4000:]
-        closed = sorted((o for o in self.orders.values() if o["status"] != "open"), key=lambda o: o["placed"])
+        closed = sorted((o for o in list(self.orders.values()) if o["status"] != "open"), key=lambda o: o["placed"])
         keep = {i for b in self.baskets[-500:] for i in b["orders"]}
-        keep |= {i for i, o in self.orders.items() if o.get("sub") and abs(self.subbooks.get(o["ex"], {}).get(o["sub"], 0)) >= 1}
+        keep |= {i for i, o in list(self.orders.items()) if o.get("sub") and abs(self.subbooks.get(o["ex"], {}).get(o["sub"], 0)) >= 1}
         # Oct 3: an order whose sub-book still holds shares is kept (a pruned dump buy made the RI Senate D tranche lose
         # its entry price and its rebound from 12:46)
         for o in closed[:-4000]:
@@ -311,7 +311,7 @@ class Ledger:
         of the sub-books does not change; pair-set legs are left alone. -> [(ex, sub, from, to)]."""
         with self.lock:
             netted = []
-            for ex, books in self.subbooks.items():
+            for ex, books in list(self.subbooks.items()):
                 inv = books.get("inventory", 0)
                 if abs(inv) < 1:
                     continue
@@ -409,7 +409,7 @@ class Ledger:
             for f in self.fills:
                 if f.get("key") not in {d["key"] for d in drop}:
                     booked[str(f.get("order"))] = booked.get(str(f.get("order")), 0.0) + f["qty"]
-            for oid, order in self.orders.items():
+            for oid, order in list(self.orders.items()):
                 excess = booked.get(oid, 0.0) - (order.get("qty") or 0)
                 if excess <= 1:
                     continue
