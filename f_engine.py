@@ -10976,11 +10976,14 @@ class Engine:
         return None if not px else (px[0], px[1], 0)
 
     EL_REST_PER_MIN, EL_REST_EVERY_S, EL_REST_CACHE_S = 20, 3.0, 2.0   # C118: the call lane's own REST book reads (SIG allows 100 reads a minute)
+    EL_REST_THREADS = ("call-lane", "MainThread")          # C120: the lane and the loop's run_queue only (01:31 Oct 27: 26 reads in 30 min were dry PRECALLs)
 
     def el_rest_book(self, ex):
         """C118 (Piero spec Oct 27 item 1): the feed has no fresh book for a called market (a quiet market's book is 'stale' after 10 s:
         Oct 26 rehearsal, 7 of 18 first orders 7-24 s late, Massachusetts 285 s) -> one immediate REST read from the call lane, <= 20 a
         minute, one per market every 3 s, the answer reused for 2 s. -> (bids, asks) or None"""
+        if threading.current_thread().name not in self.EL_REST_THREADS:
+            return None                                      # C120: a PRECALL dry snipe (feed / injector thread) never spends the lane's reads
         now = time.time()
         with self.el_rest_lock:
             cache = self.el_rest_cache.get(ex)

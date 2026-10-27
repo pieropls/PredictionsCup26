@@ -7137,6 +7137,12 @@ class C102Tests(EngineCase):
         self.assertIsNotNone(eng.el_levels(a, "yes")); self.assertEqual(len(reads), 2)
         eng.el_rest_t = [time.time()] * eng.EL_REST_PER_MIN
         self.assertIsNone(eng.el_levels("999", "yes"), "20 a minute at most")
+        eng.el_rest_t, eng.el_rest_cache = [], {}
+        got = []
+        th = threading.Thread(target=lambda: got.append(eng.el_rest_book(a)), name="pm-feed")
+        th.start(); th.join()
+        self.assertEqual(got, [None], "C120: a dry PRECALL snipe on the feed thread never reads REST")
+        self.assertEqual(len(reads), 2)
         E = eng.election                                        # the snipe goes out through it
         E.close[E.race(a)] = E.first[E.race(a)] = time.time() - 60
         eng.el_rest_t, eng.el_rest_cache = [], {}
