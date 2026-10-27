@@ -11366,8 +11366,8 @@ class Engine:
 
     def el_recycle_scan(self, now):
         """C117 (Piero 00:20 Oct 26 item 5; docs/night_recycle.md), C7 rebuilt: from the first strict call (rule B, not reversed), our lots of
-        the called side sell into SIG's existing bids at >= max(0.95 (C118), lot avg + 0.5c) while the later waves' uncalled races need more
-        than the cash on hand (C118), lowest lot average first, at most 30k a wave (a race's
+        the called side sell into SIG's existing bids at >= max(0.95 (C118), lot avg + 0.5c) while a later wave still has uncalled races
+        (C121, Piero 10:10 Oct 27), lowest lot average first, at most 30k a wave (a race's
         last poll close) counting the sales of called sides at >= 0.97 since their calls. Every lot but Piero's manual book, pair-set / lock
         legs and exclude_ex. -> self.el_recycle {(ex, sub): bid} for the sellers (live only); shadow logs each decision instead."""
         cfg = ELECTION.get("recycle") or {}
@@ -11412,24 +11412,22 @@ class Engine:
                     floor_ = max(floor_, bots.tick_up(round(sig_avg + RULE0_MARGIN, 6)))
                 cands.append((avg, ex, side, sub, abs(q), floor_, bid, c["t"]))
         out, rows = {}, []
-        gate = cfg.get("later_need")
-        usable = float((getattr(self, "el_snap", None) or {}).get("cash") or 0.0) - el.CASH_FLOOR
+        gate = cfg.get("later_uncalled")
         called_r = {E.race(e) for e in list(E.calls)}
-        need_after = {}
+        n_after = {}
 
         def later(w):
-            """C118 item 5: the projected snipe need of the uncalled races whose last close is after wave w."""
-            if w not in need_after:
-                per = lambda t: float(gate.get(time.strftime("%H:%M", time.localtime(t)), cfg.get("later_need_default", 4_000.0)))
-                need_after[w] = sum(per(t) for r, t in list(E.close.items()) if t is not None and w is not None and t > w
-                                    and r not in called_r and r not in E.race_stop)
-            return need_after[w]
+            """C121 (Piero 10:10 Oct 27): the uncalled races whose last close is after wave w."""
+            if w not in n_after:
+                n_after[w] = sum(1 for r, t in list(E.close.items()) if t is not None and w is not None and t > w
+                                 and r not in called_r and r not in E.race_stop)
+            return n_after[w]
         for avg, ex, side, sub, q, floor_, bid, t_call in sorted(cands):
             w = wave(ex)
             if bid is None or bid < max(T, floor_) - 1e-9:
                 verdict = f"hold: bid {'none' if bid is None else f'{bid:.3f}'} < max({T:.2f}, floor {floor_:.3f})"
-            elif gate and later(w) <= usable + 1e-6:
-                verdict = f"hold: the later waves' uncalled races need {later(w):,.0f} <= usable {usable:,.0f}"
+            elif gate and not later(w):
+                verdict = "hold: no later wave has uncalled races"
             elif done[w] + q * bid > cap + 1e-6:
                 verdict = f"hold: the wave's {cap:,.0f} recycled ({done[w]:,.0f} so far)"
             else:

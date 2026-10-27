@@ -552,10 +552,9 @@ ELECTION = dict(on=True, shadow_from="2026-10-22 06:00:00", election_day="2026-1
                 # `election_recycle` control overrides it.
                 recycle=dict(mode="shadow", bid=0.95, wave_cap=30_000.0, exclude_ex=("1077", "894", "1045"),
                              # C118 (spec Oct 27 item 5; docs/night_recycle.md "Oct 27"): 0.95 (beats 0.97 on the normal and slow nights,
-                             # >= 0 on the reversal night under today's bids). Sell only while the uncalled races of LATER waves need more
-                             # than the cash on hand: per race, its wave's unlimited-cash sniper spend / its races (night_reserve.md)
-                             later_need={"16:00": 4_300.0, "16:30": 3_000.0, "17:00": 5_200.0, "17:30": 5_000.0, "18:00": 5_300.0,
-                                         "19:00": 7_000.0, "20:00": 5_200.0, "21:00": 12_000.0, "22:00": 3_750.0}, later_need_default=4_000.0),
+                             # >= 0 on the reversal night under today's bids). C121 (Piero 10:10 Oct 27): sell only while a LATER wave (a
+                             # last poll close after the sold book's) still has uncalled races; C118's "their projected need > cash" dropped
+                             later_uncalled=True),
                 # C118 (Piero spec Oct 27 item 2): in this window an engine_errors pause stops the passive layers only (the call lane, snipes,
                 # exits and RULE0-CALLED run on) unless the errors come from election code (n_election / the call lane / the executor)
                 night_err_rule=("2026-11-03 14:45:00", "2026-11-04 09:00:00"),
