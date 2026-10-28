@@ -10977,6 +10977,18 @@ class Engine:
 
     EL_REST_PER_MIN, EL_REST_EVERY_S, EL_REST_CACHE_S = 20, 3.0, 2.0   # C118: the call lane's own REST book reads (SIG allows 100 reads a minute)
     EL_REST_THREADS = ("call-lane", "MainThread")          # C120: the lane and the loop's run_queue only (01:31 Oct 27: 26 reads in 30 min were dry PRECALLs)
+    EL_QUIET_MAX_S = 300.0                                  # C122: a quiet market's feed book / a REST read stays good this long while unchanged
+
+    def el_quiet_book(self, ex):
+        """C122 (rehearsal 2, Oct 27: 16 of 63 first orders > 500 ms, the lane's 20-a-minute REST budget spent at the wave peaks): a feed
+        book older than 10 s is still the market's book while the feed is up and the market had no gap -> no REST read for it."""
+        if self.feed_mode() != "live" or self.mkt_feed is None:
+            return None
+        return self.mkt_feed.quiet_book(ex, self.EL_QUIET_MAX_S)
+
+    def el_rest_unchanged(self, ex, t):
+        f = self.mkt_feed if self.feed_mode() == "live" else None
+        return f is not None and f.unchanged_since(ex, t, self.EL_QUIET_MAX_S)
 
     def el_rest_book(self, ex):
         """C118 (Piero spec Oct 27 item 1): the feed has no fresh book for a called market (a quiet market's book is 'stale' after 10 s:
@@ -10987,8 +10999,8 @@ class Engine:
         now = time.time()
         with self.el_rest_lock:
             cache = self.el_rest_cache.get(ex)
-            if cache and now - cache[0] <= self.EL_REST_CACHE_S:
-                return cache[1]
+            if cache and (now - cache[0] <= self.EL_REST_CACHE_S or self.el_rest_unchanged(ex, cache[0])):
+                return cache[1]                              # C122: reused while the feed says the book has not changed since the read
             self.el_rest_t = [t for t in self.el_rest_t if now - t < 60]
             if len(self.el_rest_t) >= self.EL_REST_PER_MIN or (cache and now - cache[0] < self.EL_REST_EVERY_S):
                 return None
@@ -11005,6 +11017,8 @@ class Engine:
 
     def el_levels(self, ex, side):
         fb = self.feed_book(str(ex))
+        if fb is None:
+            fb = self.el_quiet_book(str(ex))                 # C122: a quiet market's book is still its book
         if fb is None:
             fb = self.el_rest_book(str(ex))                  # C118: never wait for the main loop or the feed's next update
         if fb is None:

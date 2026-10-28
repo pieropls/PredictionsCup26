@@ -39,6 +39,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 TMP = tempfile.mkdtemp(prefix="sig_engine_test_")
 import a_config  # noqa: E402
 
+# C122: the night windows are wall-clock dates (C118 night_lite / night_err_rule, C119 rehearsal 2's night_lite_test): off inside a rig so
+# the suite gives the same answer at any hour (17:51 Oct 27 it failed 42 planner tests); the tests that need a window set one (C118Tests)
+a_config.ELECTION.update(night_lite=None, night_lite_test=(), night_err_rule=None)
+
 for k, v in dict(LOOP_S=0, PNL_EVERY_S=0, PAIR_MIN_LOCK=0, DATA=TMP, POSITION_REF_FILE=f"{TMP}/position_ref.json", LEDGER_FILE=f"{TMP}/ledger.json",
                  PNL_FILE=f"{TMP}/pnl.csv", STATE_FILE=f"{TMP}/state.json", DASHBOARD_FILE=f"{TMP}/dashboard.html",
                  PID_FILE=f"{TMP}/engine.pid", LOCK_FILE=f"{TMP}/engine.lock", OVERRIDES_FILE=f"{TMP}/overrides.json",
@@ -4352,6 +4356,37 @@ class FeedTests(EngineCase):
         f.handle(self.batch("270", 12, 11, books=[("959", 101, [(0.48, 1)], [(0.49, 1)])]))
         self.assertEqual(f.book("959")[1], [(0.49, 1.0)])
 
+    def test_c122_a_quiet_markets_book_stays_good_until_a_gap_or_a_reconnect_and_so_does_a_rest_read(self):
+        from datetime import datetime, timezone
+        t0 = datetime(2026, 10, 8, 23, 11, 46, tzinfo=timezone.utc).timestamp()
+        f, clock = self.feed(t0)
+        f.handle(self.batch("270", 10, 9, books=[("959", 100, [(0.48, 500)], [(0.49, 700)]), ("960", 5, [(0.5, 1)], [(0.51, 1)])]))
+        f.handle(self.batch("271", 3, 2, books=[("961", 7, [(0.2, 1)], [(0.21, 1)])]))
+        t_rest = clock[0]
+        clock[0] += 120
+        f.handle(self.batch("271", 4, 3, books=[("961", 8, [(0.2, 1)], [(0.21, 1)])]))     # the feed is up: other markets keep talking
+        self.assertIsNone(f.book("959"), "older than 10 s: the engine's quoting still goes to REST")
+        self.assertEqual(f.quiet_book("959"), ([(0.48, 500.0)], [(0.49, 700.0)]), "the lane keeps the quiet market's last full book")
+        self.assertTrue(f.unchanged_since("962", t_rest), "a REST read of a market the feed never named stays good")
+        self.assertTrue(f.unchanged_since("959", t_rest))
+        clock[0] += 1
+        f.handle(self.batch("270", 12, 11, books=[("960", 6, [(0.5, 2)], [(0.51, 2)])]))     # revision 11 missed: a gap on market 270
+        self.assertIsNone(f.quiet_book("959"), "its market had a gap: 959 may have missed a change")
+        self.assertFalse(f.unchanged_since("959", t_rest))
+        self.assertEqual(f.quiet_book("960"), ([(0.5, 2.0)], [(0.51, 2.0)]), "the gap batch's own book is a full snapshot")
+        self.assertFalse(f.unchanged_since("960", t_rest), "a newer feed book replaces the REST read")
+        clock[0] += 400
+        f.handle(self.batch("272", 1, 0, books=[("963", 1, [(0.3, 1)], [(0.31, 1)])]))
+        self.assertIsNone(f.quiet_book("961"), "older than 300 s: REST again")
+        f.connection_lost()
+        f.connected_t = clock[0]
+        self.assertIsNone(f.quiet_book("963"), "a reconnect: every book from before it is stale")
+        f.handle(self.batch("272", 2, 1, books=[("963", 2, [(0.3, 1)], [(0.31, 1)])]))
+        self.assertEqual(f.quiet_book("963"), ([(0.3, 1.0)], [(0.31, 1.0)]))
+        self.assertFalse(f.unchanged_since("962", clock[0] - 1), "a reconnect after the read: it may have missed a change")
+        clock[0] += 40
+        self.assertIsNone(f.quiet_book("963"), "no message for 30 s: not connected")
+
     def test_parser_books_lag_duplicates_and_gaps(self):
         from datetime import datetime, timezone
         t0 = datetime(2026, 10, 8, 23, 11, 46, tzinfo=timezone.utc).timestamp()
@@ -7150,6 +7185,25 @@ class C102Tests(EngineCase):
         eng.el_lane_once()
         self.assertTrue(any(r.get("layer") == "callsnipe" for r in eng.ledger.orders.values()) or eng.ex.queue,
                         "the call's snipe was handed to the executor off a REST book")
+
+    def test_c122_the_lane_takes_a_quiet_markets_feed_book_and_reuses_a_rest_read_while_unchanged(self):
+        fake, eng, a = self.rig(mode="live")
+        eng.el_mode_cached = "live"
+        eng.feed_book = lambda ex: None                         # older than 10 s
+        reads = []
+        f_engine.api.orderbook = lambda ex, depth=10: (reads.append(ex), ([(0.93, 100.0)], [(0.95, 500.0)]))[1]
+        quiet, same = {a: ([(0.90, 50.0)], [(0.92, 300.0)])}, [True]
+        eng.feed_mode = lambda: "live"
+        eng.mkt_feed = types.SimpleNamespace(quiet_book=lambda ex, m: quiet.get(ex), unchanged_since=lambda ex, t, m: same[0])
+        self.assertEqual(eng.el_levels(a, "yes"), [(0.92, 300.0)], "the quiet market's feed book, no REST read")
+        self.assertEqual(reads, [])
+        quiet.clear()                                           # a gap / a reconnect: the feed has no good book
+        self.assertEqual(eng.el_levels(a, "yes"), [(0.95, 500.0)]); self.assertEqual(len(reads), 1)
+        eng.el_rest_cache[a] = (time.time() - 30, eng.el_rest_cache[a][1])
+        self.assertEqual(eng.el_levels(a, "yes"), [(0.95, 500.0)], "30 s old, unchanged on the feed: reused")
+        self.assertEqual(len(reads), 1)
+        same[0] = False                                         # the feed says it may have changed
+        self.assertEqual(eng.el_levels(a, "yes"), [(0.95, 500.0)]); self.assertEqual(len(reads), 2, "read again")
 
     def test_c118_a_book_update_or_a_pm_quote_of_the_race_retries_an_unbought_call(self):
         fake, eng, a = self.rig(mode="shadow")

@@ -140,6 +140,7 @@ class SigMarketFeed:
         self.mint_token, self.tid, self.on_sweep, self.clock, self.connect, self.log = mint_token, tournament_id, on_sweep, clock, connect, log
         self.sweep_ticks, self.sweep_shares, self.sweep_window_s, self.trade_keep_s = sweep_ticks, sweep_shares, sweep_window_s, trade_keep_s
         self.books, self.trades, self.last_rev, self.incomplete = {}, {}, {}, {}
+        self.gap_t = {}                                     # C122: market id -> the last revision gap (its other books may have missed a change)
         self.epoch = 0                                      # bumps on every (re)connect: books from an older epoch are stale
         self.sweeps, self.lags, self.last_msg_t, self.connected_t = [], [], None, None
         self.stats = dict(messages=0, batches=0, markets=0, books=0, trades=0, gaps=0, duplicates=0, reconnects=0, errors=0, sweeps=0)
@@ -192,7 +193,7 @@ class SigMarketFeed:
                     cur = self.books.get(ex)
                     if cur and seq is not None and cur["seq"] is not None and seq <= cur["seq"] and cur["epoch"] == self.epoch:
                         continue                            # an older or equal version
-                    self.books[ex] = dict(seq=seq, at=at, recv=now, epoch=self.epoch,
+                    self.books[ex] = dict(seq=seq, at=at, recv=now, epoch=self.epoch, mid=mid,
                                           bids=[(float(x["price"]), float(x["quantity"])) for x in bk.get("bids") or []],
                                           asks=[(float(x["price"]), float(x["quantity"])) for x in bk.get("asks") or []])
                     self.stats["books"] += 1
@@ -215,6 +216,7 @@ class SigMarketFeed:
                         out.append(sw)
                 if gap:
                     self.stats["gaps"] += 1
+                    self.gap_t[mid] = now
                     for bk in b.get("books") or []:
                         self.incomplete[str(bk.get("exchangeId"))] = now
         for sw in out:
@@ -258,6 +260,30 @@ class SigMarketFeed:
             if self.clock() - ref > max_age_s and self.clock() - b["recv"] > max_age_s:
                 return None
             return list(b["bids"]), list(b["asks"])
+
+    def quiet_book(self, ex, max_age_s=300.0):
+        """C122 (rehearsal 2, Oct 27: the lane's REST budget ran out at the wave peaks): a quiet market's last full book, however old up to
+        max_age_s. SIG sends the full book of every exchange that changes, so no message means no change while the connection that
+        delivered it is up and its market has had no revision gap since (a gap batch's own books are full snapshots: they stay good)."""
+        with self.lock:
+            b = self.books.get(str(ex))
+            if not b or b["epoch"] != self.epoch or not self.connected() or self.clock() - b["recv"] > max_age_s:
+                return None
+            if self.gap_t.get(b.get("mid"), -1.0) > b["recv"]:
+                return None
+            return list(b["bids"]), list(b["asks"])
+
+    def unchanged_since(self, ex, t, max_age_s=300.0):
+        """C122: True while nothing says `ex`'s book changed after t (a REST read at t stays good): the connection is the one from before
+        t and up, no newer feed book of ex, no revision gap on its market after t."""
+        with self.lock:
+            if not self.connected() or self.connected_t > t or self.clock() - t > max_age_s:
+                return False
+            b = self.books.get(str(ex))
+            if b and b["epoch"] == self.epoch and b["recv"] > t:
+                return False
+            mid = (b or {}).get("mid")
+            return not (mid and self.gap_t.get(mid, -1.0) > t)
 
     def connected(self):
         return self.connected_t is not None and self.last_msg_t is not None and self.clock() - self.last_msg_t < 30
