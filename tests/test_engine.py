@@ -6736,6 +6736,43 @@ class AlphaTests(EngineCase):
         self.assertEqual(len([x for x in eng.ledger.baskets if x.get("fmm") and x["race"] == "TRI"]), 1, "the failed set is not recorded")
         self.assertEqual(len([o for o in fake.open_orders() if o["ex"] in (a, b, c)]), n_open, "no leg was placed")
 
+    def test_c123_the_nset_screen_takes_quiet_feed_books_and_reads_only_the_missing_legs_at_once(self):
+        fresh_data(layers=dict(position=dict(state="full"), pairs=dict(state="full")))
+        fake = new_fake(writes_per_min=10_000)
+        eng = engine(fake)
+        loop(eng, fake)
+        a, b, c = [x.ex for x in eng.bots if x.kind == "market" and x.ex not in POS and x.ex not in eng.manual_ex][:3]
+        for ex, party in ((a, "D"), (b, "I"), (c, "R")):
+            eng.meta[ex] = dict(eng.meta.get(ex) or {}, race="TRI", party=party)
+        pb = f_engine.bots.PairBot("TRI", [("D", a), ("I", b), ("R", c)])
+        eng.pairs = [pb]
+        f_engine.ALLOC = dict(a_config.ALLOC, on=True)
+        FMMTests.live(self, eng)
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 50_000.0
+        books = {a: ([(0.60, 3000.0), (0.58, 5000.0)], [(0.61, 1000.0)]), b: ([(0.10, 3000.0), (0.08, 9000.0)], [(0.11, 1000.0)]),
+                 c: ([(0.36, 4000.0), (0.34, 9000.0)], [(0.37, 1000.0)])}
+        for ex in (a, b, c):
+            eng.px[ex] = (books[ex][0][0][0], books[ex][1][0][0], None)
+        eng.feed_book = lambda ex: None                         # every leg's feed book is older than 10 s
+        eng.feed_mode = lambda: "live"
+        quiet = {a: books[a], b: books[b]}                      # c had a revision gap: no quiet book for it
+        eng.mkt_feed = types.SimpleNamespace(quiet_book=lambda ex, m: quiet.get(ex), unchanged_since=lambda ex, t, m: False)
+        reads = []
+        f_engine.api.orderbook = lambda ex, depth=10: (reads.append(ex), books[ex])[1]
+        fake.calls.clear()
+        self.assertEqual(eng.fmm_nsets(time.time(), {}), 1)
+        self.assertEqual(reads, [c], "REST only for the leg without a good feed book")
+        drain(eng)
+        self.assertEqual(len([cl for cl in fake.calls if cl[0] == "multileg"]), 1, "the set still goes out as one order")
+        quiet.pop(b)
+        reads.clear()
+        pb.last_nset = -1e9
+        f_engine.api.orderbook = lambda ex, depth=10: (time.sleep(0.2), reads.append(ex), books[ex])[2]
+        t0 = time.time()
+        eng.fmm_nsets(time.time(), {})
+        self.assertEqual(sorted(reads), sorted([b, c]))
+        self.assertLess(time.time() - t0, 0.35, "the two missing legs were read at once, not one after another")
+
     def rig(self):
         fake, eng, favs = C94Tests.rig(self)
         f_engine.CARRY = dict(a_config.CARRY, on=True, sell_ev=0.065)   # (the C98 threshold these tests pin; C101 sets 5%: its own test)

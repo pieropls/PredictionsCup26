@@ -1215,6 +1215,11 @@ class Engine:
             return None
         return self.mkt_feed.book(ex, FEED_BOOK_MAX_AGE_S)
 
+    def pair_book(self, ex):
+        """C123 (Piero 22:40 Oct 27 item 3: 94 of rehearsal 2's 162 loops >= 3 s were the pair / n-set screens' REST book reads, every
+        30-s cooldown): a fresh feed book, else C122's quiet book (the feed up, no gap on the market since, <= 300 s), else None (REST)."""
+        return self.feed_book(ex) or self.el_quiet_book(ex)
+
     def on_feed_sweep(self, sw):
         """A sweep on the feed: logged (data/intel/feed_sweeps.jsonl) and, in live mode, the loop wakes for that market."""
         try:
@@ -10456,7 +10461,7 @@ class Engine:
             pb.last_shot = now
             books, key = {}, "bids" if side == "no" else "asks"
             try:                                                                # a bad read skips this pair, not the loop
-                feed_bks = {ex: self.feed_book(ex) for ex in pb.legs}           # C88b: the feed's books first (zero reads); REST only for a leg the feed lacks
+                feed_bks = {ex: self.pair_book(ex) for ex in pb.legs}           # C88b: the feed's books first (zero reads); REST only for a leg the feed lacks
                 missing = [ex for ex in pb.legs if feed_bks[ex] is None]
                 if missing:
                     with ThreadPoolExecutor(max_workers=len(missing)) as pool:  # every missing leg's book at once
@@ -11827,9 +11832,12 @@ class Engine:
                 break
             pb.last_nset = now
             try:
-                feed_bks = {ex: self.feed_book(ex) for ex in pb.legs}
-                for ex in [ex for ex in pb.legs if feed_bks[ex] is None]:
-                    feed_bks[ex] = api.orderbook(ex)
+                feed_bks = {ex: self.pair_book(ex) for ex in pb.legs}
+                missing = [ex for ex in pb.legs if feed_bks[ex] is None]
+                if missing:                                 # C123: the missing legs at once (one after another took 2-6 s a loop)
+                    with ThreadPoolExecutor(max_workers=len(missing)) as pool:
+                        for ex, bk in zip(missing, pool.map(api.orderbook, missing)):
+                            feed_bks[ex] = bk
             except Exception as err:
                 self.event("ERR", f"{pb.race} n-set book: {str(err)[:120]}")
                 continue
