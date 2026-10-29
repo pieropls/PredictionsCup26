@@ -559,8 +559,9 @@ ELECTION = dict(on=True, shadow_from="2026-10-22 06:00:00", election_day="2026-1
                 # exits and RULE0-CALLED run on) unless the errors come from election code (n_election / the call lane / the executor)
                 night_err_rule=("2026-11-03 14:45:00", "2026-11-04 09:00:00"),
                 night_lite=("2026-11-03 14:30:00", "2026-11-04 09:00:00"),   # C118 item 3: the night CPU budget (f_engine.night_lite)
-                # C119: rehearsal 2 (Oct 27 15:00-21:10) runs under the same budget, so its CPU / loop criteria test the night's configuration
-                night_lite_test=(("2026-10-27 14:30:00", "2026-10-27 21:30:00"),))
+                # C119: rehearsal 2 (Oct 27 15:00-21:10) runs under the same budget, so its CPU / loop criteria test the night's configuration;
+                # rehearsal 3 (Piero 22:40 Oct 27 item 4: Sat Oct 31 15:00-21:10, the final build) too
+                night_lite_test=(("2026-10-27 14:30:00", "2026-10-27 21:30:00"), ("2026-10-31 14:30:00", "2026-10-31 21:30:00")))
 # C113 (Piero 10:55 Oct 23): FMM min new clip 100 -> 50 shares (FMM min_new); FMM lots older than FMM_OLD_LOT_S exit at the old rule
 FMM_OLD_LOT_S = 24 * 3600                 # max(fill + 0.5c, best ask), re-pegged down; fresh lots keep the gap-median exits
 ROT_REPEG_UP_C = 0.02                     # item 2: a rotation exit re-pegs UP when its fair - 1.5c target rose >= 2c (never to chase the touch, never < lot avg + 0.5c)

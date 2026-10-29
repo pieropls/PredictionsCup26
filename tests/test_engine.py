@@ -7580,7 +7580,7 @@ class C103Tests(EngineCase):
         C93Tests.lot(self, eng, fake, b, f"dump:{b}:yes:1", 3000, 0.85, (0.90, 0.91, 0.905), 0.99)  # 8.8% left at the touch
         loop(eng, fake); loop(eng, fake)
         eng.ledger.subbooks[a] = {f"carry:{a}:yes": 3000.0}; eng.ledger.subbooks[b] = {f"dump:{b}:yes:1": 3000.0}; eng.lots_cache = (None, {})
-        f_engine.WIND_DOWN = dict(a_config.WIND_DOWN, conv_from="2000-01-01 00:00:00")
+        f_engine.WIND_DOWN = dict(a_config.WIND_DOWN, conv_from="2000-01-01 00:00:00", conv_no_ev_floor="2099-01-01 00:00:00")   # the floor's part, any date
         eng.el_firm = lambda now: 1e9; eng.el_elastic = lambda now: 0.0   # a firm reserve far above the cash: every candidate
         eng.cash_raw_hist = [a_config.CASH_RESERVE + 2_000 + 1_000.0]
         sel = eng.conv_select(time.time())
