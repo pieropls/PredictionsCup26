@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -42,6 +43,9 @@ import a_config  # noqa: E402
 # C122: the night windows are wall-clock dates (C118 night_lite / night_err_rule, C119 rehearsal 2's night_lite_test): off inside a rig so
 # the suite gives the same answer at any hour (17:51 Oct 27 it failed 42 planner tests); the tests that need a window set one (C118Tests)
 a_config.ELECTION.update(night_lite=None, night_lite_test=(), night_err_rule=None)
+# C125: the reservoirs' date trigger (RESERVOIR_TRIG_DATE, Oct 30) is a wall-clock date too: 9 ReservoirTests failed from Oct 30 00:00
+for _r in a_config.RESERVOIRS.values():
+    _r["trig_date"] = "2099-01-01 00:00:00"
 
 for k, v in dict(LOOP_S=0, PNL_EVERY_S=0, PAIR_MIN_LOCK=0, DATA=TMP, POSITION_REF_FILE=f"{TMP}/position_ref.json", LEDGER_FILE=f"{TMP}/ledger.json",
                  PNL_FILE=f"{TMP}/pnl.csv", STATE_FILE=f"{TMP}/state.json", DASHBOARD_FILE=f"{TMP}/dashboard.html",
@@ -839,7 +843,14 @@ class CapTests(EngineCase):
         used = eng.bucket_usage()
         self.assertLessEqual(used["ladder_resting"], 2000 + 1e-6, "queued ladder orders count against the resting cap")
         self.assertGreater(used["ladder_resting"], 0)
-        k, why = eng.kappa()
+        from unittest import mock
+
+        class Oct29(datetime.datetime):                   # C125: kappa is 3c from Oct 30 (election-night cash); the free-budget rule is tested on Oct 29
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.datetime(2026, 10, 29, 12, 0)
+        with mock.patch.object(f_engine, "datetime", Oct29):
+            k, why = eng.kappa()
         self.assertEqual(k, 0.0, f"ladder bids don't lock cash: kappa stays 0 ({why})")
 
 
@@ -7781,6 +7792,170 @@ class C113Tests(EngineCase):
         self.assertEqual(eng.repeg_grace(b, [o], [up1], now), ([], []), "1c: keeps its place")
         eng.rot_fairbased[sub] = False
         self.assertEqual(eng.repeg_grace(b, [o], [up2], now), ([], []), "a touch target (swap / exit-to-touch): never chased up")
+
+
+DEPLOY = next((p for p in (os.path.join(ROOT, "deploy"), os.path.join(ROOT, "..", "..", "deploy")) if os.path.isdir(p)), None)   # a release folder has none:
+                                                          # make_release tests it in releases/<name>, inside the project (push_release.sh runs from the tree)
+
+
+class C125Tests(unittest.TestCase):
+    """C125 (Piero 11:40 Oct 30): the Oct 29 00:25 push reset data/overrides.json to the defaults. (1) the push never changes the owner
+    of /opt/sig-engine while the engine runs; (2) Controls.load() never falls back to the defaults on a read error; (3) the stop sequence
+    never saves the defaults; overrides.json is backed up before every push and daily."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="c125_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "overrides.json")
+        self.logs = []
+
+    def ctl(self, **kw):
+        return f_engine.Controls(self.path, log=lambda k, t: self.logs.append(t), **kw)
+
+    def live_file(self):
+        d = dict(hold_gates=True, x=1, layers={"tm": dict(state="full"), "sm": dict(state="pilot"), "recycler": dict(state="full")})
+        with open(self.path, "w") as fh:
+            json.dump(d, fh)
+        return d
+
+    def bump(self):
+        t = os.path.getmtime(self.path) + 5
+        os.utime(self.path, (t, t))
+
+    def test_a_read_error_while_running_keeps_the_controls_in_memory(self):
+        from unittest import mock
+        self.live_file()
+        c = self.ctl()
+        self.assertTrue(c.d["hold_gates"])
+        with open(self.path, "w") as fh:                    # corrupt (a half-written hand edit)
+            fh.write('{"layers": ')
+        self.bump()
+        self.assertFalse(c.reload_if_changed())
+        self.assertEqual((c.d["x"], c.state("tm"), c.state("recycler")), (1, "full", "full"))
+        self.assertTrue(any("unreadable" in t for t in self.logs))
+        n = len(self.logs)
+        self.assertFalse(c.reload_if_changed())
+        self.assertEqual(len(self.logs), n, "one line per new error, not one a loop")
+        with mock.patch.object(f_engine.os, "stat", side_effect=PermissionError(13, "Permission denied")), \
+                mock.patch.object(f_engine.os.path, "exists", return_value=False):   # the push window: the folder not ours
+            self.assertFalse(c.reload_if_changed())
+        self.assertTrue(c.d["hold_gates"])
+        os.remove(self.path)                                 # gone while running
+        self.assertFalse(c.reload_if_changed())
+        self.assertEqual(c.state("sm"), "pilot")
+        self.assertTrue(c.save())                            # the next save writes ours back
+        with open(self.path) as fh:
+            self.assertEqual(json.load(fh)["x"], 1)
+
+    def test_the_oct29_push_window_then_the_stop_save_keeps_the_real_controls(self):
+        from unittest import mock
+        self.live_file()
+        c = self.ctl()
+        with mock.patch.object(f_engine.os, "stat", side_effect=PermissionError(13, "Permission denied")), \
+                mock.patch.object(f_engine.os.path, "exists", return_value=False):
+            c.reload_if_changed()                            # what C124 did: defaults() here
+        c.save()                                             # the stop sequence
+        with open(self.path) as fh:
+            d = json.load(fh)
+        self.assertEqual((d["hold_gates"], d["x"], d["layers"]["recycler"]["state"], d["layers"]["tm"]["state"]), (True, 1, "full", "full"))
+
+    def test_a_start_never_runs_on_the_defaults_over_a_real_file(self):
+        with open(self.path, "w") as fh:
+            fh.write("{not json")
+        with self.assertRaises(RuntimeError):
+            self.ctl()                                       # main() retries Engine() every 30 s
+        os.remove(self.path)
+        os.makedirs(os.path.join(self.dir, "backup"))
+        with open(os.path.join(self.dir, "backup", "overrides-2026-10-30.json"), "w") as fh:
+            fh.write("{}")
+        with self.assertRaises(RuntimeError):
+            self.ctl()                                       # missing with backups: not a first start
+        shutil.rmtree(os.path.join(self.dir, "backup"))
+        c = self.ctl()                                       # a first start: no file, no backups
+        self.assertTrue(c.fresh)
+        self.assertEqual(c.state("tm"), "off")
+        d = self.live_file()                                 # a file appears (copied in by hand)
+        self.assertFalse(c.save(), "the defaults never overwrite a file on disk")
+        with open(self.path) as fh:
+            self.assertEqual(json.load(fh), d)
+        self.assertTrue(c.reload_if_changed())
+        self.assertEqual((c.fresh, c.state("tm")), (False, "full"))
+        self.assertTrue(c.save())
+
+    def test_daily_backup_one_a_day_last_14_kept(self):
+        self.live_file()
+        now = [time.mktime((2026, 10, 1, 12, 0, 0, 0, 0, -1))]
+        c = self.ctl(clock=lambda: now[0])
+        bk = os.path.join(self.dir, "backup")
+        os.makedirs(bk)
+        with open(os.path.join(bk, "overrides-2026-10-01_120000-pre-C125.json"), "w") as fh:
+            fh.write("{}")
+        c.save()
+        c.d["x"] = 2
+        c.save()                                             # the same day: the first save's copy stays
+        with open(os.path.join(bk, "overrides-2026-10-01.json")) as fh:
+            self.assertEqual(json.load(fh)["x"], 1)
+        for day in range(20):
+            now[0] += 86400
+            c.save()
+        daily = [f for f in os.listdir(bk) if re.fullmatch(r"overrides-\d{4}-\d{2}-\d{2}\.json", f)]
+        self.assertEqual(len(daily), 14)
+        self.assertEqual(max(daily), "overrides-2026-10-21.json")
+        self.assertIn("overrides-2026-10-01_120000-pre-C125.json", os.listdir(bk), "pre-push copies are never pruned")
+
+    def push_run(self):
+        """deploy/server/push_release.sh in a temp tree with ssh / rsync stubs that record every call."""
+        root = os.path.join(self.dir, "tree")
+        for d in ("deploy/server", "tools", "docs", "releases/C125-TEST", "stub"):
+            os.makedirs(os.path.join(root, d))
+        for f in ("push_release.sh", "perms_check.sh"):
+            shutil.copy(os.path.join(DEPLOY, "server", f), os.path.join(root, "deploy", "server", f))
+        open(os.path.join(root, "releases", "C125-TEST", ".tested"), "w").close()
+        calls = os.path.join(self.dir, "calls.jsonl")
+        for tool in ("ssh", "rsync"):
+            p = os.path.join(root, "stub", tool)
+            with open(p, "w") as fh:
+                fh.write(f'#!/bin/bash\n{sys.executable} -c \'import json,sys; open("{calls}","a").write(json.dumps(["{tool}"]+sys.argv[1:])+"\\n")\' "$@"\ncat >/dev/null\n')
+            os.chmod(p, 0o755)
+        env = dict(os.environ, PATH=os.path.join(root, "stub") + ":" + os.environ["PATH"], SIG_SERVER="root@test")
+        r = subprocess.run(["bash", os.path.join(root, "deploy", "server", "push_release.sh"), "releases/C125-TEST"], env=env,
+                           capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(calls) as fh:
+            return [json.loads(l) for l in fh]
+
+    @unittest.skipUnless(DEPLOY, "no deploy/ folder")
+    def test_push_stages_then_syncs_with_the_engine_stopped_never_changing_the_owner(self):
+        calls = self.push_run()
+        tools = [c[0] for c in calls]
+        self.assertEqual(tools, ["ssh", "rsync", "rsync", "ssh", "ssh"], calls)   # backup, stage x2, the server step, perms_check
+        backup, server = calls[0][-1], calls[3][-1]
+        self.assertIn("cp -p /opt/sig-engine/data/overrides.json", backup)
+        self.assertIn("-pre-C125-TEST.json", backup)
+        for c in calls[1:3]:
+            self.assertEqual(c[-1], "root@test:/opt/sig-stage/tree/", "the Mac never rsyncs into /opt/sig-engine")
+            self.assertIn("data", [c[i + 1] for i, a in enumerate(c[:-1]) if a == "--exclude"])
+        order = [server.index(s) for s in ("systemctl stop sig-engine", "-stopped-C125-TEST.json", "OVERRIDES RESTORED",
+                                          "rsync -a --no-perms --chown=sig:sig --exclude /data /opt/sig-stage/tree/ /opt/sig-engine/",
+                                          "chown -R sig:sig /opt/sig-engine", "systemctl start sig-engine")]
+        self.assertEqual(order, sorted(order), server)
+        self.assertNotIn("restart", server + backup)
+        self.assertIn("install -d -o root -g root -m 700 /opt/sig-stage", backup)
+
+    @unittest.skipUnless(DEPLOY, "no deploy/ folder")
+    def test_push_puts_the_pre_push_overrides_back_when_the_stop_wrote_defaults(self):
+        with open(os.path.join(DEPLOY, "server", "push_release.sh")) as fh:
+            s = fh.read()
+        snippet = re.search(r"python3 -c '(.+?)' ", s).group(1).replace('\\"', '"')
+        pre = dict(hold_gates=True, layers={"tm": dict(state="full"), "recycler": dict(state="full")})
+        cases = [(pre, 0), (dict(pre, extra=1), 0), (dict(layers={"tm": dict(state="full"), "recycler": dict(state="off")}, hold_gates=True), 1),
+                 (dict(layers=pre["layers"]), 1)]
+        for stopped, want in cases:
+            a, b = os.path.join(self.dir, "pre.json"), os.path.join(self.dir, "stopped.json")
+            for f, d in ((a, pre), (b, stopped)):
+                with open(f, "w") as fh:
+                    json.dump(d, fh)
+            self.assertEqual(subprocess.run([sys.executable, "-c", snippet, a, b]).returncode, want, stopped)
 
 
 if __name__ == "__main__":

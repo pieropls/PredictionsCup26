@@ -164,10 +164,13 @@ class Controls:
       markets  {ex: {paused: bool, exclude: [layer, ...]}}
     Every change is an event, a line in docs/NIGHT_LOG.md, and is persisted."""
 
+    BACKUP_DAYS = 14                                        # C125: daily copies kept in data/backup/
+
     def __init__(self, path, log=print, night=None, clock=time.time):
         self.path, self.log, self.night, self.clock = path, log, night, clock
+        self.backup_dir = os.path.join(os.path.dirname(path), "backup")
         self.lock = threading.RLock()
-        self.mtime, self.d = None, None
+        self.mtime, self.d, self.fresh, self.read_err = None, None, False, None
         self.load()
 
     def defaults(self):
@@ -176,28 +179,99 @@ class Controls:
                                     killed=None) for l in LAYERS})
 
     def load(self):
+        """C125 (Piero 11:40 Oct 30): a read error never falls back to the defaults. Oct 29 00:25 the push left /opt/sig-engine
+        unreadable for seconds, os.path.exists said False, load() built defaults() and the stop sequence saved them. Now: running,
+        the controls in memory are kept (False is returned); at start the engine refuses (main() retries every 30 s). Only a first
+        start with no file and no backup builds the defaults. True when the file was read."""
         with self.lock:
-            d = read_json(self.path, None) if os.path.exists(self.path) else None
+            try:
+                st = os.stat(self.path)
+            except FileNotFoundError:
+                st = None
+            except OSError as e:                            # PermissionError: the folder briefly not ours
+                return self._read_failed(e)
+            if st is None:
+                if self.d is not None:                      # gone while running: keep ours (the next save writes it back)
+                    return self._read_failed(FileNotFoundError(f"{self.path} is gone"))
+                if self.backups():
+                    raise RuntimeError(f"{self.path} is missing but {self.backup_dir} holds backups: refusing to start on the defaults "
+                                       f"(copy the latest backup to {self.path})")
+                self.d, self.mtime, self.fresh = self.defaults(), None, True   # first start
+                return True
+            try:
+                with open(self.path) as fh:
+                    d = json.load(fh)
+                if not isinstance(d, dict) or not d:
+                    raise ValueError("not a JSON object, or empty")
+            except (OSError, ValueError) as e:
+                return self._read_failed(e)
             base = self.defaults()
-            if d:
-                base.update({k: v for k, v in d.items() if k != "layers"})
-                for l, v in (d.get("layers") or {}).items():
-                    base["layers"].setdefault(l, dict(state="off", since=self.clock(), caps={}, killed=None)).update(v)
-            self.d = base
-            self.mtime = os.path.getmtime(self.path) if os.path.exists(self.path) else None
+            base.update({k: v for k, v in d.items() if k != "layers"})
+            for l, v in (d.get("layers") or {}).items():
+                base["layers"].setdefault(l, dict(state="off", since=self.clock(), caps={}, killed=None)).update(v)
+            self.d, self.mtime, self.fresh, self.read_err = base, st.st_mtime, False, None
+            return True
+
+    def _read_failed(self, e):
+        if self.d is None:
+            raise RuntimeError(f"{self.path} unreadable at start ({e!r}): refusing to start on the defaults")
+        if self.read_err != repr(e):                        # one line per new error, not one a loop
+            self.read_err = repr(e)
+            self.log("CONTROL", f"overrides.json unreadable ({e!r}): the controls in memory are kept, never the defaults (C125)")
+        return False
 
     def reload_if_changed(self):
-        m = os.path.getmtime(self.path) if os.path.exists(self.path) else None
-        if m != self.mtime:
-            self.load()
+        try:
+            m = os.stat(self.path).st_mtime
+        except OSError:
+            m = None
+        if m == self.mtime:
+            self.read_err = None
+            return False
+        if self.load():
             self.log("CONTROL", "overrides.json changed on disk: reloaded")
             return True
         return False
 
     def save(self):
+        """C125: never writes the defaults over a file on disk (a start that built them while a file appeared, or an unreadable folder)."""
         with self.lock:
-            write_atomic(self.path, json.dumps(self.d, indent=1))
-            self.mtime = os.path.getmtime(self.path)
+            if self.fresh:
+                try:
+                    os.stat(self.path)
+                    there = True
+                except FileNotFoundError:
+                    there = False
+                except OSError:
+                    there = True
+                if there:
+                    self.log("CONTROL", "save refused: the controls in memory are the defaults and overrides.json is on disk (C125)")
+                    return False
+            text = json.dumps(self.d, indent=1)
+            write_atomic(self.path, text)
+            self.mtime, self.fresh = os.path.getmtime(self.path), False
+            self.backup_daily(text)
+            return True
+
+    def backups(self):
+        try:
+            return sorted(f for f in os.listdir(self.backup_dir) if f.startswith("overrides-") and f.endswith(".json"))
+        except OSError:
+            return []
+
+    def backup_daily(self, text):
+        """C125: one copy a day (PT date of the first save) in data/backup/overrides-YYYY-MM-DD.json, the last BACKUP_DAYS kept."""
+        name = f"overrides-{time.strftime('%Y-%m-%d', time.localtime(self.clock()))}.json"
+        try:
+            if os.path.exists(os.path.join(self.backup_dir, name)):
+                return
+            os.makedirs(self.backup_dir, exist_ok=True)
+            write_atomic(os.path.join(self.backup_dir, name), text)
+            daily = [f for f in self.backups() if re.fullmatch(r"overrides-\d{4}-\d{2}-\d{2}\.json", f)]
+            for f in daily[:-self.BACKUP_DAYS]:
+                os.remove(os.path.join(self.backup_dir, f))
+        except OSError as e:
+            self.log("CONTROL", f"overrides.json daily backup failed: {e!r}")
 
     def _note(self, text):
         self.log("CONTROL", text)
