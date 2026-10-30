@@ -570,12 +570,15 @@ FMM_ROOM = dict(on=True, until="2026-10-28 23:59:59", race_cap=8_000.0, cf_race_
 CARRY_FIRST = {"1077": ("no", 0.845)}   # item 1: the unused free cash goes to carry bids, Rhode Island Senate R NO (<= 0.845) first, then the all-NO sets
 # C103 (docs/cash_calendar.md §3 + Piero's §5 decisions of 15:55 Oct 17, moved by Piero 15:15 Oct 21 item C: the ramp starts Oct 28)
 ELECTION_RESERVE = dict(on=True, steps=(("2026-10-28 00:00:00", 20_000.0), ("2026-10-30 00:00:00", 25_000.0), ("2026-10-31 00:00:00", 30_000.0),
-                                        ("2026-11-01 00:00:00", 35_000.0), ("2026-11-02 00:00:00", 40_000.0), ("2026-11-03 12:00:00", 45_000.0)),
+                                        ("2026-11-01 00:00:00", 35_000.0), ("2026-11-02 00:00:00", 40_000.0), ("2026-11-02 06:00:00", 43_333.0),
+                                        ("2026-11-02 12:00:00", 46_667.0), ("2026-11-02 18:00:00", 50_000.0), ("2026-11-03 00:00:00", 53_333.0),
+                                        ("2026-11-03 06:00:00", 56_667.0), ("2026-11-03 12:00:00", 60_000.0)),
                         until="2026-11-04 09:00:00",   # usable cash (cash - 5k floor - 2k reserve) no entry layer may spend; the election sniper / drift use it
-                        # C114 (Piero 14:00 Oct 23): 45k usable FIRM by Nov 3 12:00 (the ramp above, lowest EV/$ first) + 15k ELASTIC (45k -> 60k), raised
-                        # Nov 2-3 only from lots that sell at >= PM fair - 5c (at the bid, or resting at the touch), lowest EV/$ first, never cheaper; what
-                        # doesn't fill stays held, the favourites of states whose last poll close is <= 17:00 PT kept last (wave recycling after their calls)
-                        elastic=15_000.0, elastic_from="2026-11-02 00:00:00", elastic_below_fair=0.05, elastic_keep_close="17:00", fav_min=0.75)
+                        # C114 (Piero 14:00 Oct 23) was 45k FIRM by Nov 3 12:00 + 15k ELASTIC (>= PM fair - 5c, Nov 2-3). C126 (Piero 11:40 Oct 30 item 3):
+                        # 60k FIRM — the elastic 15k becomes firm, 40k Nov 2 -> 60k Nov 3 12:00 in 6-h steps (convergence sells toward the step in force,
+                        # so a single 20k step at 12:00 would start the sales 3 h before the first close), lowest EV/$ first at the normal floors
+                        # (>= lot avg + 0.5c); elastic 0 switches the fair - 5c part off (its code stays)
+                        elastic=0.0, elastic_from="2026-11-02 00:00:00", elastic_below_fair=0.05, elastic_keep_close="17:00", fav_min=0.75)
 WIND_DOWN = dict(on=True, rot_buys_stop="2026-10-27 00:00:00", locks_stop="2026-10-29 00:00:00",
                  fmm_caps=(("2026-10-26 00:00:00", 35_000.0), ("2026-10-27 00:00:00", 30_000.0), ("2026-10-28 00:00:00", 25_000.0),   # C115 (Piero 15:10 Oct 23): a taper
                            ("2026-10-29 00:00:00", 15_000.0), ("2026-10-31 00:00:00", 5_000.0)),                                       # instead of the Oct 29 cliff

@@ -10880,7 +10880,7 @@ class Engine:
         return float(ELECTION_RESERVE["elastic"]) if ELECTION_RESERVE["elastic_from"] <= t < ELECTION_RESERVE["until"] else 0.0
 
     def el_firm(self, now):
-        """C103 / C114: the firm reserve on the day's step of the ramp (20k Oct 28 -> 45k Nov 3 12:00)."""
+        """C103 / C114: the firm reserve on the step of the ramp in force (20k Oct 28 -> 45k Nov 3 12:00; C126: -> 60k, 6-h steps from Nov 2)."""
         if not ELECTION_RESERVE.get("on"):
             return 0.0
         t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
@@ -10906,7 +10906,7 @@ class Engine:
 
     def conv_select(self, now):
         """C103 / C114 (cash_calendar §2-3; Piero 11:40 / 14:00 Oct 23): the lots that get a sale ask so usable cash + the sale asks resting reach
-        the reserve. FIRM (the ramp, 45k by Nov 3 12:00): lowest EV/$ first. ELASTIC (+15k, Nov 2-3): only at >= PM fair - 5c (at the bid, or
+        the reserve. FIRM (the ramp: 45k by Nov 3 12:00, C126 60k): lowest EV/$ first. ELASTIC (+15k, Nov 2-3): only at >= PM fair - 5c (at the bid, or
         resting at max(touch, fair - 5c)), lowest EV/$ first, the favourites of states whose last poll close is <= 17:00 PT last (they are kept
         for wave recycling after their calls). Out: Piero's manual book, locks / pair sets, FMM, rotation (own exits), the night layers, RI
         Senate R NO (his keep), the held R-side lots."""
@@ -11011,9 +11011,11 @@ class Engine:
         er = self.el_reserve(now)
         nxt = next(((at, v) for at, v in ELECTION_RESERVE["steps"] if time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) < at), None)
         asks = sum(o["qty"] * (1 - o["price"]) for o in self.open if (self.ledger.orders.get(o["id"]) or {}).get("layer") in ("release", "rotexit"))
+        top_at, top = ELECTION_RESERVE["steps"][-1]
         return (f"ELECTION CASH: cash {cash:,.0f}, usable {usable:,.0f} (cash - 5k - Piero's reserve left), election reserve now {er:,.0f}"
-                + (f", next {nxt[1]:,.0f} from {nxt[0][5:16]}" if nxt else "") + f"; sale asks resting would bring {asks:,.0f}; target 45,000 usable FIRM by Nov 3 12:00 "
-                f"(short {max(0.0, 45_000 - usable - asks):,.0f} at today's asks) + 15,000 ELASTIC Nov 2-3 at >= fair - 5c (Piero 14:00 Oct 23)")
+                + (f", next {nxt[1]:,.0f} from {nxt[0][5:16]}" if nxt else "") + f"; sale asks resting would bring {asks:,.0f}; target {top:,.0f} usable FIRM by {top_at[5:16]} "
+                f"(short {max(0.0, top - usable - asks):,.0f} at today's asks)"
+                + (f" + {float(ELECTION_RESERVE['elastic']):,.0f} ELASTIC Nov 2-3 at >= fair - 5c (Piero 14:00 Oct 23)" if ELECTION_RESERVE.get("elastic") else " (C126: the elastic 15k is firm)"))
 
     def el_mode(self, now=None):
         """off / shadow / live: the `election_mode` control, else shadow from ELECTION['shadow_from'] (zero orders). Live only by control."""
@@ -11718,9 +11720,11 @@ class Engine:
         pm_age = now - max([t for _, _, t in (self.pm_feed.quotes.values() if self.pm_feed else [])] + [0.0])
         first = min(E.first.values()) if E and E.first else None
         usable = cash - CASH_RESERVE - self.manual_reserve_left()
+        firm_top, el_top = float(ELECTION_RESERVE["steps"][-1][1]), float(ELECTION_RESERVE.get("elastic") or 0.0)
         return (f"ELECTION CHECKLIST {time.strftime('%H:%M', time.localtime(now))}: mode {self.el_mode_cached}{' (live needs election_mode=live)' if self.el_mode_cached != 'live' else ''}; "
                 f"kill {'ON' if E and E.stopped else 'off'}; books armed {len(E.meta) if E else 0} / races {len(E.close) if E else 0}; first pulls "
-                f"{time.strftime('%H:%M', time.localtime(first - el.PULL_BEFORE_S)) if first else 'n/a'} PT; usable cash {usable:,.0f} (firm 45,000 {'OK' if usable >= 45_000 else 'SHORT'}; with the elastic 60,000 {'OK' if usable >= 60_000 else 'not reached'}); "
+                f"{time.strftime('%H:%M', time.localtime(first - el.PULL_BEFORE_S)) if first else 'n/a'} PT; usable cash {usable:,.0f} (firm {firm_top:,.0f} {'OK' if usable >= firm_top else 'SHORT'}"
+                + (f"; with the elastic {firm_top + el_top:,.0f} {'OK' if usable >= firm_top + el_top else 'not reached'}" if el_top else "") + "); "
                 f"FMM bids resting {fmm_b}, carry bids {car_b} (both should be 0); PM feed last quote {pm_age:.0f} s ago; writes left {api.writes_left()}; "
                 f"new risk {'PAUSED' if self.controls.paused else 'on'}; poll_close.json {'ok' if E else 'MISSING'}")
 

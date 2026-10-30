@@ -7503,10 +7503,14 @@ class C103Tests(EngineCase):
         self.assertEqual(eng.el_reserve(self.ts("2026-10-31 12:00:00")), 30_000.0)
         self.assertEqual(eng.el_reserve(self.ts("2026-11-03 15:00:00")), 60_000.0)
         self.assertEqual(eng.el_reserve(self.ts("2026-11-04 09:00:00")), 0.0)
-        self.assertEqual(eng.el_reserve(self.ts("2026-11-01 12:00:00")), 35_000.0, "C114: the firm ramp to 45k")
-        self.assertEqual(eng.el_reserve(self.ts("2026-11-02 12:00:00")), 40_000.0 + 15_000.0, "firm 40k + the elastic 15k from Nov 2")
-        self.assertEqual(eng.el_firm(self.ts("2026-11-03 12:00:00")), 45_000.0)
-        self.assertEqual(eng.el_firm(self.ts("2026-11-03 11:59:00")), 40_000.0)
+        self.assertEqual(eng.el_reserve(self.ts("2026-11-01 12:00:00")), 35_000.0, "C114: the firm ramp")
+        self.assertEqual(eng.el_reserve(self.ts("2026-11-02 00:00:00")), 40_000.0, "C126 (Piero 11:40 Oct 30 item 3): 40k Nov 2 -> 60k firm, no elastic")
+        self.assertEqual(eng.el_reserve(self.ts("2026-11-02 12:00:00")), 46_667.0, "6-h steps")
+        self.assertEqual(eng.el_elastic(self.ts("2026-11-02 12:00:00")), 0.0, "the elastic 15k is firm now")
+        self.assertEqual(eng.el_firm(self.ts("2026-11-03 06:00:00")), 56_667.0)
+        self.assertEqual(eng.el_firm(self.ts("2026-11-03 11:59:00")), 56_667.0)
+        self.assertEqual(eng.el_firm(self.ts("2026-11-03 12:00:00")), 60_000.0)
+        self.assertIn("target 60,000 usable FIRM by 11-03 12:00", eng.election_cash_line(self.ts("2026-11-02 12:00:00")))
         self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-26 12:00:00")), 35_000.0, "C115: the taper 35k Oct 26")
         self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-27 12:00:00")), 30_000.0)
         self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-28 12:00:00")), 25_000.0)
@@ -7581,7 +7585,7 @@ class C103Tests(EngineCase):
         self.assertIn("ELECTION CASH", eng.election_cash_line(time.time()))
         eng.election = None; eng.el_mode_cached = "shadow"
         line = eng.el_checklist(time.time(), 70_000.0)
-        self.assertTrue(line.startswith("ELECTION CHECKLIST") and "MISSING" in line and "60,000 OK" in line, line)
+        self.assertTrue(line.startswith("ELECTION CHECKLIST") and "MISSING" in line and "firm 20,000 OK" in line and "elastic" not in line, line)   # C126: the ramp's top
 
     def test_convergence_asks_cover_the_gap_non_core_and_lowest_return_first_at_fair_over_105(self):
         fake, eng, favs = C94Tests.rig(self)
