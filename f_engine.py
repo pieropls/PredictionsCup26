@@ -76,7 +76,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, CASH_FLOOR_RESUME, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
-                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM, SELL_HOLD, SELL_KEEP_LAYERS, CARRY_BIDSELL, SELL_EV_MAX, FMM_CF, ENGINE_ERR_EXTERNAL, ENGINE_ERR_RESUME_S, ELECTION, ELECTION_RESERVE, WIND_DOWN, FMM_ROOM, CARRY_FIRST, FMM_OLD_LOT_S, ROT_REPEG_UP_C,
+                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM, SELL_HOLD, SELL_KEEP_LAYERS, CARRY_BIDSELL, SELL_EV_MAX, FMM_CF, ENGINE_ERR_EXTERNAL, ENGINE_ERR_RESUME_S, ELECTION, ELECTION_RESERVE, WIND_DOWN, FMM_ROOM, CARRY_FIRST, FMM_OLD_LOT_S, ROT_REPEG_UP_C, END_SWEEP,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -514,6 +514,7 @@ class Engine:
         self.fmm_unread, self.fmm_noops, self.fmm_cov = [], [], {}           # v2 §2.5: buys not yet in a cash read; SIG no-op buys; coverage
         self.fmm_cash_seen, self.rot_seen_fills = set(), set()               # each fill once (the loop re-hands an order's earlier fills)
         self.carry_now, self.carry_sell, self.carry_t, self.carry_seen, self.carry_view = {}, {}, 0.0, set(), {}   # C98: the carry book
+        self.sweep_hist = {}                                # C127: PM fair per market over the last 30 min (the end sweep's move guard)
         self.sale_anchor, self.sale_stats, self.foreign_actions = {}, collections.defaultdict(collections.Counter), {}   # C99: sale asks keep their place; foreign fills' direction
         self.sell_undercut, self.fmm_hour_prev, self.churn_t = {}, None, stamp()
         self.election, self.el_mode_cached, self.el_snap = None, "off", dict(cash=0.0, pos={})   # C102: election night (n_election v2)
@@ -10699,6 +10700,9 @@ class Engine:
     def carry_plan(self, now):
         """{ex: [want-spec]}: one resting bid per candidate book at the touch (<= fair - 5c), sized to the race cap (12k at cost; RI Senate
         30k) and the cash left; a resting bid keeps its place and size."""
+        self.sweep_track(now)
+        if self.sweep_on(now):                               # C127: Nov 4 00:30-08:55 the end sweep's bids take carry's place
+            return {} if (self.controls.state("carry") == "off" or self.controls.paused or self.fills_blind) else self.sweep_plan(now)
         if not CARRY.get("on") or self.controls.state("carry") == "off" or self.controls.paused or self.fills_blind or self.night_lite(now):
             return {}                                        # C118: no carry planner on the night (its bids stopped Oct 30)
         cands = self.carry_candidates(now)
@@ -10742,6 +10746,74 @@ class Engine:
                 room -= q * px; race_cost[c["race"]] += q * px
             plan.setdefault(ex, []).append(dict(side=side, px=px, qty=q, sub=f"carry:{ex}:{side}", ttl=CARRY["ttl"]))
         self.carry_view = dict(cands=len(cands), bids=sum(len(v) for v in plan.values()), sell=dict(self.carry_sell))
+        return plan
+
+    # ------------------------------------------------------------------ C127: the END SWEEP (Piero 15:50 Oct 31 item 3)
+    def sweep_on(self, now):
+        t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+        return bool(END_SWEEP.get("on")) and END_SWEEP["start"] <= t < END_SWEEP["stop"]
+
+    def sweep_track(self, now):
+        """PM fair (YES) per market every 30 s over the last 30 min, from 30 min before the sweep starts until it stops."""
+        if not END_SWEEP.get("on") or not ts_s(END_SWEEP["start"]) - END_SWEEP["move_s"] <= now < ts_s(END_SWEEP["stop"]):
+            return
+        for ex, f in list(self.fair.items()):
+            h = self.sweep_hist.setdefault(str(ex), collections.deque())
+            if not h or now - h[-1][0] >= 30:
+                h.append((now, f))
+            while h and h[0][0] < now - END_SWEEP["move_s"]:
+                h.popleft()
+
+    def sweep_plan(self, now):
+        """{ex: [carry want-spec]}: a bid at the ask on every side whose ask is >= 2c and >= 3% per $ under PM fair, highest EV/$ first, sized
+        to carry's race cap and the cash above the floor + the manual reserve + the cushion; only a side the election lane called or with PM
+        fair >= 0.95; skipped: a race whose PM fair moved > 5c in 30 min (a book with < 29 min of history), one the reversal guard stopped,
+        Piero's books, carry's sale list; a resting bid keeps its place."""
+        cushion = END_SWEEP["cushion"] if time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) < END_SWEEP["cushion_to_0"] else 0.0
+        race_cost, resting = collections.Counter(), {}
+        for sub, (ex, side, q, avg) in self.carry_lots().items():
+            race_cost[self.rot_race(ex)] += q * avg
+        for o in self.open:
+            if o["action"] == "buy" and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "carry":
+                resting[(str(o["ex"]), o["side"])] = (round(o["price"], 3), o["qty"])
+                race_cost[self.rot_race(o["ex"])] += o["qty"] * o["price"]
+        cash = min(self.cash_raw_hist) if getattr(self, "cash_raw_hist", None) else 0.0
+        room = cash - CASH_RESERVE - self.manual_reserve_left() - cushion - sum(p * q for p, q in resting.values())
+        E, hand, cands = self.election, {str(o["ex"]) for o in self.open if not self.ex.owned(o["id"])}, []
+        moved = {self.rot_race(ex) for ex, h in self.sweep_hist.items() if h and max(f for _, f in h) - min(f for _, f in h) > END_SWEEP["move_max"] + 1e-9}
+        for ex, b in self.owner.items():
+            ex, h = str(ex), self.sweep_hist.get(str(ex))
+            if b.kind != "market" or ex in self.manual_ex or ex in hand or ex in self.carry_sell or self.ex.is_frozen(ex):
+                continue
+            if not h or h[0][0] > now - END_SWEEP["move_s"] + 60 or self.rot_race(ex) in moved:
+                continue                                     # < 29 min of PM history, or a book of its race moved > 5c in 30 min
+            if E is not None and (E.stopped or E.race(ex) in E.race_stop):
+                continue
+            pos_ = float((self.book.get(ex) or {}).get("pos") or 0)
+            for side in ("yes", "no"):
+                bid, ask, fs = self.rot_touch(ex, side)
+                if (side == "yes" and pos_ <= -1) or (side == "no" and pos_ >= 1) or ask is None or fs is None:
+                    continue                                 # C95f: never net against a held other side
+                if (E is None or E.called(ex) != side) and fs < END_SWEEP["pm_min"] - 1e-9:
+                    continue                                 # Piero 00:10 Nov 1 item 1 (b): a side the election lane called, or PM fair >= 0.95
+                if fs - ask >= END_SWEEP["ev_min"] - 1e-9 and fs / ask - 1 >= END_SWEEP["ev_per_usd"] - 1e-9:
+                    cands.append(dict(ex=ex, side=side, px=ask, ev=fs / ask - 1, race=self.rot_race(ex)))
+        party, plan = (dict(net=self.party_view()["net"]) if ROTATION.get("party_cap") else None), {}
+        for c in sorted(cands, key=lambda c: -c["ev"]):
+            ex, side, px = c["ex"], c["side"], c["px"]
+            own, have = self.own_ask(ex, side), resting.get((ex, side))
+            if own is not None and px >= own - 1e-9:
+                continue                                     # no self-trade
+            if have and abs(have[0] - px) < 1e-9:
+                q = int(have[1])                             # keeps its place and size
+            else:
+                back = have[0] * have[1] if have else 0.0    # a re-pegged bid's own cash comes back first
+                q = int(min(self.carry_cap(c["race"]) - race_cost[c["race"]] + back, room + back) / px)
+                if q < END_SWEEP["min_qty"] or not self.carry_party_ok(ex, side, q * px, party):
+                    continue
+                room -= q * px - back; race_cost[c["race"]] += q * px - back
+            plan.setdefault(ex, []).append(dict(side=side, px=px, qty=q, sub=f"carry:{ex}:{side}", ttl=CARRY["ttl"]))
+        self.carry_view = dict(cands=len(cands), bids=sum(len(v) for v in plan.values()), sweep_room=round(room), cushion=cushion)
         return plan
 
     def carry_fill_events(self, fills):
@@ -10918,6 +10990,9 @@ class Engine:
         resting = {(str(o["ex"]), (self.ledger.orders.get(o["id"]) or {}).get("sub")) for o in self.open if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "release"}
         keep = {k for k in getattr(self, "conv_keep", set()) if k in resting}     # an ask already out keeps its place
         keep_e = {k for k in getattr(self, "conv_elastic", set()) if k in resting}
+        if self.sweep_on(now):                               # C127: no convergence sale while the end sweep buys (its resting asks are pulled)
+            self.conv_keep, self.conv_elastic, self.conv_backstop = set(), set(), {}
+            return set()
         if gap_e <= 0:
             self.conv_keep, self.conv_elastic, self.conv_backstop = keep, keep_e, {}
             return keep | keep_e

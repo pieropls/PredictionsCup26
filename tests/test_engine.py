@@ -7503,14 +7503,16 @@ class C103Tests(EngineCase):
         self.assertEqual(eng.el_reserve(self.ts("2026-10-31 12:00:00")), 30_000.0)
         self.assertEqual(eng.el_reserve(self.ts("2026-11-03 15:00:00")), 60_000.0)
         self.assertEqual(eng.el_reserve(self.ts("2026-11-04 09:00:00")), 0.0)
-        self.assertEqual(eng.el_reserve(self.ts("2026-11-01 12:00:00")), 35_000.0, "C114: the firm ramp")
-        self.assertEqual(eng.el_reserve(self.ts("2026-11-02 00:00:00")), 40_000.0, "C126 (Piero 11:40 Oct 30 item 3): 40k Nov 2 -> 60k firm, no elastic")
-        self.assertEqual(eng.el_reserve(self.ts("2026-11-02 12:00:00")), 46_667.0, "6-h steps")
+        self.assertEqual(eng.el_reserve(self.ts("2026-11-01 11:59:00")), 35_000.0, "C114: the firm ramp")
+        self.assertEqual(eng.el_reserve(self.ts("2026-11-01 12:00:00")), 40_000.0, "C127 (Piero 15:10 Oct 31 item 1): the climb starts Nov 1 12:00")
+        self.assertEqual(eng.el_reserve(self.ts("2026-11-02 00:00:00")), 45_714.0, "C126: 60k firm, no elastic; C127: 6-h steps of 2,857")
+        self.assertEqual(eng.el_reserve(self.ts("2026-11-02 12:00:00")), 51_429.0, "6-h steps")
         self.assertEqual(eng.el_elastic(self.ts("2026-11-02 12:00:00")), 0.0, "the elastic 15k is firm now")
-        self.assertEqual(eng.el_firm(self.ts("2026-11-03 06:00:00")), 56_667.0)
-        self.assertEqual(eng.el_firm(self.ts("2026-11-03 11:59:00")), 56_667.0)
+        self.assertEqual(eng.el_firm(self.ts("2026-11-03 00:00:00")), 57_143.0)
+        self.assertEqual(eng.el_firm(self.ts("2026-11-03 05:59:00")), 57_143.0)
+        self.assertEqual(eng.el_firm(self.ts("2026-11-03 06:00:00")), 60_000.0, "C127: 60k firm by Nov 3 06:00")
         self.assertEqual(eng.el_firm(self.ts("2026-11-03 12:00:00")), 60_000.0)
-        self.assertIn("target 60,000 usable FIRM by 11-03 12:00", eng.election_cash_line(self.ts("2026-11-02 12:00:00")))
+        self.assertIn("target 60,000 usable FIRM by 11-03 06:00", eng.election_cash_line(self.ts("2026-11-02 12:00:00")))
         self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-26 12:00:00")), 35_000.0, "C115: the taper 35k Oct 26")
         self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-27 12:00:00")), 30_000.0)
         self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-28 12:00:00")), 25_000.0)
@@ -7625,6 +7627,56 @@ class C103Tests(EngineCase):
         plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
         self.assertEqual(plan[b]["why"], "elastic"); self.assertAlmostEqual(plan[b]["px"], 0.94, places=3, msg="fair 0.99 - 5c: never cheaper (the bid 0.900 is under it)")
 
+
+
+class C127Tests(EngineCase):
+    """C127 (Piero 15:50 Oct 31 item 3): the end sweep — Nov 4 00:30-08:55 the cash above floor + manual reserve + cushion (20k; 0 from
+    08:30) takes asks >= 2c and >= 3% per $ under PM fair, highest EV/$ first, into carry under its race caps; moved / stopped races out."""
+
+    def test_the_end_sweep_window_budget_filters_and_order(self):
+        fake, eng, favs = AlphaTests.rig(self)
+        f_engine.END_SWEEP = dict(a_config.END_SWEEP)
+        ts = lambda s: time.mktime(time.strptime(s, "%Y-%m-%d %H:%M:%S"))          # noqa: E731
+        t = ts("2026-11-04 01:00:00")
+        c, d, e, g, s, g2 = [x for x in favs if x not in FAIR][:6]       # (not the MA Gov legs: c95_market's cleanup pops FAIR)
+        for ex, fair, book, race in ((c, 0.95, (0.88, 0.90, 0.89), "RC"), (d, 0.95, (0.92, 0.93, 0.925), "RD"), (e, 0.85, (0.80, 0.82, 0.81), "RE"),
+                                     (g, 0.95, (0.85, 0.87, 0.86), "RG"), (s, 0.95, (0.85, 0.87, 0.86), "RS"), (g2, 0.95, (0.85, 0.87, 0.86), "RG")):
+            C94Tests.c95_market(self, eng, fake, ex, fair, book, race=race)
+
+        def hist(now):                                                               # 30 min of PM history; g moved 10c in it: out
+            for ex in (c, d, e, g, s, g2):
+                eng.sweep_hist[ex] = collections.deque([(now - 1790, 0.85 if ex == g else eng.fair[ex]), (now - 1, eng.fair[ex])])
+        hist(t)
+        el_, called = eng.election, {e: "yes"}                                      # e (PM 0.85) is in only because the lane called its YES
+        eng.election = types.SimpleNamespace(stopped=False, race_stop={"RS"}, race=lambda ex: (eng.meta.get(ex) or {}).get("race"), called=called.get)
+        self.addCleanup(setattr, eng, "election", el_)
+        eng.manual_reserve_left = lambda: 2_000.0
+        eng.cash_raw_hist = [a_config.CASH_RESERVE + 2_000.0 + 20_000.0 + 10_000.0]
+        self.assertFalse(eng.sweep_on(ts("2026-11-04 00:29:59"))); self.assertTrue(eng.sweep_on(ts("2026-11-04 00:30:00")))
+        self.assertTrue(eng.sweep_on(ts("2026-11-04 08:54:59"))); self.assertFalse(eng.sweep_on(ts("2026-11-04 08:55:00")))
+        plan = eng.carry_plan(t)
+        self.assertEqual(set(plan), {c}, "d: 2c but 2.2% per $; g moved, so g2 (its race) too; s stopped by the reversal guard; e: no cash after c")
+        w = plan[c][0]
+        self.assertEqual((w["side"], w["px"], w["sub"], w["qty"]), ("yes", 0.90, f"carry:{c}:yes", 11_111), "10k above floor + 2k + 20k, at the ask")
+        self.assertEqual(eng.conv_select(t), set(), "no convergence sale while the sweep buys")
+        eng.cash_raw_hist = [a_config.CASH_RESERVE + 2_000.0 + 30_000.0]
+        hist(ts("2026-11-04 08:40:00"))
+        plan = eng.carry_plan(ts("2026-11-04 08:40:00"))
+        self.assertEqual(plan[c][0]["qty"], 13_333, "the cushion is 0 from 08:30; c (5.6% per $) first, to carry's 12k race cap")
+        self.assertEqual(plan[e][0]["qty"], int(12_000 / 0.82), "then e (3.7% per $): its race cap too (6k of the 30k left)")
+        self.assertAlmostEqual(eng.carry_view["sweep_room"], 6_000, delta=1, msg="30k - two 12k race caps")
+        called.clear()
+        self.assertEqual(set(eng.carry_plan(ts("2026-11-04 08:40:00"))), {c}, "Piero 00:10 Nov 1 (b): e uncalled at PM 0.85: out; c at PM 0.95: in")
+        called[e] = "no"
+        self.assertNotIn(e, eng.carry_plan(ts("2026-11-04 08:40:00")), "the lane called e's NO: its YES stays out")
+        called[e] = "yes"
+        hist(t); eng.sweep_hist[e] = collections.deque([(t - 600, 0.85), (t - 1, 0.85)])
+        self.assertIn(c, eng.carry_plan(t)); self.assertNotIn(e, eng.carry_plan(t), "less than 29 min of PM history: out")
+        self.assertEqual(eng.carry_plan(ts("2026-11-04 08:55:00")), {}, "no orders from 08:55 (carry itself is off on the night)")
+
+    def test_the_wave_share_is_2_5_times_usable(self):
+        """Piero 00:10 Nov 1 item 2: WAVE_MULT 2.5 for top 50 (C126: 2.0), docs/night_size_top50.md."""
+        self.assertEqual(el_mod.WAVE_MULT, 2.5)
 
 
 class C106Tests(EngineCase):

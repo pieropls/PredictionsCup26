@@ -570,14 +570,15 @@ FMM_ROOM = dict(on=True, until="2026-10-28 23:59:59", race_cap=8_000.0, cf_race_
 CARRY_FIRST = {"1077": ("no", 0.845)}   # item 1: the unused free cash goes to carry bids, Rhode Island Senate R NO (<= 0.845) first, then the all-NO sets
 # C103 (docs/cash_calendar.md §3 + Piero's §5 decisions of 15:55 Oct 17, moved by Piero 15:15 Oct 21 item C: the ramp starts Oct 28)
 ELECTION_RESERVE = dict(on=True, steps=(("2026-10-28 00:00:00", 20_000.0), ("2026-10-30 00:00:00", 25_000.0), ("2026-10-31 00:00:00", 30_000.0),
-                                        ("2026-11-01 00:00:00", 35_000.0), ("2026-11-02 00:00:00", 40_000.0), ("2026-11-02 06:00:00", 43_333.0),
-                                        ("2026-11-02 12:00:00", 46_667.0), ("2026-11-02 18:00:00", 50_000.0), ("2026-11-03 00:00:00", 53_333.0),
-                                        ("2026-11-03 06:00:00", 56_667.0), ("2026-11-03 12:00:00", 60_000.0)),
+                                        ("2026-11-01 00:00:00", 35_000.0), ("2026-11-01 12:00:00", 40_000.0), ("2026-11-01 18:00:00", 42_857.0),
+                                        ("2026-11-02 00:00:00", 45_714.0), ("2026-11-02 06:00:00", 48_571.0), ("2026-11-02 12:00:00", 51_429.0),
+                                        ("2026-11-02 18:00:00", 54_286.0), ("2026-11-03 00:00:00", 57_143.0), ("2026-11-03 06:00:00", 60_000.0)),
                         until="2026-11-04 09:00:00",   # usable cash (cash - 5k floor - 2k reserve) no entry layer may spend; the election sniper / drift use it
                         # C114 (Piero 14:00 Oct 23) was 45k FIRM by Nov 3 12:00 + 15k ELASTIC (>= PM fair - 5c, Nov 2-3). C126 (Piero 11:40 Oct 30 item 3):
                         # 60k FIRM — the elastic 15k becomes firm, 40k Nov 2 -> 60k Nov 3 12:00 in 6-h steps (convergence sells toward the step in force,
                         # so a single 20k step at 12:00 would start the sales 3 h before the first close), lowest EV/$ first at the normal floors
                         # (>= lot avg + 0.5c); elastic 0 switches the fair - 5c part off (its code stays)
+                        # C127 (Piero 15:10 Oct 31 item 1): the climb starts Nov 1 12:00 — 40k -> 60k FIRM by Nov 3 06:00 in 7 steps of 6 h
                         elastic=0.0, elastic_from="2026-11-02 00:00:00", elastic_below_fair=0.05, elastic_keep_close="17:00", fav_min=0.75)
 WIND_DOWN = dict(on=True, rot_buys_stop="2026-10-27 00:00:00", locks_stop="2026-10-29 00:00:00",
                  fmm_caps=(("2026-10-26 00:00:00", 35_000.0), ("2026-10-27 00:00:00", 30_000.0), ("2026-10-28 00:00:00", 25_000.0),   # C115 (Piero 15:10 Oct 23): a taper
@@ -608,3 +609,11 @@ GAPMM = dict(on=True, window_s=6 * 3600, refresh_s=600, min_prints=10, repeg_s=6
 CARRY = dict(on=True, sell_ev=0.05, buy_ev=0.11, min_daily=150_000, fav_min=0.75, below_fair=0.05, race_cap=12_000.0,
              race_caps={"Rhode Island Senate": 30_000.0}, swap_pts=0.04, refresh_s=1800, min_clip=500, ttl=86400,
              max_bid_sh=9_900)                 # Piero 01:05 Oct 18 item 6: e.g. RI Senate R NO 9,900 at 0.865
+# C127 (Piero 15:50 Oct 31 item 3): the END SWEEP (cash scores 0 at settlement). From Nov 4 00:30 PT the cash above the 5k floor, Piero's
+# manual reserve and a 20k late-call cushion (0 from 08:30) takes asks >= 2c and >= 3% per $ under PM fair, highest EV/$ first, into the
+# carry book (held to settlement) under carry's race caps; not a race whose PM fair moved > 5c in 30 min or that the reversal guard stopped;
+# no orders from 08:55. The convergence sales stop while it runs; every other layer keeps the election reserve until 09:00.
+# Piero 00:10 Nov 1 item 1 (option b): only a side the election lane called, or a side with PM fair >= 0.95; nothing in uncalled races
+# (a race unresolved at 09:00 may be closed out at SIG's 5-h VWAP, docs/resolution_audit.md).
+END_SWEEP = dict(on=True, start="2026-11-04 00:30:00", cushion=20_000.0, cushion_to_0="2026-11-04 08:30:00", stop="2026-11-04 08:55:00",
+                 ev_min=0.02, ev_per_usd=0.03, move_max=0.05, move_s=1800, min_qty=50, pm_min=0.95)
