@@ -290,7 +290,7 @@ TRADING_HOLD_C = 0.03           # a trading lot >= 3c from fair is held (no +0.5
 CORE_EARLY_CLOSE_PT = "17:00"   # prefer races whose polls close by 17:00 PT (data/election/poll_close.json first_close_pt) ...
 CORE_EARLY_BONUS = 0.005        # ... +0.5 pp of edge-% in the core ranking
 CORE_EVERY_S = 60
-CORE_SKIP_SUBS = ("manual", "wall:", "swing:", "sleeve:", "pairset:", "recycle:")   # Piero's position orders and pair sets are neither book
+CORE_SKIP_SUBS = ("manual", "wall:", "swing:", "sleeve:", "pairset:", "recycle:", "catch:")   # Piero's position orders and pair sets are neither book; C128: nor CATCH's lots (its own exits; core never swaps one in)
 PAUSE_KINDS = ("cash_floor", "i2_breach", "api_errors", "pm_stale", "engine_errors", "fills_blind", "travel", "cash_short", "stop_pull")   # the only automatic pauses; every P&L stop is an alert
 PM_STALE_S = 120                # Polymarket fair older than 2 min -> pause (resume when fresh)
 ENGINE_ERRORS_10M = 5           # >= 5 ERR events in 10 min -> pause (resume after 10 clean minutes)
@@ -617,3 +617,14 @@ CARRY = dict(on=True, sell_ev=0.05, buy_ev=0.11, min_daily=150_000, fav_min=0.75
 # (a race unresolved at 09:00 may be closed out at SIG's 5-h VWAP, docs/resolution_audit.md).
 END_SWEEP = dict(on=True, start="2026-11-04 00:30:00", cushion=20_000.0, cushion_to_0="2026-11-04 08:30:00", stop="2026-11-04 08:55:00",
                  ev_min=0.02, ev_per_usd=0.03, move_max=0.05, move_s=1800, min_qty=50, pm_min=0.95)
+# C128 CATCH (Piero 00:00 / 00:20 Nov 2, docs/catch_nov2_spec.md; the code freeze lifted for this item only): 3 deep resting bids on every side with
+# PM fair 0.80-0.995 (fair - 7c / 10c / 15c, 2k / 3k / 4k notional) to catch the sweeps that our other catchers miss (the entry cash guard starves them).
+# Its fills only count against usable (exempt from the C103 reserve up to the 20k cap); the control 'catch': pilot = shadow, full = live, off = the kill switch.
+CATCH = dict(on=True, until="2026-11-03 14:30:00", fair_lo=0.80, fair_hi=0.995, levels=((0.07, 2_000.0), (0.10, 3_000.0), (0.15, 4_000.0)), px_min=0.50,
+             inv_cap=20_000.0, usable_min=20_000.0, pm_age_s=60, news_c=0.03, news_s=600, stable_s=900, fill_hold_s=1800, reprice_c=0.01, writes_min=15,
+             exit_c=0.04, exit_fair_c=0.02, exit_late_s=7200, exit_late_c=0.02, exit_late_fair_c=0.03,
+             skip_ex=("840", "841", "842", "843",                                       # the 4 control markets (House / Senate D and R)
+                      "855", "856", "947", "948",                                       # VWAP-mode flags (docs/resolution_audit.md): GA Governor, GA Senate
+                      "910", "911", "959", "960",                                       # ME-02, Maine Senate (ranked choice)
+                      "1057", "1058", "1066", "1067",                                   # Alaska Governor, Alaska Senate (ranked choice)
+                      "1001", "1002", "969"))                                           # Vermont Governor, NE Senate Independent (the Nonpartisan label)
