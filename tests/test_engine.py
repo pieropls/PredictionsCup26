@@ -8015,9 +8015,10 @@ class C125Tests(unittest.TestCase):
 
 
 class C128Tests(EngineCase):
-    """C128 CATCH (docs/catch_nov2_spec.md, Piero 00:00 / 00:20 Nov 2): 3 deep resting bids on each favourite side (PM fair 0.80-0.995) at fair -
-    7c / 10c / 15c, 2k / 3k / 4k notional; shadow first (control pilot), live on full; a fill holds its level 30 min and rests an exit at
-    max(fill + 4c, fair - 2c); the 20k inventory cap and the 20k usable floor stop the bids; a wrong fill kills the layer."""
+    """C128 / C129 CATCH v2 (docs/catch_nov2_spec.md + notes, Piero 11:15 Nov 2): 4 bids on each side with PM fair 0.55-0.995 anchored on SIG's
+    best bid b and PM fair f — L1 = min(b - 4c, f - 10c) 1,000, L2 = min(b - 8c, f - 15c) 1,500, L3 = min(b - 15c, f - 25c) 2,000, L4 = f - 40c
+    1,500 (notional); shadow first (control pilot), live on full; re-anchored <= every 5 min, never mid-sweep; a fill holds its level 30 min and
+    rests an exit at max(fill + 4c, fair - 2c); the touch-fill brake pauses; the 15k cap and the 15k usable floor stop the bids; a wrong fill kills."""
 
     def rig(self, **kw):
         fresh_data(layers=dict(position=dict(state="full")))
@@ -8036,109 +8037,173 @@ class C128Tests(EngineCase):
         return sorted((o["side"], round(o["price"], 3), int(o["qty"])) for o in fake.open_orders()
                       if o["ex"] == ex and (eng.ledger.orders.get(o["id"]) or {}).get("layer") == layer)
 
-    def market(self, eng, fake, ex, fair, pos=0):
-        C94Tests.c95_market(self, eng, fake, ex, fair, (round(fair - 0.01, 3), round(fair + 0.01, 3), fair), race=f"R{ex}")
+    def market(self, eng, fake, ex, fair, book=None, pos=0):
+        C94Tests.c95_market(self, eng, fake, ex, fair, book or (round(fair - 0.07, 3), round(fair - 0.05, 3), round(fair - 0.06, 3)), race=f"R{ex}")
         fake.pos[ex] = pos
         eng.catch_hist.pop(ex, None); eng.catch_block.pop(ex, None)            # the rig's own fair for ex is not a news move
+        eng.catch_anchor.pop((ex, "yes"), None); eng.catch_anchor.pop((ex, "no"), None)
 
-    def test_shadow_first_then_the_live_ladder_levels_sizes_and_skips(self):
+    def live(self, eng):
+        eng.controls.d["catch_c129"] = "2026-01-01 00:00:00"
+        eng.controls.set_layer("catch", "full", "test")
+
+    def test_shadow_first_then_the_v2_ladder_anchored_on_sig_and_pm_and_the_skips(self):
         fake, eng, mk = self.rig()
         a, b, c, d, e = mk[:5]
-        for ex, fair in ((a, 0.92), (b, 0.92), (c, 0.92), (d, 0.997), (e, 0.15)):
-            self.market(eng, fake, ex, fair)
-        fake.pos[c] = -500                                                       # we hold c's NO: a YES bid there would sell it
+        self.market(eng, fake, a, 0.92, (0.85, 0.87, 0.86))                     # SIG's YES bid 0.85, 7c under fair
+        self.market(eng, fake, b, 0.92); self.market(eng, fake, c, 0.92, pos=-500); self.market(eng, fake, d, 0.997)
+        self.market(eng, fake, e, 0.60, (0.55, 0.57, 0.56))                     # a coin-flip leader
         f_engine.CATCH["skip_ex"] = (str(b),)
         loop(eng, fake)
-        self.assertEqual(eng.controls.state("catch"), "pilot", "C128 starts in shadow")
+        self.assertEqual(eng.controls.state("catch"), "pilot", "C129 starts in shadow")
         self.assertEqual(self.mine(eng, fake, a), [], "shadow: nothing sent")
-        self.assertTrue(os.path.exists(os.path.join(TMP, "catch_shadow.json")), "the shadow ladder is logged")
-        self.assertGreater(eng.catch_cov["bids"], 0)
-        eng.controls.set_layer("catch", "full", "test")
+        self.assertTrue(os.path.exists(os.path.join(TMP, "catch_shadow.json")))
+        self.live(eng)
         loop(eng, fake)
-        self.assertEqual(self.mine(eng, fake, a), [("yes", 0.77, 5194), ("yes", 0.82, 3658), ("yes", 0.85, 2352)], "fair - 15c / 10c / 7c at 4k / 3k / 2k")
-        self.assertEqual(self.mine(eng, fake, e), [("no", 0.70, 5714), ("no", 0.75, 4000), ("no", 0.78, 2564)], "the longshot's NO (fair 0.85)")
+        self.assertEqual(self.mine(eng, fake, a), [("yes", 0.52, 2884), ("yes", 0.67, 2985), ("yes", 0.77, 1948), ("yes", 0.81, 1234)],
+                         "L1 min(0.81, 0.82), L2 min(0.77, 0.77), L3 min(0.70, 0.67), L4 0.52 at 1,000 / 1,500 / 2,000 / 1,500")
+        self.assertLessEqual(max(x[1] for x in self.mine(eng, fake, a)), 0.85 - 0.04 + 1e-9, "L1 at or under b - 4c")
+        self.assertEqual(self.mine(eng, fake, e), [("yes", 0.2, 7500), ("yes", 0.35, 5714), ("yes", 0.45, 3333), ("yes", 0.5, 2000)], "0.55-0.995: a 0.60 leader too")
         self.assertEqual(self.mine(eng, fake, b), [], "a skipped market (control / VWAP-mode)")
         self.assertEqual(self.mine(eng, fake, c), [], "we hold the other side")
         self.assertEqual(self.mine(eng, fake, d), [], "fair 0.997 > 0.995")
         ids = {o["id"] for o in fake.open_orders() if o["ex"] == a}
-        FAIR[a] = 0.925                                                          # +0.5c: the bids keep their place
+        fake.px[a] = (0.88, 0.89, 0.885)                                       # b +3c: no re-anchor within 5 min
         loop(eng, fake)
-        self.assertEqual({o["id"] for o in fake.open_orders() if o["ex"] == a}, ids, "keep-place under a 1c move")
-        FAIR[a] = 0.935                                                          # +1.5c from the post: re-priced
+        self.assertEqual({o["id"] for o in fake.open_orders() if o["ex"] == a}, ids, "re-anchored at most every 5 min")
+        an = eng.catch_anchor[(a, "yes")]
+        eng.catch_anchor[(a, "yes")] = (an[0], an[1], an[2] - 301)
+        eng.prints[str(a)] = collections.deque([(time.time() - 10, 0.80, 500.0, None)])   # a print 5c under the anchor's b: a sweep prints
         loop(eng, fake)
-        self.assertEqual(self.mine(eng, fake, a), [("yes", 0.785, 5095), ("yes", 0.835, 3592), ("yes", 0.865, 2312)])
-        FAIR[a] = 0.975                                                          # +4c in 10 min: the news guard pulls the book
+        self.assertEqual({o["id"] for o in fake.open_orders() if o["ex"] == a}, ids, "never re-anchored while a sweep prints")
+        eng.prints[str(a)] = collections.deque()
+        loop(eng, fake)
+        self.assertIn(("yes", 0.82, 1219), self.mine(eng, fake, a), "re-anchored: L1 min(0.84, 0.82)")
+        FAIR[a] = 0.96                                                          # +4c in 10 min: the news guard pulls the race
         loop(eng, fake)
         self.assertEqual(self.mine(eng, fake, a), [], "news guard")
-        self.assertGreater(eng.catch_block[a], time.time() + 800, "back after 15 min stable")
         eng.controls.set_layer("catch", "off", "test")
         loop(eng, fake)
         self.assertEqual(self.mine(eng, fake, e), [], "off: every CATCH bid cancelled")
 
-    def test_a_fill_holds_its_level_rests_its_exit_and_steps_it_after_2h(self):
+    def test_a_fill_holds_its_level_and_its_exit_goes_out_even_on_a_rotation_market(self):
         fake, eng, mk = self.rig()
         a = mk[0]
-        self.market(eng, fake, a, 0.92)
-        eng.controls.d["catch_c128"] = "2026-01-01 00:00:00"
-        eng.controls.set_layer("catch", "full", "test")
+        self.market(eng, fake, a, 0.92, (0.85, 0.87, 0.86))
+        self.live(eng)
         loop(eng, fake)
-        sub = f"catch:{a}:yes:L1"
+        sub = f"catch2:{a}:yes:L1"
         oid = next(o["id"] for o in fake.open_orders() if (eng.ledger.orders.get(o["id"]) or {}).get("sub") == sub)
-        fake.fill(oid, 2352)
+        fake.fill(oid, 1234)
+        f_engine.ROTATION = dict(a_config.ROTATION, on=True, sells={a: 4000}, buys=[])   # C128b: Oklahoma Senate R was on the rotation's list
+        eng.controls.d["rotation"] = dict(since="x", sell_left={a: 4000}, cash_freed=0.0, sold=0.0, skipped={})
         loop(eng, fake); loop(eng, fake)
-        self.assertEqual(eng.ledger.subbooks[a].get(sub), 2352.0)
+        self.assertEqual(eng.ledger.subbooks[a].get(sub), 1234.0)
         self.assertGreater(eng.catch_hold[sub], time.time() + 1700, "the filled level waits 30 min")
-        self.assertEqual([x for x in self.mine(eng, fake, a) if x[1] == 0.85], [], "L1 not re-posted")
-        self.assertEqual(len(self.mine(eng, fake, a)), 2, "L2 / L3 stay")
-        self.assertEqual(self.mine(eng, fake, a, "catchexit"), [("no", 0.1, 2352)], "ask max(0.85 + 4c, 0.92 - 2c) = 0.90: a NO buy at 0.10")
+        self.assertEqual([x for x in self.mine(eng, fake, a) if x[1] == 0.81], [], "L1 not re-posted")
+        self.assertEqual(self.mine(eng, fake, a, "catchexit"), [("no", 0.1, 1234)], "sent: max(0.81 + 4c, 0.92 - 2c) = 0.90, a NO buy at 0.10")
+        self.assertEqual(self.mine(eng, fake, a, "release"), [], "the rotation leaves a CATCH lot to its exit (C128b)")
         eng.catch_fill_t[sub] = time.time() - 7300
         loop(eng, fake); loop(eng, fake)                                         # (I2: the new ask goes once the old one's cancel landed)
-        self.assertEqual(self.mine(eng, fake, a, "catchexit"), [("no", 0.11, 2352)], "after 2 h: max(0.85 + 2c, 0.92 - 3c) = 0.89")
+        self.assertEqual(self.mine(eng, fake, a, "catchexit"), [("no", 0.11, 1234)], "after 2 h: max(0.81 + 2c, 0.92 - 3c) = 0.89")
         FAIR[a] = 0.80
         loop(eng, fake); loop(eng, fake)
         self.assertFalse(eng.controls.paused, "an exit re-price pauses nothing (I2 fit at planning)")
-        self.assertEqual(self.mine(eng, fake, a, "catchexit"), [("no", 0.13, 2352)], "fair 0.80: max(0.87, 0.77) = 0.87, never under fill + 0.5c")
-        self.assertIn("CATCH hourly", eng.catch_line(time.time()))
-        self.assertIn("1 fills, 2,352 shares", eng.catch_line(time.time()))
+        self.assertEqual(self.mine(eng, fake, a, "catchexit"), [("no", 0.17, 1234)], "fair 0.80: max(0.83, 0.77) = 0.83, never under fill + 0.5c")
+        self.assertIn("v2 since the start 1 fills, 1,234 shares", eng.catch_line(time.time()))
 
-    def test_the_inventory_cap_the_usable_floor_and_the_write_limit(self):
+    def test_the_touch_fill_brake_pauses_30_min_and_does_not_kill(self):
+        fake, eng, mk = self.rig(brake_wait_s=0)
+        ms = mk[:4]
+        for ex in ms:
+            self.market(eng, fake, ex, 0.92, (0.85, 0.87, 0.86))
+        self.live(eng)
+        loop(eng, fake)
+        l1 = {ex: next(o for o in fake.open_orders() if (eng.ledger.orders.get(o["id"]) or {}).get("sub") == f"catch2:{ex}:yes:L1") for ex in ms}
+        eng.prints[str(ms[0])] = collections.deque([(time.time() - 5, 0.70, 3000.0, None)])   # a sweep printed through ms[0]'s L1: not a touch fill
+        for ex in ms[:3]:
+            fake.fill(l1[ex]["id"], 100)
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(eng.catch_mode(time.time()), "live", "two touch fills: no brake")
+        fake.fill(l1[ms[3]]["id"], 100)
+        loop(eng, fake); loop(eng, fake)
+        self.assertEqual(eng.catch_mode(time.time()), "braked", "the third touch fill in 10 min")
+        self.assertEqual(eng.controls.state("catch"), "full", "a pause, not a kill")
+        self.assertEqual([o for o in fake.open_orders() if (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "catch"], [], "every CATCH bid cancelled")
+        self.assertTrue(self.mine(eng, fake, ms[3], "catchexit"), "the exits run on")
+        eng.catch_brake_until = time.time() - 1
+        loop(eng, fake)
+        self.assertTrue(self.mine(eng, fake, ms[3]), "back after the 30 min")
+
+    def test_the_cap_and_usable_floor_are_15k_and_the_v1_lots_stay_outside_as_carry_lots(self):
         fake, eng, mk = self.rig(writes_min=4)
-        eng.controls.d["catch_c128"] = "2026-01-01 00:00:00"
-        eng.controls.set_layer("catch", "full", "test")
+        self.live(eng)
         for ex in mk[:4]:
-            self.market(eng, fake, ex, 0.92)
+            self.market(eng, fake, ex, 0.92, (0.85, 0.87, 0.86))
         loop(eng, fake)
         n = len([o for o in fake.open_orders() if (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "catch"])
-        self.assertLessEqual(n, 4, "<= 4 new CATCH bids a minute here (15 live)")
-        self.assertGreater(n, 0)
+        self.assertTrue(0 < n <= 4, "<= 4 new CATCH bids a minute here (15 live)")
         f_engine.CATCH["writes_min"] = 10_000
         eng.catch_wt = []
+        v1 = f"catch:{mk[5]}:yes:L1"
+        eng.ledger.subbooks.setdefault(mk[5], {})[v1] = 20_000.0                # a v1 lot (00:31-00:40): a carry lot, outside the v2 cap
+        eng.ledger.tranches[v1] = dict(ex=mk[5], side="yes", kind="dump", state="open", ts=time.time() - 60, t="x", avg=0.90)
+        self.assertEqual(eng.catch_inventory(), 0.0)
+        self.assertNotIn(mk[5], eng.catch_exits(time.time()), "no CATCH exit for a v1 lot")
         loop(eng, fake)
         self.assertTrue(self.mine(eng, fake, mk[0]))
-        eng.catch_inventory = lambda: 20_000.0
+        eng.catch_inventory = lambda: 15_000.0
         loop(eng, fake)
-        self.assertEqual(self.mine(eng, fake, mk[0]), [], "CATCH inventory at the 20k cap: every bid cancelled")
+        self.assertEqual(self.mine(eng, fake, mk[0]), [], "v2 inventory at the 15k cap: every bid cancelled")
         eng.catch_inventory = lambda: 0.0
-        eng.manual_reserve_left = lambda: 40_000.0                             # usable = 64k - 5k - 40k = 19k: under the 20k floor
-        eng.cash_raw_hist = [a_config.CASH_RESERVE + 59_000.0]
-        self.assertEqual(eng.catch_plan(time.time())[0], {}, "usable 19k < 20k: no bids")
+        eng.manual_reserve_left = lambda: 40_000.0
+        eng.cash_raw_hist = [a_config.CASH_RESERVE + 54_000.0]                  # usable = 59k - 5k - 40k = 14k: under the 15k floor
+        self.assertEqual(eng.catch_plan(time.time())[0], {}, "usable 14k < 15k: no bids")
 
     def test_a_fill_outside_the_bid_rules_kills_the_layer_and_the_exits_run_on(self):
         fake, eng, mk = self.rig()
         a = mk[0]
-        self.market(eng, fake, a, 0.92)
-        eng.controls.d["catch_c128"] = "2026-01-01 00:00:00"
-        eng.controls.set_layer("catch", "full", "test")
+        self.market(eng, fake, a, 0.92, (0.85, 0.87, 0.86))
+        self.live(eng)
         loop(eng, fake)
-        sub = f"catch:{a}:yes:L1"
+        sub = f"catch2:{a}:yes:L1"
         oid = next(o["id"] for o in fake.open_orders() if (eng.ledger.orders.get(o["id"]) or {}).get("sub") == sub)
-        fake.fill(oid, 1000, price=0.90)                                         # a fill 5c above our bid's price: wrong
+        fake.fill(oid, 1000, price=0.90)                                         # 9c above our 0.81 bid: a real fault
         loop(eng, fake); loop(eng, fake)
         self.assertEqual(eng.controls.state("catch"), "off", "killed")
         self.assertIn("a fill looks wrong", eng.controls.layer("catch")["killed"]["reason"])
         self.assertEqual([x for x in self.mine(eng, fake, a) if x[0] == "yes"], [], "every CATCH bid cancelled")
         self.assertTrue(self.mine(eng, fake, a, "catchexit"), "its exit runs on")
 
+
+class C128bTests(EngineCase):
+    """C128b (the first CATCH fill, 00:31 Nov 2) in C129: the rotation and the convergence sales leave a CATCH v2 lot to its own exit (only the
+    night's wave recycling sells it there); v1's lots (00:31-00:40) are carry lots: held, sold by the normal ramp at >= cost + 0.5c."""
+
+    def test_the_rotation_leaves_a_v2_lot_to_its_exit_wave_recycling_still_sells_it_and_a_v1_lot_is_a_carry_lot(self):
+        fake, eng, favs = C93Tests.rig(self)
+        a = favs[0]
+        sub, v1 = f"catch2:{a}:yes:L1", f"catch:{a}:yes:L1"
+        C93Tests.lot(self, eng, fake, a, sub, 3000, 0.85, (0.90, 0.905, 0.9025), 0.93)   # 2.8% left at the touch: the no-edge release's
+        loop(eng, fake); loop(eng, fake)
+        eng.ledger.subbooks[a] = {sub: 3000.0}; fake.pos[a] = 3000; eng.lots_cache = (None, {})
+        f_engine.ROTATION = dict(a_config.ROTATION, on=True, sells={a: 4000}, buys=[])
+        eng.controls.d["rotation"] = dict(since="x", sell_left={a: 4000}, cash_freed=0.0, sold=0.0, skipped={})
+        self.assertNotIn(a, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time()), "neither the rotation sale nor the no-edge release")
+        eng.ledger.subbooks[a] = {sub: 3000.0, f"dump:{a}:yes:1": 1000.0}; fake.pos[a] = 4000; eng.lots_cache = (None, {})
+        eng.ledger.tranches[f"dump:{a}:yes:1"] = dict(ex=a, side="yes", kind="dump", state="open", ts=time.time() - 60, t="x", avg=0.85)
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertEqual(set(plan[a]["subs"]), {f"dump:{a}:yes:1"}, "the market's other lots still go to the rotation's target")
+        eng.el_recycle = {(str(a), sub): 0.90}
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertIn(sub, plan[a]["subs"], "the night's wave recycling still sells a CATCH lot")
+        eng.el_recycle = {}
+        eng.ledger.subbooks[a] = {v1: 3000.0}; eng.lots_cache = (None, {})       # a v1 lot: carry, held from the rotation's list
+        self.assertNotIn(a, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time()), "a v1 lot is held like a carry lot")
+        eng.conv_select, eng.wd_after = (lambda now: {(str(a), v1)}), (lambda key, now: key == "conv_from")
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
+        self.assertIn(v1, plan[a]["subs"], "the normal ramp (convergence) sells it")
+        self.assertGreaterEqual(plan[a]["px"], 0.855 - 1e-9, "at >= cost + 0.5c")
 
 if __name__ == "__main__":
     unittest.main()
