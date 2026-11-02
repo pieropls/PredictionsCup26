@@ -519,6 +519,9 @@ class Engine:
         self.catch_post, self.catch_exit_px, self.catch_fill_t, self.catch_wt, self.catch_seen, self.catch_note = {}, {}, {}, [], set(), {}
         self.catch_anchor, self.catch_pending, self.catch_touch, self.catch_brake_until = {}, [], [], 0.0   # C129 CATCH v2: anchors, the touch-fill brake
         self.catch_paid = {}                                # C130: sub -> (px, t) of a bid whose write was counted, wanted until it rests
+        self.catch_miss, self.catch_stuck = {}, {}          # C131: counted minutes with no bid resting / a sub parked 15 min after 3
+        for ex_, side_, b_, f_, t_ in (read_json(os.path.join(DATA, "catch_anchor.json"), {}) or {}).get("anchors", []):
+            self.catch_anchor[(ex_, side_)] = (b_, f_, t_)  # C131: anchors survive a restart (else every resting bid re-prices at once)
         self.sale_anchor, self.sale_stats, self.foreign_actions = {}, collections.defaultdict(collections.Counter), {}   # C99: sale asks keep their place; foreign fills' direction
         self.sell_undercut, self.fmm_hour_prev, self.churn_t = {}, None, stamp()
         self.election, self.el_mode_cached, self.el_snap = None, "off", dict(cash=0.0, pos={})   # C102: election night (n_election v2)
@@ -6713,7 +6716,7 @@ class Engine:
             rec = self.ledger.orders.get(o["id"]) or {}
             if rec.get("layer") == "catch":
                 rest[rec.get("sub")] = o
-        cands = []
+        cands, moved = [], False
         for b in self.bots:
             ex = b.ex
             if b.kind != "market" or ex in self.manual_ex or str(ex) in CATCH["skip_ex"] or not c.allows(ex, "catch") or self.ex.is_frozen(ex):
@@ -6727,14 +6730,17 @@ class Engine:
                 continue
             held = (self.book.get(ex) or {}).get("pos", 0)
             for side, fs in (("yes", f), ("no", 1 - f)):
-                if not CATCH["fair_lo"] - 1e-9 <= fs <= CATCH["fair_hi"] + 1e-9 or ((held <= -MIN_QTY) if side == "yes" else (held >= MIN_QTY)):
-                    continue                                # out of the band, or we hold the other side (the bid would sell it: rule 0, I2)
+                if (not CATCH["fair_lo"] - 1e-9 <= fs <= CATCH["fair_hi"] + 1e-9 or ((held < 0) if side == "yes" else (held > 0))
+                        or SELL_HOLD.get(str(ex)) not in (None, side)):
+                    continue                                # out of the band, or we hold the other side (the bid would sell it: rule 0, I2 caps it
+                                                            # at the holding — C131: a few shares too), or SELL_HOLD keeps the other side
                 bid_s, ask_s = bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)
                 a = self.catch_anchor.get((ex, side))
                 frozen = a is not None and a[0] is not None and any(p < a[0] - CATCH["sweep_c"] - 1e-9 for p in self.catch_side_prints(ex, side, now - CATCH["sweep_freeze_s"], now))
                 if a is None or (not frozen and now - a[2] >= CATCH["anchor_s"] and
                                  ((bid_s is None) != (a[0] is None) or (bid_s is not None and abs(bid_s - a[0]) >= CATCH["anchor_b_c"] - 1e-9) or abs(fs - a[1]) >= CATCH["anchor_f_c"] - 1e-9)):
                     a = self.catch_anchor[(ex, side)] = (bid_s, fs, now)
+                    moved = True
                 cap = min(own_ask.get((ex, side), 9.0), ask_s if ask_s is not None else 9.0)
                 for i, px, notional in self.catch_levels(a, fs):
                     if px < cap - 1e-9:
@@ -6749,9 +6755,23 @@ class Engine:
             q = int(notional / px)
             if o is not None and abs(float(o["price"]) - px) <= 1e-9:
                 q = int(o["qty"])                           # keep-place: the resting bid stays while the anchor holds
+                self.catch_miss.pop(sub, None)
             elif mode == "live":
                 paid = self.catch_paid.get(sub)
-                if paid is not None and abs(paid[0] - px) <= 1e-9 and now - paid[1] < 60:
+                if paid is not None and abs(paid[0] - px) <= 1e-9 and now - paid[1] >= 60:   # C131: counted a minute ago, still wanted there, not resting
+                    self.catch_paid.pop(sub)
+                    self.catch_miss[sub] = self.catch_miss.get(sub, 0) + 1
+                    if self.catch_miss[sub] >= 3:           # 3 minutes running: something after the plan drops it; parked 15 min
+                        self.catch_miss.pop(sub)
+                        self.catch_stuck[sub] = now + 900
+                        msg = f"CATCH bid parked 15 min: {self.name(ex)} {side.upper()} L{i + 1} at {px:.3f} counted 3 minutes running, never resting"
+                        self.event("CATCH", msg); self.night.line(msg)
+                    paid = None
+                if self.catch_stuck.get(sub, 0) > now:      # C131: parked: no write for it; an old bid stays where it is
+                    if o is None:
+                        continue
+                    px, q = float(o["price"]), int(o["qty"])
+                elif paid is not None and abs(paid[0] - px) <= 1e-9:
                     pass                                    # C130: its write is counted: kept until it rests (dropped, the queued bid never went out)
                 else:
                     need = 1 if o is None else 2
@@ -6768,7 +6788,9 @@ class Engine:
                 self.catch_post[sub] = (px, a[1])
             plan.setdefault(ex, []).append(dict(side=side, px=round(px, 3), qty=q, sub=sub, ttl=86400, fs=round(fs, 4), b=a[0], level=i + 1))
         self.catch_wt = wt
-        self.catch_paid = {k: v for k, v in self.catch_paid.items() if now - v[1] < 60}
+        self.catch_paid = {k: v for k, v in self.catch_paid.items() if now - v[1] < 120}
+        if moved:
+            write_atomic(os.path.join(DATA, "catch_anchor.json"), json.dumps(dict(t=stamp(), anchors=[[ex, sd, b_, f_, t_] for (ex, sd), (b_, f_, t_) in self.catch_anchor.items()])))
         bids = [w for v in plan.values() for w in v]
         self.catch_cov.update(books=len(plan), bids=len(bids), notional=round(sum(w["px"] * w["qty"] for w in bids)))
         if mode == "shadow":
@@ -12475,8 +12497,8 @@ class Engine:
                         continue                            # never up; down only after the others' best ask sat below ours >= 5 min
                     keep_c.append(o)
                     continue
-            if o.get("layer") == "fmmexit":                 # fmm_spec v2 §2.3: an FMM exit follows the best ask at once
-                keep_c.append(o)
+            if o.get("layer") in ("fmmexit", "catch"):      # fmm_spec v2 §2.3: an FMM exit follows the best ask at once; C131: a CATCH
+                keep_c.append(o)                            # re-anchor too (its own rule: <= every 5 min, on b >= 2c / f >= 1c)
                 continue
             if o.get("id") and want_keys.get(k):
                 t0 = self.drift_since.setdefault(o["id"], now)

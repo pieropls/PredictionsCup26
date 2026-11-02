@@ -8152,6 +8152,57 @@ class C128Tests(EngineCase):
             eng.ft.t[ex] = now + 61                                             # the PM quotes still fresh a minute on
         self.assertEqual(new(eng.catch_plan(now + 61)[0]), first, "after a minute: counted again, the same 3 first")
 
+    def test_c131_sides_the_engine_would_drop_are_skipped_a_dropped_bid_is_parked_and_anchors_survive_a_restart(self):
+        fake, eng, mk = self.rig()
+        self.live(eng)
+        a, b, c = mk[:3]
+        self.market(eng, fake, a, 0.92, (0.85, 0.87, 0.86), pos=-3)              # 3 NO shares: I2 would cap a YES bid at 3 (then < MIN_QTY)
+        self.market(eng, fake, b, 0.92, (0.85, 0.87, 0.86))
+        self.market(eng, fake, c, 0.92, (0.85, 0.87, 0.86))
+        self.addCleanup(setattr, f_engine, "SELL_HOLD", f_engine.SELL_HOLD)
+        f_engine.SELL_HOLD = {str(b): "no"}                                     # the engine drops a YES buy there
+        loop(eng, fake)
+        self.assertEqual(self.mine(eng, fake, a), [], "a few shares of the other side: skipped (no write counted)")
+        self.assertEqual(self.mine(eng, fake, b), [], "SELL_HOLD's other side: skipped")
+        self.assertEqual(len(self.mine(eng, fake, c)), 4)
+        self.assertFalse([k for k in eng.catch_paid if k.startswith((f"catch2:{a}:", f"catch2:{b}:"))])
+        ids = {o["id"] for o in fake.open_orders() if o["ex"] == c}
+        eng2 = engine(fake)                                                     # a restart: the anchors come back, nothing re-prices
+        self.assertEqual(eng2.catch_anchor.get((c, "yes")), eng.catch_anchor.get((c, "yes")))
+        loop(eng2, fake)
+        self.assertEqual({o["id"] for o in fake.open_orders() if o["ex"] == c}, ids, "after a restart the resting ladder keeps its place")
+        d = mk[3]                                                               # a bid dropped after the plan (never rests): parked
+        self.market(eng2, fake, d, 0.92, (0.85, 0.87, 0.86))
+        orig = eng2.no_self_cross
+        eng2.no_self_cross = lambda b_, places, cancels: [w for w in orig(b_, places, cancels) if not (b_.ex == d and w["layer"] == "catch")]
+        loop(eng2, fake)
+        sub, now = f"catch2:{d}:yes:L1", time.time()
+        self.assertEqual(self.mine(eng2, fake, d), [])
+        for k in range(4):                                                      # then catch_plan a minute apart: still never sent
+            for ex in list(eng2.ft.t):
+                eng2.ft.t[ex] = now + 61 * k
+            got = [w["sub"] for w in eng2.catch_plan(now + 61 * k)[0].get(d, [])]
+            if k < 3:
+                self.assertIn(sub, got, f"minute {k}: still wanted")
+        self.assertNotIn(sub, got, "3 counted minutes, never resting: parked 15 min")
+        self.assertGreater(eng2.catch_stuck.get(sub, 0), now + 61 * 3)
+
+    def test_c131_a_reanchor_goes_at_once_under_the_live_10_min_repeg_grace(self):
+        fake, eng, mk = self.rig()
+        self.addCleanup(setattr, f_engine, "REPEG_AWAY_S", f_engine.REPEG_AWAY_S)
+        f_engine.REPEG_AWAY_S = a_config.REPEG_AWAY_S                           # 600 s live (the legacy rig has 0)
+        self.live(eng)
+        a = mk[0]
+        self.market(eng, fake, a, 0.92, (0.85, 0.87, 0.86))
+        loop(eng, fake)
+        self.assertIn(("yes", 0.81, 1234), self.mine(eng, fake, a))
+        fake.px[a] = (0.88, 0.89, 0.885)                                       # b +3c
+        an = eng.catch_anchor[(a, "yes")]
+        eng.catch_anchor[(a, "yes")] = (an[0], an[1], an[2] - 301)
+        loop(eng, fake); loop(eng, fake)
+        self.assertIn(("yes", 0.82, 1219), self.mine(eng, fake, a), "re-anchored at once: L1 min(0.84, 0.82), not after 10 min")
+        self.assertNotIn(("yes", 0.81, 1234), self.mine(eng, fake, a))
+
     def test_the_cap_and_usable_floor_are_15k_and_the_v1_lots_stay_outside_as_carry_lots(self):
         fake, eng, mk = self.rig(writes_min=4)
         self.live(eng)
