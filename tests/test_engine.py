@@ -8135,6 +8135,23 @@ class C128Tests(EngineCase):
         loop(eng, fake)
         self.assertTrue(self.mine(eng, fake, ms[3]), "back after the 30 min")
 
+    def test_c130_a_counted_bid_stays_wanted_until_it_rests(self):
+        fake, eng, mk = self.rig(writes_min=3)
+        self.live(eng)
+        for ex in mk[:2]:
+            self.market(eng, fake, ex, 0.92, (0.85, 0.87, 0.86))
+        eng.catch_wt, eng.catch_paid = [], {}
+        rest = {(eng.ledger.orders.get(o["id"]) or {}).get("sub") for o in fake.open_orders()}
+        new = lambda p: sorted(w["sub"] for v in p.values() for w in v if w["sub"] not in rest)   # noqa: E731
+        now = time.time()
+        first = new(eng.catch_plan(now)[0])
+        self.assertEqual(len(first), 3, "3 writes a minute here: 3 new bids")
+        self.assertEqual(new(eng.catch_plan(now + 1)[0]), first, "not sent yet (queued): still wanted, not re-counted (C130: they were dropped)")
+        self.assertEqual(len(eng.catch_wt), 3)
+        for ex in list(eng.ft.t):
+            eng.ft.t[ex] = now + 61                                             # the PM quotes still fresh a minute on
+        self.assertEqual(new(eng.catch_plan(now + 61)[0]), first, "after a minute: counted again, the same 3 first")
+
     def test_the_cap_and_usable_floor_are_15k_and_the_v1_lots_stay_outside_as_carry_lots(self):
         fake, eng, mk = self.rig(writes_min=4)
         self.live(eng)

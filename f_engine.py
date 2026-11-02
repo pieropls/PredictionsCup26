@@ -518,6 +518,7 @@ class Engine:
         self.catch_now, self.catch_view, self.catch_hist, self.catch_block, self.catch_hold = {}, {}, {}, {}, {}   # C128 CATCH (docs/catch_nov2_spec.md)
         self.catch_post, self.catch_exit_px, self.catch_fill_t, self.catch_wt, self.catch_seen, self.catch_note = {}, {}, {}, [], set(), {}
         self.catch_anchor, self.catch_pending, self.catch_touch, self.catch_brake_until = {}, [], [], 0.0   # C129 CATCH v2: anchors, the touch-fill brake
+        self.catch_paid = {}                                # C130: sub -> (px, t) of a bid whose write was counted, wanted until it rests
         self.sale_anchor, self.sale_stats, self.foreign_actions = {}, collections.defaultdict(collections.Counter), {}   # C99: sale asks keep their place; foreign fills' direction
         self.sell_undercut, self.fmm_hour_prev, self.churn_t = {}, None, stamp()
         self.election, self.el_mode_cached, self.el_snap = None, "off", dict(cash=0.0, pos={})   # C102: election night (n_election v2)
@@ -6749,19 +6750,25 @@ class Engine:
             if o is not None and abs(float(o["price"]) - px) <= 1e-9:
                 q = int(o["qty"])                           # keep-place: the resting bid stays while the anchor holds
             elif mode == "live":
-                need = 1 if o is None else 2
-                if len(wt) + need > CATCH["writes_min"]:
-                    if o is None:
-                        continue
-                    px, q = float(o["price"]), int(o["qty"])   # no writes left this minute: the old bid stays
+                paid = self.catch_paid.get(sub)
+                if paid is not None and abs(paid[0] - px) <= 1e-9 and now - paid[1] < 60:
+                    pass                                    # C130: its write is counted: kept until it rests (dropped, the queued bid never went out)
                 else:
-                    wt += [now] * need
+                    need = 1 if o is None else 2
+                    if len(wt) + need > CATCH["writes_min"]:
+                        if o is None:
+                            continue
+                        px, q = float(o["price"]), int(o["qty"])   # no writes left this minute: the old bid stays
+                    else:
+                        wt += [now] * need
+                        self.catch_paid[sub] = (px, now)
             if q < MIN_QTY:
                 continue
             if mode == "live" and (sub not in self.catch_post or abs(self.catch_post[sub][0] - px) > 1e-9):
                 self.catch_post[sub] = (px, a[1])
             plan.setdefault(ex, []).append(dict(side=side, px=round(px, 3), qty=q, sub=sub, ttl=86400, fs=round(fs, 4), b=a[0], level=i + 1))
         self.catch_wt = wt
+        self.catch_paid = {k: v for k, v in self.catch_paid.items() if now - v[1] < 60}
         bids = [w for v in plan.values() for w in v]
         self.catch_cov.update(books=len(plan), bids=len(bids), notional=round(sum(w["px"] * w["qty"] for w in bids)))
         if mode == "shadow":
