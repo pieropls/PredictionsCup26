@@ -228,7 +228,7 @@ class EngineCase(unittest.TestCase):
         for k, v in (("FMM_ROOM", dict(a_config.FMM_ROOM, on=False)), ("CARRY_FIRST", {}), ("ELECTION_RESERVE", dict(a_config.ELECTION_RESERVE, on=False)), ("WIND_DOWN", dict(a_config.WIND_DOWN, on=False)), ("ELECTION", dict(a_config.ELECTION, on=False)), ("SELL_EV_MAX", 9.0), ("FMM_CF", dict(a_config.FMM_CF, on=False)), ("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
                      ("CORE_CAP_COST", 0.0), ("TRADING_HOLD_C", 99.0), ("CORE_LOCK_RET", -99.0), ("TRADING_INV_CAP", 1e12), ("TRADING_CASH_TARGET", 0.0),
                      ("NOEDGE", dict(ret=-99.0, low_fair=0.0, low_edge_c=0.0)), ("REPEG_AWAY_S", 0.0), ("GTC_TTL_S", 0), ("SM_REPEG_TICKS", 2), ("TM_REPEG_TICKS", 2), ("ROTATION", dict(a_config.ROTATION, on=False, sells={}, buys=[])), ("MANUAL_RESERVE", 0.0), ("FMM", dict(a_config.FMM, on=False)), ("DASH_EVERY_S", 0), ("ALLOC", dict(a_config.ALLOC, on=False)), ("FUND", dict(a_config.FUND, on=False)), ("CARRY", dict(a_config.CARRY, on=False)), ("GAPMM", dict(a_config.GAPMM, on=False)), ("NIGHT_SELL", dict(a_config.NIGHT_SELL, on=False)), ("CATCH", dict(a_config.CATCH, on=False)), ("FLIP", dict(a_config.FLIP, on=False)),
-                     ("FMM_C133", dict(a_config.FMM_C133, clip_sh=None, c103_off_until="", bid_sell_at="9999")),
+                     ("FMM_C133", dict(a_config.FMM_C133, clip_sh=None, c103_off_until="", bid_sell_at="9999", new_since=None)),
                      ("FM_GLIDE_START", "2099-01-01 00:00:00"), ("TM_GLIDE_START", "2099-01-01 00:00:00"), ("SM_GLIDE_START", "2099-01-01 00:00:00")):   # C133: the FM / TM / SM election glide (Nov 2 17:00) is a date bomb in the rigs   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
             self.addCleanup(setattr, f_engine, k, getattr(f_engine, k, None))
             setattr(f_engine, k, v)                         # C87 gates (real clock, no tape in the rigs, rig cash under BUFFER): off unless C87Tests set them
@@ -8030,7 +8030,7 @@ class C128Tests(EngineCase):
         base = fake.pnl()
         fake.pnl = lambda: dict(base, totalAccountValue=base["totalHoldingsValue"] + a_config.CASH_RESERVE + 60_000)
         f_engine.CATCH = dict(a_config.CATCH, on=True, until="2099-01-01 00:00:00", writes_min=10_000, bid_sell_at="2099-01-01 00:00:00",
-                              night_cash_at="2099-01-01 00:00:00", drop_min=10_000, drop_burst=10_000)
+                              night_cash_at="2099-01-01 00:00:00", drop_min=10_000, drop_burst=10_000, ca_test_at="2099-01-01 00:00:00", ca_gap_s=0.0)
         f_engine.CATCH.update(kw)
         eng = engine(fake)
         eng.ex.capacity = 6000.0
@@ -8310,14 +8310,43 @@ class C132Tests(EngineCase):
         n0 = len([o for o in fake.open_orders() if (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "catch"])
         f_engine.CATCH.update(until="2026-01-01 00:00:00", drop_min=20, drop_burst=3)   # Tue 13:45 passed
         eng.catch_note["drop_t"] = time.time() - 9.5
+        fills0 = len(eng.ledger.fills)
         loop(eng, fake); loop(eng, fake)
         self.assertEqual(eng.catch_mode(time.time()), "ended")
+        self.assertEqual(self.mine(eng, fake, b), [], "C134: b holds only CATCH entry bids: SIG's cancel-all, one write")
         n1 = len([o for o in fake.open_orders() if (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "catch"])
-        self.assertEqual(n1, n0 - 3, "no new catches; the resting bids come off at the paced rate (3 due here), not all at once")
-        self.assertTrue(self.mine(eng, fake, a, "catchexit"), "the exits run on after 13:45")
+        self.assertEqual(n1, n0 - 4 - 3, "a (an exit rests there) by single DELETEs at the paced rate (3 due here), not all at once")
+        self.assertTrue(self.mine(eng, fake, a, "catchexit"), "the exits run on after the end")
+        self.assertEqual(len(eng.ledger.fills), fills0, "no bid the cancel-all took is booked as a fill")
+        self.assertTrue(any("CATCH WIND-DOWN START" in str(e.get("text")) for e in eng.events))
         f_engine.CATCH.update(drop_min=10_000, drop_burst=10_000)
         loop(eng, fake); loop(eng, fake)
         self.assertEqual([o for o in fake.open_orders() if (eng.ledger.orders.get(o["id"]) or {}).get("layer") == "catch"], [], "all off in the end")
+        loop(eng, fake)
+        self.assertTrue(any("CATCH WIND-DOWN DONE" in str(e.get("text")) for e in eng.events), "the end logged")
+
+    def test_c134_the_live_cancel_all_test_two_catch_only_exchanges_one_write_each_then_reposted(self):
+        fake, eng, mk = self.rig()
+        f_engine.CATCH["skip_ex"] = tuple(str(b.ex) for b in eng.bots if b.ex not in mk[:3])
+        self.live(eng)
+        a, b, c = mk[:3]
+        for ex in (a, b, c):
+            self.market(eng, fake, ex, 0.92, (0.85, 0.87, 0.86))
+        loop(eng, fake); loop(eng, fake)
+        fake.manual_order(c, "yes", "buy", 0.10, 100)                          # c: a foreign (hand) order there: never cancel-all
+        loop(eng, fake)
+        fills0, w0 = len(eng.ledger.fills), len(fake._writes)
+        f_engine.CATCH["ca_test_at"] = "2026-01-01 00:00:00"
+        loop(eng, fake)
+        line = next(str(e.get("text")) for e in eng.events if str(e.get("text")).startswith("FINAL CANCEL-ALL TEST"))
+        self.assertIn("4 CATCH bids in one write", line)
+        self.assertEqual(sum(1 for x in (a, b) if not self.mine(eng, fake, x)), 2, "a and b cleared")
+        self.assertEqual(len(self.mine(eng, fake, c)), 4, "c (a hand order there) untouched")
+        self.assertTrue(any(o["ex"] == str(c) and o["price"] == 0.10 for o in fake.open_orders()), "the hand order stays")
+        self.assertEqual(len(eng.ledger.fills), fills0, "no phantom fills")
+        loop(eng, fake); loop(eng, fake); loop(eng, fake)
+        self.assertEqual(len(self.mine(eng, fake, a)), 4, "the plan re-posts them")
+        self.assertEqual(sum(1 for e in eng.events if str(e.get("text")).startswith("FINAL CANCEL-ALL TEST")), 1, "once")
 
     def test_a_c132_start_keeps_the_resting_bids_in_shadow_then_live_resizes_them_x2(self):
         fake, eng, mk = self.rig()
@@ -8354,10 +8383,12 @@ class C132Tests(EngineCase):
     def test_the_14_00_night_cash_line_once(self):
         fake, eng, mk = self.rig()
         self.live(eng)
-        f_engine.CATCH["night_cash_at"] = "2026-01-01 00:00:00"
+        f_engine.CATCH["night_cash_at"] = (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 10)), "2099-01-01 00:00:00")
         loop(eng, fake); loop(eng, fake)
         lines = [str(e.get("text")) for e in eng.events if str(e.get("text")).startswith("NIGHT CASH")]
         self.assertEqual(len(lines), 1, "once")
+        for k in ("CATCH ", "v1 ", "FLIP ", "FMM new ", "FMM old "):
+            self.assertIn(k, lines[0])
         self.assertIn("usable", lines[0]); self.assertIn("sellable now into SIG's bids at >= cost + 0.5c", lines[0])
 
 
@@ -8422,6 +8453,22 @@ class C133Tests(EngineCase):
         self.assertEqual(self.mine(eng, fake, a, "flipexit"), [("no", 0.15, 1183)], "after 30 min: max(fill + 0.5c, 0.815) = 0.85")
         self.assertIn("FLIP hourly", eng.flip_line(time.time()))
 
+    def test_c134_from_tue_08_00_no_entries_and_every_lot_asks_cost_plus_half_a_cent_or_the_ask_minus_half(self):
+        fake, eng, mk = self.rig()
+        b = mk[1]
+        self.book(eng, fake, b, 0.90, 0.84, 0.87)
+        self.live(eng)
+        fake.pos[b] = 1000; fake.avg_cost[b] = 0.85
+        eng.ledger.subbooks[b] = {f"flip:{b}:yes": 1000.0}; eng.lots_cache = (None, {})
+        eng.flip_fill_t[f"flip:{b}:yes"] = time.time()
+        loop(eng, fake)
+        eng.flip_exit_px = {}
+        self.assertEqual([x["px"] for x in eng.flip_exits(time.time())[b]], [0.865], "before 08:00, a fresh lot: max(fill + 1c, ask 0.87 - 0.5c)")
+        f_engine.FLIP["until"] = "2026-01-01 00:00:00"
+        fake.px[b] = eng.px[b] = (0.84, 0.858, 0.849)
+        self.assertEqual([x["px"] for x in eng.flip_exits(time.time())[b]], [0.855], "from 08:00: max(cost + 0.5c, ask 0.858 - 0.5c -> tick)")
+        self.assertEqual(eng.flip_plan(time.time())[0], {}, "no entries from 08:00")
+
     def test_the_stops_the_tue_12_00_end_and_its_lots_sold_into_the_bid(self):
         fake, eng, mk = self.rig()
         a, b = mk[:2]
@@ -8448,6 +8495,24 @@ class C133Tests(EngineCase):
         f_engine.FLIP["until"] = "2026-01-01 00:00:00"
         eng.ledger.subbooks[b] = {}
         self.assertEqual(eng.flip_plan(time.time())[0], {}, "no entries from Tue 12:00")
+
+    def test_c134_a_stop_is_logged_once_while_its_numbers_move(self):
+        fake, eng, mk = self.rig()
+        self.live(eng)
+        f_engine.CATCH["on"] = True
+        eng.controls.d["catch_c129"] = eng.controls.d["catch_c132"] = "2026-01-01 00:00:00"
+        eng.controls.set_layer("catch", "full", "test")
+        eng.manual_reserve_left = lambda: 0.0
+        n = lambda pre: len([e for e in eng.events if str(e.get("text")).startswith(pre)])   # noqa: E731
+        for u in (12_000.0, 11_500.0, 11_000.0, 12_900.0):
+            eng.cash_raw_hist = [a_config.CASH_RESERVE + u]
+            eng.catch_plan(time.time()); eng.flip_plan(time.time())
+        self.assertEqual(n("CATCH: usable"), 1, "CATCH's cash stop: one line, not one per usable reading")
+        self.assertEqual(n("FLIP: usable"), 1, "FLIP's: one line too")
+        eng.cash_raw_hist = [a_config.CASH_RESERVE + 60_000.0]
+        eng.catch_plan(time.time()); eng.flip_plan(time.time())
+        self.assertEqual(n("CATCH: usable"), 2, "... and one when it ends")
+        self.assertEqual(n("FLIP: inventory and usable inside"), 1)
 
     def test_fmm_comes_back_through_a_shadow(self):
         fake, eng, mk = FMMTests.rig(self)
@@ -8482,7 +8547,11 @@ class C133Tests(EngineCase):
         eng.ledger.tranches[sub] = dict(ex=a, side="yes", kind="fmm", state="open", ts=time.time(), t="x", avg=0.85, qty=1000.0)
         f_engine.GAPMM = dict(a_config.GAPMM, on=False)
         eng.track_fmm(time.time())
-        self.assertAlmostEqual(eng.fmm_view[a][0]["px"], 0.88, places=3, msg="before 12:00: its exit at the best ask")
+        self.assertAlmostEqual(eng.fmm_view[a][0]["px"], 0.875, places=3, msg="C134: a lot since the C133 push, first in queue at the best ask 0.88 - 0.5c")
+        eng.ledger.tranches[sub]["ts"] = time.time() - 3 * 86400                # an older lot: its own rule, the best ask
+        eng.track_fmm(time.time())
+        self.assertAlmostEqual(eng.fmm_view[a][0]["px"], 0.88, places=3, msg="an old lot (before the C133 push): at the best ask as before")
+        eng.ledger.tranches[sub]["ts"] = time.time()
         f_engine.FMM_C133["bid_sell_at"] = "2000-01-01 00:00:00"
         eng.track_fmm(time.time())
         self.assertAlmostEqual(eng.fmm_view[a][0]["px"], 0.87, places=3, msg="from Tue 12:00: into the bid 0.87 >= fill + 0.5c")

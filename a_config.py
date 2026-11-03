@@ -625,8 +625,10 @@ END_SWEEP = dict(on=True, start="2026-11-04 00:30:00", cushion=20_000.0, cushion
 # above fair - 3c), 1,000 notional, on the 60 widest books; on a fill an ask at once at max(fill + 1c, others' best ask - 0.5c), re-pegged down
 # with the best ask, never under fill + 0.5c; after 30 min max(fill + 0.5c, best ask - 0.5c). Cap 15k at cost; no new entry under 18k usable
 # (CATCH first); <= 8 writes a minute; entries until Tue 12:00 (then its lots sell into bids >= cost + 0.5c), off at 13:45 (exits run on).
-FMM_C133 = dict(clip_sh=250, clip_until="2026-11-03 10:00:00", c103_off_until="2026-11-03 12:00:00", bid_sell_at="2026-11-03 12:00:00")
-FLIP = dict(on=True, until="2026-11-03 12:00:00", off_at="2026-11-03 13:45:00", fair_lo=0.25, fair_hi=0.995, spread_min=0.02, spread_s=60,
+FMM_C133 = dict(clip_sh=250, clip_until="2026-11-03 10:00:00", c103_off_until="2026-11-03 12:00:00", bid_sell_at="2026-11-03 12:00:00",
+                new_since="2026-11-02 18:26:17")   # C134: lots from the C133 push ask max(cost + 0.5c, best ask - 0.5c), first in queue
+FLIP = dict(on=True, until="2026-11-03 08:00:00",   # C134 (Piero 00:50 Nov 3): entries until Tue 08:00 (was 12:00)
+             off_at="2026-11-03 13:45:00", fair_lo=0.25, fair_hi=0.995, spread_min=0.02, spread_s=60,
             spread_pull=0.015, books=60, notional=1_000.0, below_f=0.03, inv_cap=15_000.0, usable_min=18_000.0, writes_min=8,
             flip_c=0.01, flip_late_s=1800, flip_late_c=0.005, sub="flip:")
 # C128 CATCH (Piero 00:00 / 00:20 Nov 2, docs/catch_nov2_spec.md; the code freeze lifted for this item only); C129 v2 (Piero 11:15 Nov 2,
@@ -638,14 +640,15 @@ FLIP = dict(on=True, until="2026-11-03 12:00:00", off_at="2026-11-03 13:45:00", 
 # fair - 1c)); 15 min: max(fill + 2c, SIG's bid); 60 min: max(fill + 1c, SIG's bid)), sizes x2 (2,000 / 3,000 / 4,000 / 4,000), sides 0.25-0.995,
 # the 15k cap replaced by usable: bids off under 13k, back at 18k; v1's lots ask max(cost + 0.5c, SIG's bid); Tue 12:00 every lot sells into a bid
 # >= cost + 0.5c; Tue 13:45 the bids come off (exits run on); 14:00 the NIGHT CASH line.
-CATCH = dict(on=True, until="2026-11-03 13:45:00", fair_lo=0.25, fair_hi=0.995, px_min=0.05, max_below_f=0.10, sub="catch2:",
+CATCH = dict(on=True, until="2026-11-03 12:30:00", fair_lo=0.25, fair_hi=0.995, px_min=0.05, max_below_f=0.10, sub="catch2:",   # C134 (Piero 00:50 Nov 3): the stop 13:45 -> 12:30
              levels=((0.04, 0.10, 2_000.0), (0.08, 0.15, 3_000.0), (0.15, 0.25, 4_000.0), (None, 0.40, 4_000.0)),   # (b offset, f offset, notional)
              usable_off=13_000.0, usable_on=18_000.0, pm_age_s=60, news_c=0.03, news_s=600, stable_s=900, fill_hold_s=1800, writes_min=15,
              drop_min=20,                                                                     # a full stop cancels <= 20 bids a minute, L1 first (I6)
              anchor_s=300, anchor_b_c=0.02, anchor_f_c=0.01, sweep_c=0.02, sweep_freeze_s=60,   # re-anchor <= every 5 min on b >= 2c / f >= 1c; never mid-sweep
              brake_n=3, brake_s=600, brake_look_s=60, brake_wait_s=30, brake_pause_s=1800,      # 3 touch fills in 10 min -> paused 30 min (not killed)
              exit_c=0.03, exit_fair_c=0.01, exit_mid_s=900, exit_mid_c=0.02, exit_late_s=3600, exit_late_c=0.01, exit_move_c=0.01,
-             bid_sell_at="2026-11-03 12:00:00", night_cash_at="2026-11-03 14:00:00",
+             bid_sell_at="2026-11-03 12:00:00", night_cash_at=("2026-11-03 08:00:00", "2026-11-03 12:00:00", "2026-11-03 13:15:00", "2026-11-03 14:00:00"),
+             ca_gap_s=3.0, ca_min_writes=8, ca_test_at="2026-11-03 01:45:00", ca_test_n=2, done_by="2026-11-03 13:15:00",   # C134: SIG's cancel-all per exchange
              skip_ex=("840", "841", "842", "843",                                       # the 4 control markets (House / Senate D and R)
                       "855", "856", "947", "948",                                       # VWAP-mode flags (docs/resolution_audit.md): GA Governor, GA Senate
                       "910", "911", "959", "960",                                       # ME-02, Maine Senate (ranked choice)
