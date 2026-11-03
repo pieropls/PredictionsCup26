@@ -228,7 +228,8 @@ class EngineCase(unittest.TestCase):
         for k, v in (("FMM_ROOM", dict(a_config.FMM_ROOM, on=False)), ("CARRY_FIRST", {}), ("ELECTION_RESERVE", dict(a_config.ELECTION_RESERVE, on=False)), ("WIND_DOWN", dict(a_config.WIND_DOWN, on=False)), ("ELECTION", dict(a_config.ELECTION, on=False)), ("SELL_EV_MAX", 9.0), ("FMM_CF", dict(a_config.FMM_CF, on=False)), ("TM_ENTRY_STOPS", []), ("SM_QUOTE_REGIMES", ("BOUNCE", "MIXED", "QUIET", "TREND", "NEWS", "SWEEP")), ("TM_BUFFER_GATE", False),
                      ("CORE_CAP_COST", 0.0), ("TRADING_HOLD_C", 99.0), ("CORE_LOCK_RET", -99.0), ("TRADING_INV_CAP", 1e12), ("TRADING_CASH_TARGET", 0.0),
                      ("NOEDGE", dict(ret=-99.0, low_fair=0.0, low_edge_c=0.0)), ("REPEG_AWAY_S", 0.0), ("GTC_TTL_S", 0), ("SM_REPEG_TICKS", 2), ("TM_REPEG_TICKS", 2), ("ROTATION", dict(a_config.ROTATION, on=False, sells={}, buys=[])), ("MANUAL_RESERVE", 0.0), ("FMM", dict(a_config.FMM, on=False)), ("DASH_EVERY_S", 0), ("ALLOC", dict(a_config.ALLOC, on=False)), ("FUND", dict(a_config.FUND, on=False)), ("CARRY", dict(a_config.CARRY, on=False)), ("GAPMM", dict(a_config.GAPMM, on=False)), ("NIGHT_SELL", dict(a_config.NIGHT_SELL, on=False)), ("CATCH", dict(a_config.CATCH, on=False)), ("FLIP", dict(a_config.FLIP, on=False)),
-                     ("FMM_C133", dict(a_config.FMM_C133, clip_sh=None, c103_off_until="", bid_sell_at="9999"))):   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
+                     ("FMM_C133", dict(a_config.FMM_C133, clip_sh=None, c103_off_until="", bid_sell_at="9999")),
+                     ("FM_GLIDE_START", "2099-01-01 00:00:00"), ("TM_GLIDE_START", "2099-01-01 00:00:00"), ("SM_GLIDE_START", "2099-01-01 00:00:00")):   # C133: the FM / TM / SM election glide (Nov 2 17:00) is a date bomb in the rigs   # C88 / C89 / C93 rules off in the legacy rigs (their own test classes turn them on)
             self.addCleanup(setattr, f_engine, k, getattr(f_engine, k, None))
             setattr(f_engine, k, v)                         # C87 gates (real clock, no tape in the rigs, rig cash under BUFFER): off unless C87Tests set them
         for k in ("PNL_READ_S", "ORDERS_READ_S", "FILLS_READ_S", "POSITIONS_READ_S"):   # day 4 §4 / Oct 8 read caching have their own tests; the rigs (no realtime feed) read fresh each loop
@@ -7521,7 +7522,9 @@ class C103Tests(EngineCase):
         self.assertEqual(eng.wd_fmm_cap(self.ts("2026-10-31 12:00:00")), 5_000.0)
         self.assertFalse(eng.wd_after("rot_buys_stop", self.ts("2026-10-26 23:00:00")))
         self.assertTrue(eng.wd_after("rot_buys_stop", self.ts("2026-10-27 00:00:00")))
-        self.assertTrue(eng.wd_after("fmm_no_bids", self.ts("2026-11-01 12:00:00")))
+        self.assertFalse(eng.wd_after("fmm_no_bids", self.ts("2026-11-01 12:00:00")), "C133 (Piero 18:05 Nov 2): FMM back on until Tue 10:00")
+        self.assertTrue(eng.wd_after("fmm_no_bids", self.ts("2026-11-03 10:00:00")))
+        self.assertEqual(eng.wd_fmm_cap(self.ts("2026-11-02 18:00:00")), 25_000.0, "C133: cap 25k")
         self.assertFalse(eng.wd_after("entries_stop", self.ts("2026-11-02 16:59:00")))
         self.assertTrue(eng.wd_after("entries_stop", self.ts("2026-11-02 17:00:00")))
 
