@@ -437,6 +437,12 @@ class MarketBot:
             q = min(abs(subs.get(x["sub"], 0)), x.get("qty", float("inf")))   # C132: never another sub-book's shares
             if q >= MIN_QTY:
                 reduce_buy(x["side"], x["px"], int(q), "catchexit", x["sub"], 86400, band=0.0, a2=False)
+        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], 1.0, "flip", sub=x["sub"], ttl=x.get("ttl") or 86400)   # C133 FLIP: first-in-queue bids
+                for x in (s.get("flip") or [])]
+        for x in s.get("flip_exits") or []:                  # C133: a FLIP lot's flip ask (the engine's price, >= fill + 0.5c)
+            q = min(abs(subs.get(x["sub"], 0)), x.get("qty", float("inf")))
+            if q >= MIN_QTY:
+                reduce_buy(x["side"], x["px"], int(q), "flipexit", x["sub"], 86400, band=0.0, a2=False)
         for x in s.get("fmm_exits") or []:
             q = abs(subs.get(x["sub"], 0))
             if q >= MIN_QTY:

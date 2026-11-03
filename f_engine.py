@@ -76,7 +76,7 @@ from a_config import (SCALP_MARKETS, SCALP_PILOT_MARKETS, SCALP_BUY_EDGE, SCALP_
                      CORE_CAP_COST, CORE_SWAP_C, CORE_NEAR_FAIR_C, TRADING_HOLD_C, CORE_EARLY_CLOSE_PT, CORE_EARLY_BONUS, CORE_EVERY_S, CORE_SKIP_SUBS, PAUSE_KINDS,
                      PM_STALE_S, ENGINE_ERRORS_10M, API_429_STORM_10M, I2_RESUME_S, CASH_FLOOR_RESUME, BOOK_SCAN_EVERY_S, RECYCLE_DEPTH_HOUR, SCOREBOARD_EVERY_S, SCOREBOARD_TARGET_DAY,
                      TRADING_CASH_TARGET, TRADING_CASH_HYST, CORE_LOCK_RET, TRADING_INV_CAP, ROTATION_MARKETS_C89,
-                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM, SELL_HOLD, SELL_KEEP_LAYERS, CARRY_BIDSELL, SELL_EV_MAX, FMM_CF, ENGINE_ERR_EXTERNAL, ENGINE_ERR_RESUME_S, ELECTION, ELECTION_RESERVE, WIND_DOWN, FMM_ROOM, CARRY_FIRST, FMM_OLD_LOT_S, ROT_REPEG_UP_C, END_SWEEP, CATCH,
+                     EDGE_AB_CAP, EDGE_PROMOTE_H, EDGE_ROLLBACK_H, H1_TTL_S, H1_BEHIND_TICKS, H1_BEHIND_S, H1_GATE, PAPER_HALF_AT_PRICE, PAPER_MAX_AGE_S, H1_SM_UNIVERSE, H3, H4, CASH_PLAN_1735, H1_JUDGE_WINDOW, DEDUP_SINCE, HOLD_RET, NOEDGE, GTC_TTL_S, REPEG_AWAY_TICKS, REPEG_AWAY_S, H1_TEST, ROTATION, ROT_TTL_S, MANUAL_RESERVE, FMM, DASH_EVERY_S, ALLOC, FUND, CARRY, NIGHT_SELL, SALE_REPEG_S, GAPMM, SELL_HOLD, SELL_KEEP_LAYERS, CARRY_BIDSELL, SELL_EV_MAX, FMM_CF, ENGINE_ERR_EXTERNAL, ENGINE_ERR_RESUME_S, ELECTION, ELECTION_RESERVE, WIND_DOWN, FMM_ROOM, CARRY_FIRST, FMM_OLD_LOT_S, ROT_REPEG_UP_C, END_SWEEP, CATCH, FLIP, FMM_C133,
                       REBUILD_FREE, REBUILD_GAP1, REBUILD_GAP2, REBUILD_MARGIN, REBUILD_MARGIN_GAP,
                       WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE)
 TM_BUFFER_GATE = True             # C87: module switch for the TM BUFFER pause (the test rigs turn it off; C87Tests turn it on)
@@ -143,7 +143,7 @@ def host_id():
 
 # ====================================================================================================== controls
 STARTUP_HOLD_S = 120          # optional reads (sampler, depth, fat-finger queues) wait 2 min after a start: every restart's burst gave a 429 (Oct 8)
-LAYERS = ["position", "recycler", "release", "mm", "scalp", "tm", "sm", "rot", "fmm", "carry", "touch", "wall", "sleeve", "swing", "fm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders", "catch"]
+LAYERS = ["position", "recycler", "release", "mm", "scalp", "tm", "sm", "rot", "fmm", "carry", "touch", "wall", "sleeve", "swing", "fm", "ladder", "pairs", "sniper", "fatfinger", "dump", "longshot", "leaders", "catch", "flip"]
 TMM_ENABLED = True              # afternoon D-C: the engine's MM is the turnover MM (False: classic MM v2, tests only)
 LAYER_STATES = ("off", "pilot", "full")
 
@@ -524,6 +524,8 @@ class Engine:
             ex_, side_, b_, f_, t_ = row[:5]                # C131: anchors survive a restart (else every resting bid re-prices at once)
             self.catch_anchor[(ex_, side_)] = (b_, f_, t_, row[5] if len(row) > 5 else None)   # C132: + SIG's ask (the pre-sweep mid)
         self.catch_drop, self.catch_fill_mid = [], {}       # C132: the paced stop's cancels (I6); each fill's pre-sweep SIG mid (its first exit)
+        self.flip_now, self.flip_view, self.flip_wide, self.flip_wt, self.flip_paid, self.flip_exit_px = {}, {}, {}, [], {}, {}   # C133 FLIP
+        self.flip_fill_t, self.flip_seen, self.flip_note = {}, set(), {}
         self.sale_anchor, self.sale_stats, self.foreign_actions = {}, collections.defaultdict(collections.Counter), {}   # C99: sale asks keep their place; foreign fills' direction
         self.sell_undercut, self.fmm_hour_prev, self.churn_t = {}, None, stamp()
         self.election, self.el_mode_cached, self.el_snap = None, "off", dict(cash=0.0, pos={})   # C102: election night (n_election v2)
@@ -708,9 +710,9 @@ class Engine:
     MARKET_LAYERS = {"exit": "recycler", "recycle": "recycler", "take": "sniper", "mm": "mm",   # "touch" is the day-6 layer (the old MM touch quote is gone)
                      "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs",
                      "release": "release", "fatfinger": "fatfinger", "dump": "dump", "dumpexit": "dump",
-                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall", "sleeve": "sleeve", "swing": "swing", "swingsell": "swing", "fm": "fm", "fmexit": "fm", "tm": "tm", "tmexit": "tm", "rot": "rot", "rotexit": "rot", "fmm": "fmm", "fmmtake": "fmm", "fmmexit": "fmm", "fmmhedge": "fmm", "carry": "carry", "sm": "sm", "smexit": "sm", "catch": "catch", "catchexit": "catch",   # C128
+                     "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall", "sleeve": "sleeve", "swing": "swing", "swingsell": "swing", "fm": "fm", "fmexit": "fm", "tm": "tm", "tmexit": "tm", "rot": "rot", "rotexit": "rot", "fmm": "fmm", "fmmtake": "fmm", "fmmexit": "fmm", "fmmhedge": "fmm", "carry": "carry", "sm": "sm", "smexit": "sm", "catch": "catch", "catchexit": "catch", "flip": "flip", "flipexit": "flip",   # C128
                      "callsnipe": "election", "callexit": "election", "settle": "election", "drift": "election", "driftexit": "election"}   # C102
-    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit", "touchexit", "wallexit", "tmexit", "fmexit", "swingsell", "smexit", "rotexit", "fmmexit", "callexit", "driftexit", "catchexit"}
+    REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit", "touchexit", "wallexit", "tmexit", "fmexit", "swingsell", "smexit", "rotexit", "fmmexit", "callexit", "driftexit", "catchexit", "flipexit"}
 
     def gate(self, b, wants):
         """Layer flags (data/overrides.json): a want survives only if its layer is on and allowed on this market. Pause
@@ -888,6 +890,7 @@ class Engine:
                 self.touch_fill_events(new_f)
                 self.wall_fill_events(new_f)
                 self.catch_fill_events(new_f)                   # C128
+                self.flip_fill_events(new_f)                    # C133
                 for f_ in new_f:                            # C93 item 3: FILLED is logged from SIG's fills only (cash freed counts here, never at POSTED)
                     if f_.get("layer") == "release" and f_.get("action") == "buy":
                         k_ = self.fill_key(f_)
@@ -1083,6 +1086,13 @@ class Engine:
             except Exception as err2:
                 self.event("CATCH", f"CATCH plan error {err!r}; the stop failed too: {err2!r}")
         try:
+            self.flip_now, self.flip_view = self.flip_plan(now)   # C133 FLIP: first-in-queue bids and their flips
+        except Exception as err:
+            self.flip_now = {}                              # an error stops FLIP's entries only (its last flips stay)
+            if self.controls.kill("flip", f"plan error {err!r}"):
+                msg = f"FLIP STOPPED: plan error {err!r}; its entries cancelled, its flips and every other layer run on"
+                self.event("FLIP", msg); self.night.line(msg)
+        try:
             self.track_touch(now)
             self.touch_now = self.touch_plan(now, cash, used)
         except Exception as err:
@@ -1154,7 +1164,7 @@ class Engine:
                     if oid not in open_ids:
                         self.drift_since.pop(oid, None)
             for w in (wants if GTC_TTL_S else ()):          # C93 item 3: GTC — every seller, exit and TM / SM quote rests until re-pegged
-                if w.get("reduce") or w.get("layer") in ("tm", "sm", "release", "rot", "fmm", "fmmhedge", "carry", "catch"):   # (not fmmtake: a sweep take keeps its 120 s)
+                if w.get("reduce") or w.get("layer") in ("tm", "sm", "release", "rot", "fmm", "fmmhedge", "carry", "catch", "flip"):   # (not fmmtake: a sweep take keeps its 120 s)
                     w["ttl"] = GTC_TTL_S
             kept, cancels, places = bots.reconcile(wants, mine.get(b.name, []))
             cancels, places = self.repeg_grace(b, cancels, places, now)
@@ -1761,6 +1771,7 @@ class Engine:
                     rot=self.rot_now.get(b.ex) or [], rot_exits=self.rot_view.get(b.ex, []),
                     fmm=self.fmm_now.get(b.ex) or [], fmm_exits=self.fmm_view.get(b.ex, []), carry=self.carry_now.get(b.ex) or [],
                     catch=self.catch_now.get(b.ex) or [], catch_exits=self.catch_view.get(b.ex, []),
+                    flip=self.flip_now.get(b.ex) or [], flip_exits=self.flip_view.get(b.ex, []),
                     drift=self.drift_now.get(str(b.ex)) or [], drift_exits=self.drift_view.get(str(b.ex), []), callexit=self.callexit_now.get(str(b.ex)) or [],
                     subs=dict(self.ledger.subbooks.get(b.ex, {})), layers=self.market_layers(b.ex),
                     paused=self.controls.paused, blocked=self.blocked_sides(b.ex),
@@ -3949,6 +3960,8 @@ class Engine:
             try:
                 if CATCH.get("on") and self.controls.d.get("catch_c128"):
                     self.night.line(self.catch_line(now))   # C128: the CATCH hourly line
+                if FLIP.get("on") and self.controls.d.get("flip_c133"):
+                    self.night.line(self.flip_line(now))    # C133: the FLIP hourly line
             except Exception as err:
                 self.event("CATCH", f"CATCH hourly line failed: {err!r}")
             if self.h1_test_day(now) and (self.controls.d.get("h1_test") or {}).get("opened"):
@@ -4743,7 +4756,8 @@ class Engine:
         """Free cash for FMM: cash - 5,000 - Piero's reserve left (2,000 for FMM: item 4), less the buys filled since the last cash read."""
         t0 = self.pnl_read_t
         self.fmm_unread = [(t, n) for t, n in self.fmm_unread if t >= t0]
-        return self.engine_bid_room() + self.fmm_reserve_release() - sum(n for _, n in self.fmm_unread)
+        c103 = self.el_reserve(time.time()) if time.strftime("%Y-%m-%d %H:%M:%S") < FMM_C133.get("c103_off_until", "") else 0.0
+        return self.engine_bid_room() + self.fmm_reserve_release() + c103 - sum(n for _, n in self.fmm_unread)   # C133: no C103 until Tue 12:00
 
     def fmm_refill_measure(self):
         """C106 (Piero 02:50 Oct 22 item 2): the refill latency = the sweep's receipt on the feed -> the refill order placed (the ledger's
@@ -5024,6 +5038,8 @@ class Engine:
             if not allow_new:
                 continue
             clip = max(mclip, budget / 4 / px)
+            if FMM_C133.get("clip_sh") and time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) < FMM_C133["clip_until"]:
+                clip = float(FMM_C133["clip_sh"])           # C133 (Piero 18:05 Nov 2): 250-share clips on all books until Tue 10:00
             if w["k"] == 0 and breadth is not None and breadth < mclip:
                 clip = max(float(FMM["min_new"]), breadth)      # C104: breadth first
             lim = [clip, room / px]
@@ -5101,6 +5117,10 @@ class Engine:
             rp = (getattr(self, "el_recycle", None) or {}).get((str(ex), sub))
             if rp is not None:
                 px = max(floor_, min(px, rp))                # C117: wave recycling sells the lot into the bid (its own exit, no second ask)
+            if time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) >= FMM_C133.get("bid_sell_at", "9"):
+                ob = self.catch_others_bid(ex, side)        # C133: from Tue 12:00 an FMM lot sells into a bid >= its floor (fill + 0.5c)
+                if ob is not None and ob >= floor_ - 1e-9:
+                    px = min(px, ob)
             self.fmm_view.setdefault(ex, []).append(dict(sub=sub, side=side, px=min(px, 0.99), avg=avg))
 
     def gap6(self, now):
@@ -6906,6 +6926,181 @@ class Engine:
         return (f"NIGHT CASH: usable {usable:,.0f}; still held from CATCH {held['v2'][1]:,.0f} at cost ({held['v2'][0]} lots), v1 {held['v1'][1]:,.0f} "
                 f"({held['v1'][0]}); sellable now into SIG's bids at >= cost + 0.5c {sell[1]:,.0f} ({sell[0]} lots); unsold lots stay held (+EV to "
                 f"settlement, the night's recycling can sell them after calls)")
+
+    # ---- C133 FLIP (Piero 18:05 Nov 2, docs/flip_nov2.md): Piero's fill-then-flip — first in queue on one side of a wide book; on a fill,
+    # at once first in queue on the other side. Lots in 'flip:{ex}:{side}' sub-books; the control 'flip' (pilot = shadow, full = live, off).
+    def flip_plan(self, now):
+        """-> ({ex: [entry bid]}, {ex: [flip ask]}). Entries: sides with a fresh PM fair 0.25-0.995 (CATCH's exclusions, its news guard, the
+        poll-close pulls), others' spread >= 2c for 60 s (pulled under 1.5c), the 60 widest, one bid at others' best bid + 0.5c (<= fair - 3c,
+        under our own asks), 1,000 notional; none while the side's lot is held, at >= 15k inventory at cost or under 18k usable; <= 8 writes a
+        minute; until Tue 12:00 (off at 13:45)."""
+        c = self.controls
+        if FLIP.get("on") and not c.d.get("flip_c133"):
+            c.d["flip_c133"] = stamp()
+            c.set_layer("flip", "pilot", "C133 FLIP starts in shadow: the entries are logged, nothing sent (full = live, off = the kill switch)")
+        exits = self.flip_exits(now)
+        t_s, st = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)), c.state("flip")
+        mode = ("off" if not FLIP.get("on") or st == "off" or t_s >= FLIP["off_at"] else "ended" if t_s >= FLIP["until"]
+                else "live" if st == "full" else "shadow")
+        if mode != self.flip_note.get("mode"):
+            msg = f"FLIP mode {self.flip_note.get('mode') or 'start'} -> {mode}"
+            self.event("FLIP", msg); self.night.line(msg)
+            self.flip_note["mode"] = mode
+        lots = self.catch_lots(FLIP["sub"])
+        inv = sum(q * (hi or 0.0) for _, _, q, hi in lots.values())
+        usable = (min(self.cash_raw_hist) if getattr(self, "cash_raw_hist", None) else 0.0) - CASH_RESERVE - self.manual_reserve_left()
+        stop = (f"inventory {inv:,.0f} at cost >= {FLIP['inv_cap']:,.0f}" if inv >= FLIP["inv_cap"] - 1e-9 else
+                f"usable {usable:,.0f} < {FLIP['usable_min']:,.0f} (CATCH first)" if usable < FLIP["usable_min"] else None)
+        if stop != self.flip_note.get("stop"):
+            if stop or self.flip_note.get("stop"):
+                msg = f"FLIP: {stop}: no new entries" if stop else "FLIP: inventory and usable inside their limits: entries allowed again"
+                self.event("FLIP", msg); self.night.line(msg)
+            self.flip_note["stop"] = stop
+        self.flip_cov = dict(mode=mode, books=0, inv=round(inv), usable=round(usable))
+        if mode in ("off", "ended") or stop:
+            return {}, exits
+        own_ask, rest = {}, {}
+        for o in self.open:
+            if o["action"] != "buy" or o["id"] in self.ex.cancelling:
+                continue
+            own_ask[(o["ex"], "no" if o["side"] == "yes" else "yes")] = min(own_ask.get((o["ex"], "no" if o["side"] == "yes" else "yes"), 9.0), 1 - o["price"])
+            rec = self.ledger.orders.get(o["id"]) or {}
+            if rec.get("layer") == "flip":
+                rest[rec.get("sub")] = o
+        held_subs = {sub for sub in lots}
+        cands = []
+        for b in self.bots:
+            ex = b.ex
+            if b.kind != "market" or ex in self.manual_ex or str(ex) in CATCH["skip_ex"] or not c.allows(ex, "flip") or self.ex.is_frozen(ex):
+                continue
+            f = self.fair.get(ex)
+            if f is None or now - self.ft.t.get(ex, 0) > CATCH["pm_age_s"] or self.catch_block.get(ex, 0) > now \
+                    or (self.election is not None and not self.election.entries_allowed(str(ex), now)):
+                continue
+            held = (self.book.get(ex) or {}).get("pos", 0)
+            for side, fs in (("yes", f), ("no", 1 - f)):
+                sub = f"{FLIP['sub']}{ex}:{side}"
+                if (not FLIP["fair_lo"] - 1e-9 <= fs <= FLIP["fair_hi"] + 1e-9 or ((held < 0) if side == "yes" else (held > 0))
+                        or SELL_HOLD.get(str(ex)) not in (None, side) or sub in held_subs):
+                    continue
+                bid, ask = self.catch_others_bid(ex, side), self.fmm_others_ask(ex, side)
+                spread = None if bid is None or ask is None else ask - bid
+                k = (ex, side)
+                if spread is None or spread < (FLIP["spread_pull"] if sub in rest else FLIP["spread_min"]) - 1e-9:
+                    self.flip_wide.pop(k, None)
+                    continue
+                t0 = self.flip_wide.setdefault(k, now)
+                if sub not in rest and now - t0 < FLIP["spread_s"]:
+                    continue
+                px = math.floor(round(min(bid + TICK, fs - FLIP["below_f"]) / TICK, 6)) * TICK
+                if px < MB_MIN_PX - 1e-9 or px >= min(ask, own_ask.get(k, 9.0)) - 1e-9:
+                    continue
+                cands.append((-spread, ex, side, sub, round(px, 3), fs))
+        plan, wt = {}, [t for t in self.flip_wt if t >= now - 60]
+        for _, ex, side, sub, px, fs in sorted(cands, key=lambda x: (x[3] not in rest, x[0]))[:int(FLIP["books"])]:   # the resting ones, then the widest
+            o, q = rest.get(sub), int(FLIP["notional"] / px)
+            if o is not None and abs(float(o["price"]) - px) <= 1e-9:
+                q = int(o["qty"])
+            elif mode == "live":
+                paid = self.flip_paid.get(sub)
+                if not (paid is not None and abs(paid[0] - px) <= 1e-9 and now - paid[1] < 60):
+                    need = 1 if o is None else 2
+                    if len(wt) + need > FLIP["writes_min"]:
+                        if o is None:
+                            continue
+                        px, q = float(o["price"]), int(o["qty"])
+                    else:
+                        wt += [now] * need
+                        self.flip_paid[sub] = (px, now)
+            if q >= MIN_QTY:
+                plan.setdefault(ex, []).append(dict(side=side, px=round(px, 3), qty=q, sub=sub, ttl=86400, fs=round(fs, 4)))
+        self.flip_wt, self.flip_paid = wt, {k: v for k, v in self.flip_paid.items() if now - v[1] < 120}
+        bids = [w for v in plan.values() for w in v]
+        self.flip_cov.update(books=len(bids), notional=round(sum(w["px"] * w["qty"] for w in bids)))
+        if mode == "shadow":
+            if now - self.flip_note.get("shadow_t", 0) >= 150:
+                self.flip_note["shadow_t"] = now
+                top = sorted(bids, key=lambda w: w["fs"] - w["px"], reverse=True)[:5]
+                msg = (f"FLIP SHADOW (nothing sent): {len(bids)} books would be quoted, {self.flip_cov['notional']:,.0f} notional; usable {usable:,.0f}; e.g. "
+                       + "; ".join(f"{self.name(w['sub'].split(':')[1])} {w['side'].upper()} {w['px']:.3f} x {w['qty']:,} (fair {w['fs']:.3f})" for w in top))
+                self.event("FLIP", msg); self.night.line(msg)
+            return {}, exits
+        return plan, exits
+
+    def flip_fill_time(self, sub):
+        t = self.flip_fill_t.get(sub)
+        if t is None:
+            ts = [f["t"] for f in list(self.ledger.fills) if f.get("layer") == "flip" and (self.ledger.orders.get(str(f.get("order") or "")) or {}).get("sub") == sub]
+            t = self.flip_fill_t[sub] = time.mktime(time.strptime(max(ts), "%Y-%m-%d %H:%M:%S")) if ts else time.time()
+        return t
+
+    def flip_exits(self, now):
+        """Each FLIP lot's ask: max(fill + 1c, others' best ask - 0.5c) at once, re-pegged down with the best ask (never up), never under fill
+        + 0.5c; after 30 min max(fill + 0.5c, best ask - 0.5c); from Tue 12:00 max(cost + 0.5c, others' best bid) (sold into it). They run
+        after 13:45 too; unsold lots stay held."""
+        if not FLIP.get("on"):
+            return {}
+        bid_sell = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) >= CATCH.get("bid_sell_at", "9")
+        out = {}
+        for sub, (ex, side, q, hi) in self.catch_lots(FLIP["sub"]).items():
+            qq = self.catch_qty(ex, side, sub, q)
+            if hi is None or qq < MIN_QTY:
+                continue
+            late = now - self.flip_fill_time(sub) >= FLIP["flip_late_s"]
+            if bid_sell:
+                ob = self.catch_others_bid(ex, side)
+                stage, tgt = "bid", max(hi + RULE0_MARGIN, ob if ob is not None else 0.0)
+            else:
+                oa = self.fmm_others_ask(ex, side)
+                stage = "late" if late else "flip"
+                tgt = max(hi + (FLIP["flip_late_c"] if late else FLIP["flip_c"]), (oa - TICK) if oa is not None else 0.0)
+            tgt = math.ceil(round(max(tgt, hi + RULE0_MARGIN) / TICK, 6)) * TICK
+            prev = self.flip_exit_px.get(sub)
+            px = prev[0] if prev is not None and prev[1] == stage and stage != "bid" and tgt > prev[0] - 1e-9 else tgt   # down with the ask, never up
+            self.flip_exit_px[sub] = (px, stage)
+            if px <= MB_MAX_PX + 1e-9:
+                out.setdefault(ex, []).append(dict(side=side, px=round(px, 3), sub=sub, qty=qq))
+        return out
+
+    def flip_fill_events(self, fills):
+        """Each FLIP fill once: an entry's (the flip ask goes at once) or a flip's (realized, fill-to-flip time)."""
+        for f in fills:
+            if f.get("layer") not in ("flip", "flipexit"):
+                continue
+            k = self.fill_key(f)
+            if k in self.flip_seen:
+                continue
+            self.flip_seen.add(k)
+            sub = (self.ledger.orders.get(str(f.get("order") or "")) or {}).get("sub") or ""
+            if f["layer"] == "flip":
+                self.flip_fill_t[sub] = time.time()
+                self.flip_exit_px.pop(sub, None)
+                fs = self.side_fair(f["ex"], f["side"])
+                msg = (f"FLIP FILL {self.name(f['ex'])} {f['side'].upper()} {f['qty']:,.0f} at {f['price']:.3f}" + (f" (fair {fs:.3f})" if fs is not None else "")
+                       + "; its flip ask goes at once")
+            else:
+                px_s = round(1 - f["price"], 3)
+                msg = (f"FLIP DONE {self.name(f['ex'])} sold {('NO' if f['side'] == 'yes' else 'YES')} {f['qty']:,.0f} at {px_s:.3f} ({sub}) "
+                       f"{(time.time() - self.flip_fill_time(sub)) / 60:.0f} min after the fill: realized {(f.get('realized') or 0):+,.0f}")
+            self.event("FLIP", msg); self.night.line(msg)
+
+    def flip_line(self, now):
+        """The hourly FLIP line: books quoted, fills, flips done, realized, inventory, the average fill-to-flip time."""
+        since = str(self.controls.d.get("flip_c133") or "")
+        fills = [f for f in list(self.ledger.fills) if f.get("layer") in ("flip", "flipexit") and str(f.get("t") or "") >= since]
+        ins, outs = [f for f in fills if f["layer"] == "flip"], [f for f in fills if f["layer"] == "flipexit"]
+        sub_of = lambda f: (self.ledger.orders.get(str(f.get("order") or "")) or {}).get("sub")   # noqa: E731
+        waits = []
+        for f in outs:
+            t_in = [x["t"] for x in ins if sub_of(x) == sub_of(f) and x["t"] <= f["t"]]
+            if t_in:
+                waits.append(time.mktime(time.strptime(f["t"], "%Y-%m-%d %H:%M:%S")) - time.mktime(time.strptime(max(t_in), "%Y-%m-%d %H:%M:%S")))
+        lots = self.catch_lots(FLIP["sub"]); cov = getattr(self, "flip_cov", None) or {}
+        resting = [o for o in self.open if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "flip"]
+        return (f"FLIP hourly ({cov.get('mode', '?')}): {len(resting)} books quoted ({sum(o['qty'] * o['price'] for o in resting):,.0f} notional); since the start "
+                f"{len(ins)} fills ({sum(f['qty'] * f['price'] for f in ins):,.0f} at cost), {len(outs)} flips done ({sum(f['qty'] for f in outs):,.0f} shares), "
+                f"realized {sum(f.get('realized') or 0 for f in outs):+,.0f}; inventory {sum(q * (hi or 0) for _, _, q, hi in lots.values()):,.0f} at cost "
+                f"({len(lots)} lots, cap {FLIP['inv_cap']:,.0f}); fill-to-flip {statistics.mean(waits) / 60 if waits else 0:.0f} min average ({len(waits)}); usable {cov.get('usable', 0):,}")
 
     def catch_exits(self, now):
         """C132 (v3) exits -> {ex: [exit]}, anchored on SIG's book (v2's fair - 2c never filled: SIG trades 7-10c under PM fair). A v2/v3 lot
@@ -9773,7 +9968,7 @@ class Engine:
             for sub, v in subs_iter:
                 if sub == "inventory" and fresh_inv:
                     continue
-                if v * q <= 0 or sub.startswith(("manual", "pairset:", "fmm:", "fmmlock:")) or (sub.startswith(("catch2:", "catch:")) and (str(ex), sub) not in rec) or (not allow_all and (sub.startswith(("sleeve:", "swing:")) or sub in res_subs)) or ((str(ex), sub) in self.core_set and str(ex) not in rot_left and str(ex) not in fund_left and (str(ex), sub) not in rec and (str(ex), sub) not in conv):
+                if v * q <= 0 or sub.startswith(("manual", "pairset:", "fmm:", "fmmlock:")) or (sub.startswith(("catch2:", "catch:", "flip:")) and (str(ex), sub) not in rec) or (not allow_all and (sub.startswith(("sleeve:", "swing:")) or sub in res_subs)) or ((str(ex), sub) in self.core_set and str(ex) not in rot_left and str(ex) not in fund_left and (str(ex), sub) not in rec and (str(ex), sub) not in conv):
                     continue                                # never a core lot (unless Piero named the market for the rotation, C94), his manual / pair / sleeve lots, or the RI reservoir; C128b / C129: a CATCH v2 lot has its own exit (only the night's wave recycling sells it here); C132: v1's too
                 key = f"{ex}|{sub}"
                 sig_avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
@@ -11478,7 +11673,7 @@ class Engine:
             last = E.close.get(E.race(ex)) if E is not None else None
             early_fav = fs >= float(ELECTION_RESERVE["fav_min"]) - 1e-9 and last is not None and last <= early
             for sub, v in (self.ledger.subbooks.get(ex) or {}).items():
-                if v * q <= 0 or abs(v) < MIN_QTY or str(sub).startswith(("manual", "pairset:", "fmm:", "fmmlock:", "rot:", "callsnipe:", "drift:", "sleeve:", "swing:", "catch2:", "catch:")) or (ex, sub) in keep or (ex, sub) in keep_e:
+                if v * q <= 0 or abs(v) < MIN_QTY or str(sub).startswith(("manual", "pairset:", "fmm:", "fmmlock:", "rot:", "callsnipe:", "drift:", "sleeve:", "swing:", "catch2:", "catch:", "flip:")) or (ex, sub) in keep or (ex, sub) in keep_e:
                     continue
                 avg = float((self.ledger.tranches.get(sub) or {}).get("avg") or ((b.get("row") or {}).get("avgCost")) or 0)
                 fl = bots.tick_up(round(avg + RULE0_MARGIN, 6))
@@ -12629,7 +12824,7 @@ class Engine:
                         continue                            # never up; down only after the others' best ask sat below ours >= 5 min
                     keep_c.append(o)
                     continue
-            if o.get("layer") in ("fmmexit", "catch", "catchexit"):   # fmm_spec v2 §2.3: an FMM exit follows the best ask at once; C131: a CATCH
+            if o.get("layer") in ("fmmexit", "catch", "catchexit", "flip", "flipexit"):   # C133: FLIP's own re-peg rules   # fmm_spec v2 §2.3: an FMM exit follows the best ask at once; C131: a CATCH
                 keep_c.append(o)                            # re-anchor too (its own rule: <= every 5 min, on b >= 2c / f >= 1c); C132: a CATCH exit's stage
                 continue
             if o.get("id") and want_keys.get(k):

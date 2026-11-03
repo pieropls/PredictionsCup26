@@ -290,7 +290,7 @@ TRADING_HOLD_C = 0.03           # a trading lot >= 3c from fair is held (no +0.5
 CORE_EARLY_CLOSE_PT = "17:00"   # prefer races whose polls close by 17:00 PT (data/election/poll_close.json first_close_pt) ...
 CORE_EARLY_BONUS = 0.005        # ... +0.5 pp of edge-% in the core ranking
 CORE_EVERY_S = 60
-CORE_SKIP_SUBS = ("manual", "wall:", "swing:", "sleeve:", "pairset:", "recycle:", "catch:", "catch2:")   # Piero's position orders and pair sets are neither book; C128 / C129: nor CATCH's lots (core never swaps one in)
+CORE_SKIP_SUBS = ("manual", "wall:", "swing:", "sleeve:", "pairset:", "recycle:", "catch:", "catch2:", "flip:")   # Piero's position orders and pair sets are neither book; C128 / C129: nor CATCH's lots (core never swaps one in)
 PAUSE_KINDS = ("cash_floor", "i2_breach", "api_errors", "pm_stale", "engine_errors", "fills_blind", "travel", "cash_short", "stop_pull")   # the only automatic pauses; every P&L stop is an alert
 PM_STALE_S = 120                # Polymarket fair older than 2 min -> pause (resume when fresh)
 ENGINE_ERRORS_10M = 5           # >= 5 ERR events in 10 min -> pause (resume after 10 clean minutes)
@@ -582,9 +582,11 @@ ELECTION_RESERVE = dict(on=True, steps=(("2026-10-28 00:00:00", 20_000.0), ("202
                         elastic=0.0, elastic_from="2026-11-02 00:00:00", elastic_below_fair=0.05, elastic_keep_close="17:00", fav_min=0.75)
 WIND_DOWN = dict(on=True, rot_buys_stop="2026-10-27 00:00:00", locks_stop="2026-10-29 00:00:00",
                  fmm_caps=(("2026-10-26 00:00:00", 35_000.0), ("2026-10-27 00:00:00", 30_000.0), ("2026-10-28 00:00:00", 25_000.0),   # C115 (Piero 15:10 Oct 23): a taper
-                           ("2026-10-29 00:00:00", 15_000.0), ("2026-10-31 00:00:00", 5_000.0)),                                       # instead of the Oct 29 cliff
+                           ("2026-10-29 00:00:00", 15_000.0), ("2026-10-31 00:00:00", 5_000.0),
+                           ("2026-11-02 18:00:00", 25_000.0)),                                        # C133: FMM cap 25k until its Tue 10:00 stop                                       # instead of the Oct 29 cliff
                  backstop_from="2026-10-30 00:00:00", backstop_at="12:00",   # item 2: from Oct 30, short of the day's ramp at 12:00 -> FMM / rotation lots join the queue
-                 fmm_no_bids="2026-11-01 12:00:00", carry_bids_stop="2026-10-30 00:00:00", rot_exit_touch="2026-10-30 00:00:00", conv_from="2026-10-29 00:00:00",   # C110 (Piero 11:40 Oct 22 item 3): from Oct 29
+                 fmm_no_bids="2026-11-03 10:00:00",   # C133 (Piero 18:05 Nov 2): FMM back on all books until Tue 10:00 (was Nov 1 12:00)
+                 carry_bids_stop="2026-10-30 00:00:00", rot_exit_touch="2026-10-30 00:00:00", conv_from="2026-10-29 00:00:00",   # C110 (Piero 11:40 Oct 22 item 3): from Oct 29
                  conv_no_ev_floor="2026-10-29 00:00:00",   # the 5% (fair / 1.05) floor holds until Oct 28 23:59; from Oct 29 the ramp overrides it for the convergence asks
                  checklist_at="2026-11-03 14:45", entries_stop="2026-11-02 17:00:00",
                  entries_stop_layers=("dump", "fatfinger", "longshot", "wall", "scalp", "touch", "sleeve", "swing"))   # C13: these entries stop Nov 2 17:00 (TM / SM glide)
@@ -617,6 +619,16 @@ CARRY = dict(on=True, sell_ev=0.05, buy_ev=0.11, min_daily=150_000, fav_min=0.75
 # (a race unresolved at 09:00 may be closed out at SIG's 5-h VWAP, docs/resolution_audit.md).
 END_SWEEP = dict(on=True, start="2026-11-04 00:30:00", cushion=20_000.0, cushion_to_0="2026-11-04 08:30:00", stop="2026-11-04 08:55:00",
                  ev_min=0.02, ev_per_usd=0.03, move_max=0.05, move_s=1800, min_qty=50, pm_min=0.95)
+# C133 (Piero 18:05 Nov 2, docs/flip_nov2.md): FMM back on all books until Tue 10:00 in 250-share clips, cap 25k, outside the C103 reserve
+# until Tue 12:00 (WIND_DOWN fmm_no_bids / fmm_caps above); FLIP, Piero's fill-then-flip: on sides with PM fair 0.25-0.995 (CATCH's
+# exclusions) whose SIG spread (others' best ask - best bid) has been >= 2c for 60 s, one bid first in queue (others' best bid + 0.5c, never
+# above fair - 3c), 1,000 notional, on the 60 widest books; on a fill an ask at once at max(fill + 1c, others' best ask - 0.5c), re-pegged down
+# with the best ask, never under fill + 0.5c; after 30 min max(fill + 0.5c, best ask - 0.5c). Cap 15k at cost; no new entry under 18k usable
+# (CATCH first); <= 8 writes a minute; entries until Tue 12:00 (then its lots sell into bids >= cost + 0.5c), off at 13:45 (exits run on).
+FMM_C133 = dict(clip_sh=250, clip_until="2026-11-03 10:00:00", c103_off_until="2026-11-03 12:00:00", bid_sell_at="2026-11-03 12:00:00")
+FLIP = dict(on=True, until="2026-11-03 12:00:00", off_at="2026-11-03 13:45:00", fair_lo=0.25, fair_hi=0.995, spread_min=0.02, spread_s=60,
+            spread_pull=0.015, books=60, notional=1_000.0, below_f=0.03, inv_cap=15_000.0, usable_min=18_000.0, writes_min=8,
+            flip_c=0.01, flip_late_s=1800, flip_late_c=0.005, sub="flip:")
 # C128 CATCH (Piero 00:00 / 00:20 Nov 2, docs/catch_nov2_spec.md; the code freeze lifted for this item only); C129 v2 (Piero 11:15 Nov 2,
 # docs/catch_nov2_notes.md): v1's levels at fair - 7c were SIG's own touch (SIG's favourites sit ~7c under PM), so plain sellers filled them
 # (00:31-00:40: 14 fills, 16.4k; those lots are carry lots now). v2 anchors on SIG's best bid b AND PM fair f: L1 = min(b - 4c, f - 10c) 1,000,
