@@ -520,8 +520,10 @@ class Engine:
         self.catch_anchor, self.catch_pending, self.catch_touch, self.catch_brake_until = {}, [], [], 0.0   # C129 CATCH v2: anchors, the touch-fill brake
         self.catch_paid = {}                                # C130: sub -> (px, t) of a bid whose write was counted, wanted until it rests
         self.catch_miss, self.catch_stuck = {}, {}          # C131: counted minutes with no bid resting / a sub parked 15 min after 3
-        for ex_, side_, b_, f_, t_ in (read_json(os.path.join(DATA, "catch_anchor.json"), {}) or {}).get("anchors", []):
-            self.catch_anchor[(ex_, side_)] = (b_, f_, t_)  # C131: anchors survive a restart (else every resting bid re-prices at once)
+        for row in (read_json(os.path.join(DATA, "catch_anchor.json"), {}) or {}).get("anchors", []):
+            ex_, side_, b_, f_, t_ = row[:5]                # C131: anchors survive a restart (else every resting bid re-prices at once)
+            self.catch_anchor[(ex_, side_)] = (b_, f_, t_, row[5] if len(row) > 5 else None)   # C132: + SIG's ask (the pre-sweep mid)
+        self.catch_drop, self.catch_fill_mid = [], {}       # C132: the paced stop's cancels (I6); each fill's pre-sweep SIG mid (its first exit)
         self.sale_anchor, self.sale_stats, self.foreign_actions = {}, collections.defaultdict(collections.Counter), {}   # C99: sale asks keep their place; foreign fills' direction
         self.sell_undercut, self.fmm_hour_prev, self.churn_t = {}, None, stamp()
         self.election, self.el_mode_cached, self.el_snap = None, "off", dict(cash=0.0, pos={})   # C102: election night (n_election v2)
@@ -6583,10 +6585,13 @@ class Engine:
     # ---- C128 / C129 CATCH v2 (docs/catch_nov2_spec.md + docs/catch_nov2_notes.md, Piero 11:15 Nov 2): deep resting bids anchored on SIG's
     # best bid AND PM fair, their exits, the touch-fill brake. v2 lots live in 'catch2:' sub-books; v1's 'catch:' lots (00:31-00:40) are carry lots.
     def catch_mode(self, now):
-        """'off' | 'shadow' | 'braked' | 'live': the control 'catch' (pilot = shadow: the ladder is logged, nothing sent; full = live; off or
-        killed = every CATCH bid cancelled, its exits run on) inside the window (to Nov 3 14:30 PT); 'braked' = the touch-fill brake's 30 min."""
-        if not CATCH.get("on") or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) >= CATCH["until"]:
+        """'off' | 'ended' | 'shadow' | 'braked' | 'live': the control 'catch' (pilot = shadow: the ladder is logged, nothing new sent; full =
+        live; off or killed = every CATCH bid cancelled, its exits run on); 'braked' = the touch-fill brake's 30 min; C132: 'ended' from Nov 3
+        13:45 PT (the bids come off at the paced rate, no new catches; the exits run on)."""
+        if not CATCH.get("on"):
             return "off"
+        if time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) >= CATCH["until"]:
+            return "ended" if self.controls.state("catch") != "off" else "off"
         st = self.controls.state("catch")
         if st == "full" and self.catch_brake_until > now:
             return "braked"
@@ -6646,10 +6651,59 @@ class Engine:
             self.event("CATCH", msg); self.night.line(msg)
             self.catch_touch = []
 
+    def catch_others_bid(self, ex, side):
+        """C132: SIG's best bid on `side` without our own resting bids (the feed's depth less our quantity at each level), else the touch."""
+        own = collections.Counter()
+        for o in self.open:
+            if str(o["ex"]) == str(ex) and o["action"] == "buy" and o["side"] == side and self.ex.owned(o["id"]):
+                own[round(o["price"], 3)] += o["qty"]
+        fb = self.feed_book(ex)
+        if fb is not None:
+            lv = fb[0] if side == "yes" else [(round(1 - p, 3), q) for p, q in fb[1]]
+            for p, q in lv:
+                if q - own.get(round(p, 3), 0) >= 1:
+                    return round(p, 3)
+            return None
+        return bots.side_book(*self.px.get(ex, (None, None, None))[:2], side)[0]
+
+    def catch_qty(self, ex, side, sub, q):
+        """C132: the shares a CATCH lot can sell without touching another sub-book's: min(the sub, |position| - the other subs on the side),
+        'inventory' aside (the audit parks double-booked fills there: the 11:23 re-booked v1 fills read 2x in their sub)."""
+        pos = (self.book.get(ex) or {}).get("pos", 0)
+        if (pos > 0) != (side == "yes") or abs(pos) < 1:
+            return 0
+        sg = 1 if side == "yes" else -1
+        others = sum(abs(v) for k, v in (self.ledger.subbooks.get(ex) or {}).items() if k not in (sub, "inventory") and v * sg > 0)
+        return int(max(0, min(q, abs(pos) - others)))
+
+    def catch_wind(self, now, rest, why, urgent=()):
+        """C132: every CATCH bid comes off (13:45, usable < 13k, the brake): no new bid; the resting ones cancelled one every 60 / drop_min s
+        (20 a minute), a pulled race's (news guard / stale quote) first, then L1 first (the likeliest fills), so the cancels never hold every
+        layer's placements (I6) for half an hour (one DELETE per bid: 900 bids ~ 36 min of SIG's writes). -> {ex: [the kept bids, as they rest]}."""
+        spacing = 60.0 / max(1, int(CATCH.get("drop_min", 20)))
+        n = min(int(CATCH.get("drop_burst", 3)), int((now - self.catch_note.get("drop_t", 0.0)) / spacing))
+        if n >= 1:
+            self.catch_note["drop_t"] = now
+        lvl = lambda sub: int(sub.rsplit("L", 1)[-1]) if sub.rsplit("L", 1)[-1].isdigit() else 9   # noqa: E731
+        plan = {}
+        for sub, o in sorted(rest.items(), key=lambda kv: (kv[1]["ex"] not in urgent, lvl(kv[0]), kv[0])):
+            if n > 0:
+                n -= 1
+                self.catch_drop.append(now)
+                continue
+            plan.setdefault(o["ex"], []).append(dict(side=o["side"], px=round(float(o["price"]), 3), qty=int(o["qty"]), sub=sub, ttl=86400, fs=None, b=None, level=lvl(sub)))
+        self.catch_drop = [t for t in self.catch_drop if t >= now - 3600]
+        if rest and now - self.catch_note.get("wind_t", 0) >= 600:
+            self.catch_note["wind_t"] = now
+            msg = (f"CATCH winding down ({why}): no new bids; {len(rest):,} resting, cancelled at {CATCH.get('drop_min', 20)} a minute, L1 first "
+                   f"(~{len(rest) / max(1, CATCH.get('drop_min', 20)):.0f} min left); the exits run on")
+            self.event("CATCH", msg); self.night.line(msg)
+        return plan
+
     def catch_levels(self, a, fs):
-        """[(level, px, notional)] from the side's anchor a = (b, f, t): L1 = min(b - 4c, f - 10c), L2 = min(b - 8c, f - 15c), L3 = min(b - 15c,
+        """[(level, px, notional)] from the side's anchor a = (b, f, t, ask): L1 = min(b - 4c, f - 10c), L2 = min(b - 8c, f - 15c), L3 = min(b - 15c,
         f - 25c), L4 = f - 40c; the 0.005 tick, >= 0.05, never above f - 10c (1c of fair drift tolerated until the next re-anchor), no two at one price."""
-        b, f, _ = a
+        b, f = a[0], a[1]
         out, seen = [], set()
         for i, (bo, fo, notional) in enumerate(CATCH["levels"]):
             raw = f - fo if bo is None or b is None else min(b - bo, f - fo)
@@ -6661,15 +6715,22 @@ class Engine:
         return out
 
     def catch_plan(self, now):
-        """Spec §2 as corrected by the notes (v2) -> ({ex: [bid]}, {ex: [exit]}). Sides with a fresh PM fair 0.55-0.995 — not a manual, control or
-        VWAP-mode market, not a side whose other side we hold (the bid would sell it), not a frozen book, not inside the poll-close pull window.
-        Levels from the side's anchor (SIG best bid b and PM fair f), re-anchored at most every 5 min and only when b moves >= 2c or f >= 1c,
-        never while a sweep prints (60 s after a print > 2c under the anchor's b). A race's bids go for 15 min when its PM fair moved >= 3c in
-        10 min or the quote went stale; a filled level waits 30 min; none at >= 15k v2 inventory at cost or under 15k usable; <= 15 writes a minute."""
+        """Spec §2 as corrected by the notes (v2) and C132 (v3, docs/catch_v3_allin.md) -> ({ex: [bid]}, {ex: [exit]}). Sides with a fresh PM
+        fair 0.25-0.995 — not a manual, control or VWAP-mode market, not a side whose other side we hold (the bid would sell it), not a frozen
+        book, not inside the poll-close pull window. Levels from the side's anchor (SIG best bid b and PM fair f), re-anchored at most every
+        5 min and only when b moves >= 2c or f >= 1c, never while a sweep prints (60 s after a print > 2c under the anchor's b). A race's bids
+        go for 15 min when its PM fair moved >= 3c in 10 min or the quote went stale; a filled level waits 30 min; <= 15 writes a minute.
+        C132: no new bid under 13k usable (back at 18k), in the brake's 30 min or from Tue 13:45 — the resting ones come off at the paced rate."""
         c = self.controls
         if CATCH.get("on") and not c.d.get("catch_c129"):
             c.d["catch_c129"] = stamp()
             c.set_layer("catch", "pilot", "C129 CATCH v2 starts in shadow: the ladder is logged, nothing sent (full = live, off = the kill switch)")
+        if CATCH.get("on") and not c.d.get("catch_c132"):
+            c.d["catch_c132"] = stamp()
+            if c.state("catch") != "off":
+                c.set_layer("catch", "pilot", "C132 CATCH v3 starts in shadow 5 min: the v3 ladder is logged, the resting bids stay as they are, nothing new sent")
+            else:
+                c.save()
         mode = self.catch_mode(now)
         self.catch_brake_check(now)
         mode = self.catch_mode(now)
@@ -6679,18 +6740,30 @@ class Engine:
                 msg = f"CATCH mode {self.catch_note.get('mode') or 'start'} -> {mode}"
                 self.event("CATCH", msg); self.night.line(msg)
             self.catch_note["mode"] = mode
+        self.catch_steps(now)
         inv = self.catch_inventory()
         usable = (min(self.cash_raw_hist) if getattr(self, "cash_raw_hist", None) else 0.0) - CASH_RESERVE - self.manual_reserve_left()
         self.catch_cov = dict(mode=mode, books=0, bids=0, notional=0, inv=round(inv), usable=round(usable))
-        if mode in ("off", "braked"):
-            return {}, exits
-        stop = (f"CATCH v2 inventory {inv:,.0f} at cost >= {CATCH['inv_cap']:,.0f}" if inv >= CATCH["inv_cap"] - 1e-9 else
-                f"usable {usable:,.0f} < {CATCH['usable_min']:,.0f}" if usable < CATCH["usable_min"] else None)
+        if mode == "off":
+            return {}, exits                                # the kill switch (the gate pulls every bid at once) or CATCH off in the config
+        cash_stop = bool(self.catch_note.get("cash_stop"))  # C132: the cash rule replaces the 15k cap (13k off, 18k back on)
+        cash_stop = usable < CATCH["usable_on"] - 1e-9 if cash_stop else usable < CATCH["usable_off"] - 1e-9
+        stop = f"usable {usable:,.0f} < {CATCH['usable_off']:,.0f} (bids back at {CATCH['usable_on']:,.0f})" if cash_stop else None
         if stop != self.catch_note.get("stop"):
             if stop or self.catch_note.get("stop"):
-                msg = f"CATCH: {stop}: no CATCH bids" if stop else "CATCH: inventory and usable inside their limits: bids allowed again"
+                msg = f"CATCH: {stop}: no new CATCH bids" if stop else f"CATCH: usable {usable:,.0f} >= {CATCH['usable_on']:,.0f}: bids allowed again"
                 self.event("CATCH", msg); self.night.line(msg)
             self.catch_note["stop"] = stop
+        self.catch_note["cash_stop"] = cash_stop
+        own_ask, rest = {}, {}
+        for o in self.open:
+            if o["action"] != "buy" or o["id"] in self.ex.cancelling:
+                continue
+            other = "no" if o["side"] == "yes" else "yes"
+            own_ask[(o["ex"], other)] = min(own_ask.get((o["ex"], other), 9.0), 1 - o["price"])   # a buy of the other side at q = our ask at 1 - q
+            rec = self.ledger.orders.get(o["id"]) or {}
+            if rec.get("layer") == "catch":
+                rest[rec.get("sub")] = o
         race = {}
         for b in self.bots:
             race.setdefault((self.meta.get(b.ex) or {}).get("race") or b.ex, []).append(b.ex)
@@ -6705,17 +6778,10 @@ class Engine:
                     self.event("CATCH", f"CATCH news guard {self.name(ex)}: PM fair moved {mv * 100:.1f}c in 10 min: its race's bids pulled until 15 min stable")
                 for ex2 in race.get((self.meta.get(ex) or {}).get("race") or ex, [ex]):
                     self.catch_block[ex2] = now + CATCH["stable_s"]
-        if stop:
-            return {}, exits                                # the 15k cap / the 15k usable floor: every CATCH bid cancelled at once
-        own_ask, rest = {}, {}
-        for o in self.open:
-            if o["action"] != "buy" or o["id"] in self.ex.cancelling:
-                continue
-            other = "no" if o["side"] == "yes" else "yes"
-            own_ask[(o["ex"], other)] = min(own_ask.get((o["ex"], other), 9.0), 1 - o["price"])   # a buy of the other side at q = our ask at 1 - q
-            rec = self.ledger.orders.get(o["id"]) or {}
-            if rec.get("layer") == "catch":
-                rest[rec.get("sub")] = o
+        if mode in ("braked", "ended") or stop:
+            urgent = {o["ex"] for o in rest.values() if self.catch_block.get(o["ex"], 0) > now or self.fair.get(o["ex"]) is None
+                      or now - self.ft.t.get(o["ex"], 0) > CATCH["pm_age_s"]}
+            return self.catch_wind(now, rest, "the 13:45 end" if mode == "ended" else "the touch-fill brake" if mode == "braked" else stop, urgent), exits
         cands, moved = [], False
         for b in self.bots:
             ex = b.ex
@@ -6739,24 +6805,30 @@ class Engine:
                 frozen = a is not None and a[0] is not None and any(p < a[0] - CATCH["sweep_c"] - 1e-9 for p in self.catch_side_prints(ex, side, now - CATCH["sweep_freeze_s"], now))
                 if a is None or (not frozen and now - a[2] >= CATCH["anchor_s"] and
                                  ((bid_s is None) != (a[0] is None) or (bid_s is not None and abs(bid_s - a[0]) >= CATCH["anchor_b_c"] - 1e-9) or abs(fs - a[1]) >= CATCH["anchor_f_c"] - 1e-9)):
-                    a = self.catch_anchor[(ex, side)] = (bid_s, fs, now)
+                    a = self.catch_anchor[(ex, side)] = (bid_s, fs, now, ask_s)   # C132: + SIG's ask, for a fill's pre-sweep mid
                     moved = True
                 cap = min(own_ask.get((ex, side), 9.0), ask_s if ask_s is not None else 9.0)
                 for i, px, notional in self.catch_levels(a, fs):
                     if px < cap - 1e-9:
                         cands.append((i, -fs, ex, side, fs, px, notional, a))
-        plan = {}
+        plan, ladder = {}, []
         wt = [t for t in self.catch_wt if t >= now - 60]
         for i, _, ex, side, fs, px, notional, a in sorted(cands, key=lambda x: x[:2]):   # L1 everywhere first, then L2, L3, L4; the safest sides first
             sub = f"{CATCH['sub']}{ex}:{side}:L{i + 1}"
             if self.catch_hold.get(sub, 0) > now:
                 continue                                    # a filled level waits 30 min
             o = rest.get(sub)
-            q = int(notional / px)
-            if o is not None and abs(float(o["price"]) - px) <= 1e-9:
+            q, qtol = int(notional / px), 1.0
+            ladder.append(dict(side=side, px=round(px, 3), qty=q, sub=sub, fs=round(fs, 4), b=a[0], level=i + 1))
+            if o is not None and abs(float(o["price"]) - px) <= 1e-9 and int(o["qty"]) >= 0.75 * q:
                 q = int(o["qty"])                           # keep-place: the resting bid stays while the anchor holds
                 self.catch_miss.pop(sub, None)
+            elif mode == "shadow":                          # C132: a shadow keeps a resting bid as it is and sends nothing new
+                if o is None:
+                    continue
+                px, q = float(o["price"]), int(o["qty"])
             elif mode == "live":
+                qtol = 0.25                                 # C132: a new price, or the x2 size: reconcile re-places it
                 paid = self.catch_paid.get(sub)
                 if paid is not None and abs(paid[0] - px) <= 1e-9 and now - paid[1] >= 60:   # C131: counted a minute ago, still wanted there, not resting
                     self.catch_paid.pop(sub)
@@ -6770,7 +6842,7 @@ class Engine:
                 if self.catch_stuck.get(sub, 0) > now:      # C131: parked: no write for it; an old bid stays where it is
                     if o is None:
                         continue
-                    px, q = float(o["price"]), int(o["qty"])
+                    px, q, qtol = float(o["price"]), int(o["qty"]), 1.0
                 elif paid is not None and abs(paid[0] - px) <= 1e-9:
                     pass                                    # C130: its write is counted: kept until it rests (dropped, the queued bid never went out)
                 else:
@@ -6778,7 +6850,7 @@ class Engine:
                     if len(wt) + need > CATCH["writes_min"]:
                         if o is None:
                             continue
-                        px, q = float(o["price"]), int(o["qty"])   # no writes left this minute: the old bid stays
+                        px, q, qtol = float(o["price"]), int(o["qty"]), 1.0   # no writes left this minute: the old bid stays
                     else:
                         wt += [now] * need
                         self.catch_paid[sub] = (px, now)
@@ -6786,49 +6858,96 @@ class Engine:
                 continue
             if mode == "live" and (sub not in self.catch_post or abs(self.catch_post[sub][0] - px) > 1e-9):
                 self.catch_post[sub] = (px, a[1])
-            plan.setdefault(ex, []).append(dict(side=side, px=round(px, 3), qty=q, sub=sub, ttl=86400, fs=round(fs, 4), b=a[0], level=i + 1))
+            plan.setdefault(ex, []).append(dict(side=side, px=round(px, 3), qty=q, sub=sub, ttl=86400, fs=round(fs, 4), b=a[0], level=i + 1, qtol=qtol))
         self.catch_wt = wt
         self.catch_paid = {k: v for k, v in self.catch_paid.items() if now - v[1] < 120}
         if moved:
-            write_atomic(os.path.join(DATA, "catch_anchor.json"), json.dumps(dict(t=stamp(), anchors=[[ex, sd, b_, f_, t_] for (ex, sd), (b_, f_, t_) in self.catch_anchor.items()])))
+            write_atomic(os.path.join(DATA, "catch_anchor.json"), json.dumps(dict(t=stamp(), anchors=[[ex, sd] + list(a_) for (ex, sd), a_ in self.catch_anchor.items()])))
         bids = [w for v in plan.values() for w in v]
         self.catch_cov.update(books=len(plan), bids=len(bids), notional=round(sum(w["px"] * w["qty"] for w in bids)))
-        if mode == "shadow":
-            if now - self.catch_note.get("shadow_t", 0) >= 150:
-                self.catch_note["shadow_t"] = now
-                write_atomic(os.path.join(DATA, "catch_shadow.json"), json.dumps(dict(t=stamp(), cov=self.catch_cov, ladder={ex: v for ex, v in plan.items()}), indent=1))
-                lv = sorted(bids, key=lambda w: w["px"])
-                desc = lambda w: f"{self.name(w['sub'].split(':')[1])} {w['side'].upper()} L{w['level']} {w['px']:.3f} (b {'-' if w['b'] is None else format(w['b'], '.3f')}, f {w['fs']:.3f})"   # noqa: E731
-                msg = (f"CATCH SHADOW v2 (nothing sent): {len(plan)} sides armed, {len(bids)} bids would rest, {self.catch_cov['notional']:,.0f} notional; "
-                       f"v2 inventory {inv:,.0f}, usable {usable:,.0f}; 5 cheapest: " + "; ".join(desc(w) for w in lv[:5]) + " | 5 richest: " + "; ".join(desc(w) for w in lv[-5:])
-                       + "; the ladder in data/catch_shadow.json")
-                self.event("CATCH", msg); self.night.line(msg)
-            return {}, exits
+        if mode == "shadow" and now - self.catch_note.get("shadow_t", 0) >= 150:
+            self.catch_note["shadow_t"] = now
+            write_atomic(os.path.join(DATA, "catch_shadow.json"), json.dumps(dict(t=stamp(), cov=self.catch_cov, ladder=ladder), indent=1))
+            lv = sorted(ladder, key=lambda w: w["px"])
+            by = collections.defaultdict(lambda: [0, 0.0])
+            for w in ladder:
+                by[w["level"]][0] += 1; by[w["level"]][1] += w["px"] * w["qty"]
+            desc = lambda w: f"{self.name(w['sub'].split(':')[1])} {w['side'].upper()} L{w['level']} {w['px']:.3f} x {w['qty']:,} (b {'-' if w['b'] is None else format(w['b'], '.3f')}, f {w['fs']:.3f})"   # noqa: E731
+            msg = (f"CATCH SHADOW v3 (nothing new sent; {len(bids)} resting bids kept): {len({(w['sub'].split(':')[1], w['side']) for w in ladder})} sides armed, "
+                   f"{len(ladder)} bids would rest, {sum(w['px'] * w['qty'] for w in ladder):,.0f} notional ("
+                   + ", ".join(f"L{k} {v[0]} / {v[1]:,.0f}" for k, v in sorted(by.items())) + f"); usable {usable:,.0f} (off < {CATCH['usable_off']:,.0f}); "
+                   "5 cheapest: " + "; ".join(desc(w) for w in lv[:5]) + " | 5 richest: " + "; ".join(desc(w) for w in lv[-5:]) + "; the ladder in data/catch_shadow.json")
+            self.event("CATCH", msg); self.night.line(msg)
         return plan, exits
 
+    def catch_steps(self, now):
+        """C132 (docs/catch_v3_allin.md §B): one line each — Tue 12:00 every CATCH and v1 lot sells into any bid >= cost + 0.5c; 14:00 NIGHT CASH."""
+        c, t_s = self.controls, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+        if CATCH.get("bid_sell_at") and t_s >= CATCH["bid_sell_at"] and not c.d.get("catch_bidsell"):
+            c.d["catch_bidsell"] = stamp(); c.save()
+            n = len(self.catch_lots()) + len(self.catch_lots("catch:"))
+            msg = f"CATCH {CATCH['bid_sell_at'][11:16]}: every CATCH and v1 lot ({n}) asks max(cost + 0.5c, SIG's bid): sold into any bid >= cost + 0.5c; the ramp's convergence sales run on"
+            self.event("CATCH", msg); self.night.line(msg)
+        if CATCH.get("night_cash_at") and t_s >= CATCH["night_cash_at"] and not c.d.get("catch_night_cash"):
+            c.d["catch_night_cash"] = stamp(); c.save()
+            msg = self.catch_night_cash_line(now)
+            self.event("CATCH", msg); self.night.line(msg)
+
+    def catch_night_cash_line(self, now):
+        """C132 §B 14:00: usable, what is still held from CATCH / v1 (at cost), and what SIG's bids would take now at >= cost + 0.5c."""
+        usable = (min(self.cash_raw_hist) if getattr(self, "cash_raw_hist", None) else 0.0) - CASH_RESERVE - self.manual_reserve_left()
+        held, sell = {"v2": [0, 0.0], "v1": [0, 0.0]}, [0, 0.0]
+        for prefix, k in ((CATCH["sub"], "v2"), ("catch:", "v1")):
+            for sub, (ex, side, q, hi) in self.catch_lots(prefix).items():
+                qq, bid = self.catch_qty(ex, side, sub, q), self.catch_others_bid(ex, side)
+                held[k][0] += 1; held[k][1] += qq * (hi or 0.0)
+                if hi is not None and bid is not None and bid >= hi + RULE0_MARGIN - 1e-9:
+                    sell[0] += 1; sell[1] += qq * bid
+        return (f"NIGHT CASH: usable {usable:,.0f}; still held from CATCH {held['v2'][1]:,.0f} at cost ({held['v2'][0]} lots), v1 {held['v1'][1]:,.0f} "
+                f"({held['v1'][0]}); sellable now into SIG's bids at >= cost + 0.5c {sell[1]:,.0f} ({sell[0]} lots); unsold lots stay held (+EV to "
+                f"settlement, the night's recycling can sell them after calls)")
+
     def catch_exits(self, now):
-        """Exits -> {ex: [exit]}: each v2 lot an ask at max(fill + 4c, fair - 2c); after 2 h max(fill + 2c, fair - 3c); never under fill + 0.5c
-        (rule 0; fill = the sub's highest lot entry). The price is kept until fair moves >= 1c or the 2-h step. None after the window: unexited
-        lots are held to settlement. v1's lots have no CATCH exit (carry lots: the normal ramp sells them)."""
-        if not CATCH.get("on") or time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) >= CATCH["until"]:
+        """C132 (v3) exits -> {ex: [exit]}, anchored on SIG's book (v2's fair - 2c never filled: SIG trades 7-10c under PM fair). A v2/v3 lot
+        asks max(fill + 3c, min(its pre-sweep SIG mid, fair - 1c)) at once; after 15 min max(fill + 2c, SIG's bid) (sold into it); after 60 min
+        max(fill + 1c, SIG's bid). v1's lots, and every lot from Tue 12:00: max(cost + 0.5c, SIG's bid). Never under fill + 0.5c (rule 0; fill =
+        the sub's highest lot entry); SIG's bid = the best bid without our own; the size never above what the sub can sell without another
+        sub-book's shares. A price is kept until its stage changes or its target moves >= 1c. The exits run whatever the cash state and after
+        13:45; unsold lots stay held (+EV to settlement; the night's wave recycling can sell them after calls)."""
+        if not CATCH.get("on"):
             return {}
+        t_s = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+        bid_sell = bool(CATCH.get("bid_sell_at")) and t_s >= CATCH["bid_sell_at"]
         out = {}
-        for sub, (ex, side, q, hi) in self.catch_lots().items():
-            if hi is None:
-                continue
-            fs = self.side_fair(ex, side)
-            late = now - self.catch_fill_time(sub) >= CATCH["exit_late_s"]
-            prev = self.catch_exit_px.get(sub)
-            if prev is not None and prev[2] == late and (fs is None or (prev[1] is not None and abs(fs - prev[1]) < CATCH["anchor_f_c"] - 1e-9)):
-                px = prev[0]
-            else:
-                c_, fc = (CATCH["exit_late_c"], CATCH["exit_late_fair_c"]) if late else (CATCH["exit_c"], CATCH["exit_fair_c"])
-                px = max(hi + c_, (fs - fc) if fs is not None else 0.0, hi + RULE0_MARGIN)
-                px = math.ceil(round(px / TICK, 6)) * TICK
-                self.catch_exit_px[sub] = (px, fs if fs is not None else (prev[1] if prev else None), late)
-            if px > MB_MAX_PX + 1e-9:
-                continue                                    # no ask <= 0.99 clears the lot's floor: held to settlement
-            out.setdefault(ex, []).append(dict(side=side, px=round(px, 3), sub=sub))
+        for prefix in (CATCH["sub"], "catch:"):
+            for sub, (ex, side, q, hi) in self.catch_lots(prefix).items():
+                qq = self.catch_qty(ex, side, sub, q)
+                if hi is None or qq < MIN_QTY:
+                    continue
+                bid = self.catch_others_bid(ex, side)
+                if prefix != CATCH["sub"] or bid_sell:
+                    stage, tgt = "bid", max(hi + RULE0_MARGIN, bid if bid is not None else 0.0)
+                else:
+                    age = now - self.catch_fill_time(sub)
+                    if age < CATCH["exit_mid_s"]:
+                        fs = self.side_fair(ex, side)
+                        mid = self.catch_fill_mid.get(sub)
+                        if mid is None:                     # after a restart: the side's anchor (frozen through a sweep)
+                            a = self.catch_anchor.get((ex, side))
+                            mid = (a[0] + a[3]) / 2 if a is not None and len(a) > 3 and a[0] is not None and a[3] is not None else None
+                        ref = [x for x in (mid, None if fs is None else fs - CATCH["exit_fair_c"]) if x is not None]
+                        stage, tgt = "first", max(hi + CATCH["exit_c"], min(ref) if ref else 0.0)
+                    elif age < CATCH["exit_late_s"]:
+                        stage, tgt = "15m", max(hi + CATCH["exit_mid_c"], bid if bid is not None else 0.0)
+                    else:
+                        stage, tgt = "60m", max(hi + CATCH["exit_late_c"], bid if bid is not None else 0.0)
+                tgt = math.ceil(round(max(tgt, hi + RULE0_MARGIN) / TICK, 6)) * TICK
+                prev = self.catch_exit_px.get(sub)
+                px = prev[0] if prev is not None and prev[1] == stage and abs(tgt - prev[0]) < CATCH["exit_move_c"] - 1e-9 else tgt
+                self.catch_exit_px[sub] = (px, stage)
+                if px > MB_MAX_PX + 1e-9:
+                    continue                                # no ask <= 0.99 clears the lot's floor: held to settlement
+                out.setdefault(ex, []).append(dict(side=side, px=round(px, 3), sub=sub, qty=qq, stage=stage))
         return out
 
     def catch_fill_events(self, fills):
@@ -6842,7 +6961,15 @@ class Engine:
                 continue
             self.catch_seen.add(k)
             sub = (self.ledger.orders.get(str(f.get("order") or "")) or {}).get("sub") or ""
+            if f["layer"] == "catch" and sub.startswith("catch:"):
+                msg = (f"CATCH: a v1 fill record ({self.name(f['ex'])} {sub} {f['qty']:,.0f} at {f['price']:.3f}, {f.get('t')}) — the overnight lots, "
+                       f"re-booked by a fills sync; not a v2 fill, not a fault (C132: the 11:23 Nov 2 kill was this)")
+                self.event("CATCH", msg)
+                continue
             if f["layer"] == "catch":
+                a_ = self.catch_anchor.get((f["ex"], f["side"])) or self.catch_anchor.get((str(f["ex"]), f["side"]))
+                if a_ is not None and len(a_) > 3 and a_[0] is not None and a_[3] is not None:
+                    self.catch_fill_mid[sub] = (a_[0] + a_[3]) / 2   # C132: the pre-sweep SIG mid (the anchor is frozen through a sweep): its first exit
                 self.catch_hold[sub] = time.time() + CATCH["fill_hold_s"]
                 self.catch_fill_t[sub] = time.time()
                 try:
@@ -6854,7 +6981,7 @@ class Engine:
                 post = self.catch_post.get(sub)
                 msg = (f"CATCH FILL {self.name(f['ex'])} {f['side'].upper()} {f['qty']:,.0f} at {f['price']:.3f} ({sub.rsplit(':', 1)[-1]})"
                        + (f", fair {fs:.3f}, edge {(fs - f['price']) * 100:+.1f}c = {(fs - f['price']) * f['qty']:+,.0f}" if fs is not None else ", fair n/a")
-                       + f"; v2 inventory {self.catch_inventory():,.0f} at cost of {CATCH['inv_cap']:,.0f}")
+                       + f"; CATCH inventory {self.catch_inventory():,.0f} at cost")
                 self.event("CATCH", msg); self.night.line(msg)
                 lvl = int(sub.rsplit("L", 1)[-1]) if sub.rsplit("L", 1)[-1].isdigit() else 0
                 notional = CATCH["levels"][lvl - 1][2] if 1 <= lvl <= len(CATCH["levels"]) else 0.0
@@ -6871,23 +6998,28 @@ class Engine:
                 self.event("CATCH", msg); self.night.line(msg)
 
     def catch_line(self, now):
-        """The hourly CATCH line — sides armed, bids resting, v2 fills (book, shares, price, fair, edge), inventory, exits, realized; v1's lots apart."""
+        """The hourly CATCH line — sides armed, bids resting, v2/v3 fills (book, shares, price, fair, edge), inventory, exits filled and realized,
+        cash recycled (sold back) today, usable vs the Tue 14:00 target ('as much as possible'); v1's lots apart."""
         since = str(self.controls.d.get("catch_c129") or "")
         cov = getattr(self, "catch_cov", None) or {}
         resting = [o for o in self.open if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "catch"]
         fills = [f for f in list(self.ledger.fills) if f.get("layer") in ("catch", "catchexit") and str(f.get("t") or "") >= since]
-        buys, outs = [f for f in fills if f["layer"] == "catch"], [f for f in fills if f["layer"] == "catchexit"]
+        buys = [f for f in fills if f["layer"] == "catch" and str((self.ledger.orders.get(str(f.get("order") or "")) or {}).get("sub") or "").startswith(CATCH["sub"])]
+        outs = [f for f in fills if f["layer"] == "catchexit"]
+        today = time.strftime("%Y-%m-%d", time.localtime(now))
+        back = sum(f["qty"] * (1 - f["price"]) for f in outs if str(f.get("t") or "").startswith(today))
         hour = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 3600))
         last = [f"{self.name(f['ex'])} {f['side'].upper()} {f['qty']:,.0f} at {f['price']:.3f}" + (f" (fair {f['price'] + f['edge']:.3f}, edge {f['edge'] * 100:+.1f}c)" if f.get("edge") is not None else "")
                 for f in buys if f["t"] >= hour]
         lots, v1 = self.catch_lots(), self.catch_lots("catch:")
         usable = (min(self.cash_raw_hist) if getattr(self, "cash_raw_hist", None) else 0.0) - CASH_RESERVE - self.manual_reserve_left()
         return (f"CATCH hourly ({cov.get('mode', self.catch_mode(now))}): {cov.get('books', 0)} sides armed, {len(resting)} bids resting "
-                f"({sum(o['qty'] * o['price'] for o in resting):,.0f} notional); v2 since the start {len(buys)} fills, {sum(f['qty'] for f in buys):,.0f} shares, "
+                f"({sum(o['qty'] * o['price'] for o in resting):,.0f} notional); v2/v3 since the start {len(buys)} fills, {sum(f['qty'] for f in buys):,.0f} shares, "
                 f"cost {sum(f['qty'] * f['price'] for f in buys):,.0f}, edge vs fair {sum((f.get('edge') or 0) * f['qty'] for f in buys):+,.0f}; last hour: {'; '.join(last) or 'none'}; "
-                f"v2 inventory {sum(q * (hi or 0) for _, _, q, hi in lots.values()):,.0f} at cost of {CATCH['inv_cap']:,.0f} ({len(lots)} lots); "
-                f"exits {len(outs)} ({sum(f['qty'] for f in outs):,.0f} shares), realized {sum(f.get('realized') or 0 for f in outs):+,.0f}; "
-                f"v1 lots (carry) {sum(q * (hi or 0) for _, _, q, hi in v1.values()):,.0f} at cost ({len(v1)}); usable {usable:,.0f}")
+                f"inventory {sum(q * (hi or 0) for _, _, q, hi in lots.values()):,.0f} at cost ({len(lots)} lots); "
+                f"exits filled {len(outs)} ({sum(f['qty'] for f in outs):,.0f} shares), realized {sum(f.get('realized') or 0 for f in outs):+,.0f}; cash recycled today {back:,.0f}; "
+                f"v1 lots {sum(self.catch_qty(ex, sd, sb, q) * (hi or 0) for sb, (ex, sd, q, hi) in v1.items()):,.0f} at cost ({len(v1)}); "
+                f"usable {usable:,.0f} (bids off < {CATCH['usable_off']:,.0f}); Tue 14:00 target: as much as possible")
 
     def night_lite(self, now):
         """C118 (Piero spec Oct 27 item 3): Nov 3 14:30 -> Nov 4 09:00 PT the night CPU budget — no FMM / carry / rotation / catcher
@@ -9641,8 +9773,8 @@ class Engine:
             for sub, v in subs_iter:
                 if sub == "inventory" and fresh_inv:
                     continue
-                if v * q <= 0 or sub.startswith(("manual", "pairset:", "fmm:", "fmmlock:")) or (sub.startswith("catch2:") and (str(ex), sub) not in rec) or (not allow_all and (sub.startswith(("sleeve:", "swing:")) or sub in res_subs)) or ((str(ex), sub) in self.core_set and str(ex) not in rot_left and str(ex) not in fund_left and (str(ex), sub) not in rec and (str(ex), sub) not in conv):
-                    continue                                # never a core lot (unless Piero named the market for the rotation, C94), his manual / pair / sleeve lots, or the RI reservoir; C128b / C129: a CATCH v2 lot has its own exit (only the night's wave recycling sells it here)
+                if v * q <= 0 or sub.startswith(("manual", "pairset:", "fmm:", "fmmlock:")) or (sub.startswith(("catch2:", "catch:")) and (str(ex), sub) not in rec) or (not allow_all and (sub.startswith(("sleeve:", "swing:")) or sub in res_subs)) or ((str(ex), sub) in self.core_set and str(ex) not in rot_left and str(ex) not in fund_left and (str(ex), sub) not in rec and (str(ex), sub) not in conv):
+                    continue                                # never a core lot (unless Piero named the market for the rotation, C94), his manual / pair / sleeve lots, or the RI reservoir; C128b / C129: a CATCH v2 lot has its own exit (only the night's wave recycling sells it here); C132: v1's too
                 key = f"{ex}|{sub}"
                 sig_avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
                 whole = abs(v) >= 0.95 * abs(q) - 1e-9
@@ -11346,7 +11478,7 @@ class Engine:
             last = E.close.get(E.race(ex)) if E is not None else None
             early_fav = fs >= float(ELECTION_RESERVE["fav_min"]) - 1e-9 and last is not None and last <= early
             for sub, v in (self.ledger.subbooks.get(ex) or {}).items():
-                if v * q <= 0 or abs(v) < MIN_QTY or str(sub).startswith(("manual", "pairset:", "fmm:", "fmmlock:", "rot:", "callsnipe:", "drift:", "sleeve:", "swing:", "catch2:")) or (ex, sub) in keep or (ex, sub) in keep_e:
+                if v * q <= 0 or abs(v) < MIN_QTY or str(sub).startswith(("manual", "pairset:", "fmm:", "fmmlock:", "rot:", "callsnipe:", "drift:", "sleeve:", "swing:", "catch2:", "catch:")) or (ex, sub) in keep or (ex, sub) in keep_e:
                     continue
                 avg = float((self.ledger.tranches.get(sub) or {}).get("avg") or ((b.get("row") or {}).get("avgCost")) or 0)
                 fl = bots.tick_up(round(avg + RULE0_MARGIN, 6))
@@ -12497,8 +12629,8 @@ class Engine:
                         continue                            # never up; down only after the others' best ask sat below ours >= 5 min
                     keep_c.append(o)
                     continue
-            if o.get("layer") in ("fmmexit", "catch"):      # fmm_spec v2 §2.3: an FMM exit follows the best ask at once; C131: a CATCH
-                keep_c.append(o)                            # re-anchor too (its own rule: <= every 5 min, on b >= 2c / f >= 1c)
+            if o.get("layer") in ("fmmexit", "catch", "catchexit"):   # fmm_spec v2 §2.3: an FMM exit follows the best ask at once; C131: a CATCH
+                keep_c.append(o)                            # re-anchor too (its own rule: <= every 5 min, on b >= 2c / f >= 1c); C132: a CATCH exit's stage
                 continue
             if o.get("id") and want_keys.get(k):
                 t0 = self.drift_since.setdefault(o["id"], now)

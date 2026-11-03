@@ -431,10 +431,10 @@ class MarketBot:
                 for x in (s.get("fmm") or [])]
         out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], QTY_TOL, "carry", sub=x["sub"], ttl=x.get("ttl") or 86400)   # C98 alpha_spec §2: carry bids (held)
                 for x in (s.get("carry") or [])]
-        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], 1.0, "catch", sub=x["sub"], ttl=x.get("ttl") or 86400)   # C128 CATCH: deep bids, kept in place
-                for x in (s.get("catch") or [])]
-        for x in s.get("catch_exits") or []:                 # C128: a CATCH lot's ask at max(fill + 4c, fair - 2c) (the engine's price, >= fill + 0.5c)
-            q = abs(subs.get(x["sub"], 0))
+        out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], x.get("qtol", 1.0), "catch", sub=x["sub"], ttl=x.get("ttl") or 86400)   # C128 CATCH: deep bids,
+                for x in (s.get("catch") or [])]            # kept in place (C132: qtol 0.25 when the engine re-sizes one)
+        for x in s.get("catch_exits") or []:                 # C128 / C132: a CATCH lot's ask (the engine's price, >= fill + 0.5c)
+            q = min(abs(subs.get(x["sub"], 0)), x.get("qty", float("inf")))   # C132: never another sub-book's shares
             if q >= MIN_QTY:
                 reduce_buy(x["side"], x["px"], int(q), "catchexit", x["sub"], 86400, band=0.0, a2=False)
         for x in s.get("fmm_exits") or []:

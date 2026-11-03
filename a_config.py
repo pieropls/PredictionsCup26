@@ -622,12 +622,18 @@ END_SWEEP = dict(on=True, start="2026-11-04 00:30:00", cushion=20_000.0, cushion
 # (00:31-00:40: 14 fills, 16.4k; those lots are carry lots now). v2 anchors on SIG's best bid b AND PM fair f: L1 = min(b - 4c, f - 10c) 1,000,
 # L2 = min(b - 8c, f - 15c) 1,500, L3 = min(b - 15c, f - 25c) 2,000, L4 = f - 40c 1,500 (notional), on sides with PM fair 0.55-0.995. Its fills only
 # count against usable (exempt from the C103 reserve up to the 15k cap); the control 'catch': pilot = shadow, full = live, off = the kill switch.
-CATCH = dict(on=True, until="2026-11-03 14:30:00", fair_lo=0.55, fair_hi=0.995, px_min=0.05, max_below_f=0.10, sub="catch2:",
-             levels=((0.04, 0.10, 1_000.0), (0.08, 0.15, 1_500.0), (0.15, 0.25, 2_000.0), (None, 0.40, 1_500.0)),   # (b offset, f offset, notional)
-             inv_cap=15_000.0, usable_min=15_000.0, pm_age_s=60, news_c=0.03, news_s=600, stable_s=900, fill_hold_s=1800, writes_min=15,
+# C132 v3 (Piero 16:20 Nov 2, docs/catch_v3_allin.md): exits anchored on SIG's book (an ask at max(fill + 3c, min(the pre-sweep SIG mid,
+# fair - 1c)); 15 min: max(fill + 2c, SIG's bid); 60 min: max(fill + 1c, SIG's bid)), sizes x2 (2,000 / 3,000 / 4,000 / 4,000), sides 0.25-0.995,
+# the 15k cap replaced by usable: bids off under 13k, back at 18k; v1's lots ask max(cost + 0.5c, SIG's bid); Tue 12:00 every lot sells into a bid
+# >= cost + 0.5c; Tue 13:45 the bids come off (exits run on); 14:00 the NIGHT CASH line.
+CATCH = dict(on=True, until="2026-11-03 13:45:00", fair_lo=0.25, fair_hi=0.995, px_min=0.05, max_below_f=0.10, sub="catch2:",
+             levels=((0.04, 0.10, 2_000.0), (0.08, 0.15, 3_000.0), (0.15, 0.25, 4_000.0), (None, 0.40, 4_000.0)),   # (b offset, f offset, notional)
+             usable_off=13_000.0, usable_on=18_000.0, pm_age_s=60, news_c=0.03, news_s=600, stable_s=900, fill_hold_s=1800, writes_min=15,
+             drop_min=20,                                                                     # a full stop cancels <= 20 bids a minute, L1 first (I6)
              anchor_s=300, anchor_b_c=0.02, anchor_f_c=0.01, sweep_c=0.02, sweep_freeze_s=60,   # re-anchor <= every 5 min on b >= 2c / f >= 1c; never mid-sweep
              brake_n=3, brake_s=600, brake_look_s=60, brake_wait_s=30, brake_pause_s=1800,      # 3 touch fills in 10 min -> paused 30 min (not killed)
-             exit_c=0.04, exit_fair_c=0.02, exit_late_s=7200, exit_late_c=0.02, exit_late_fair_c=0.03,
+             exit_c=0.03, exit_fair_c=0.01, exit_mid_s=900, exit_mid_c=0.02, exit_late_s=3600, exit_late_c=0.01, exit_move_c=0.01,
+             bid_sell_at="2026-11-03 12:00:00", night_cash_at="2026-11-03 14:00:00",
              skip_ex=("840", "841", "842", "843",                                       # the 4 control markets (House / Senate D and R)
                       "855", "856", "947", "948",                                       # VWAP-mode flags (docs/resolution_audit.md): GA Governor, GA Senate
                       "910", "911", "959", "960",                                       # ME-02, Maine Senate (ranked choice)
