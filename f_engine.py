@@ -5069,8 +5069,22 @@ class Engine:
         if mode not in ("paper", "live") or self.fills_blind or (mode == "live" and (self.controls.paused or self.controls.state("fmm") == "off")):
             return {}
         if self.wd_after("fmm_no_bids", now):
-            return {}                                        # C103: no new FMM bids from Nov 1 12:00 (exits only)
+            return {}                                        # C103: no new FMM bids from Nov 1 12:00 (exits only); C133: from Tue 10:00
+        c = self.controls
+        if FMM_C133.get("clip_sh") and not c.d.get("fmm_c133"):
+            c.d["fmm_c133"] = stamp()                        # C133 (Piero 18:05 Nov 2): FMM back on all books, 5 min in shadow first
+            if c.state("fmm") != "off":
+                c.set_layer("fmm", "pilot", "C133 FMM back on all books: shadow 5 min (its quotes logged, nothing new sent; its exits run on)")
         tg = self.fmm_targets(now, paper=(mode == "paper"))
+        if mode == "live" and c.state("fmm") == "pilot":    # C133: the shadow — nothing new sent
+            if now - self.flip_note.get("fmm_shadow_t", 0) >= 150:
+                self.flip_note["fmm_shadow_t"] = now
+                bids = [t for t in tg if t[5] == "fmm"]
+                msg = (f"FMM SHADOW C133 (nothing new sent): {len({(t[1], t[2]) for t in bids})} books, {len(bids)} bids would rest, "
+                       f"{sum(t[3] * t[4] for t in bids):,.0f} notional, clips <= {FMM_C133['clip_sh']} sh; free {self.fmm_free():,.0f} (C103 off until "
+                       f"{FMM_C133['c103_off_until'][5:16]}); cap {self.fmm_inv_cap():,.0f}")
+                self.event("FMM", msg); self.night.line(msg)
+            return {}
         self.fmm_refill_measure()
         if mode == "paper":
             self.fmm_paper_place(now, tg)

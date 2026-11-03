@@ -8449,6 +8449,18 @@ class C133Tests(EngineCase):
         eng.ledger.subbooks[b] = {}
         self.assertEqual(eng.flip_plan(time.time())[0], {}, "no entries from Tue 12:00")
 
+    def test_fmm_comes_back_through_a_shadow(self):
+        fake, eng, mk = FMMTests.rig(self)
+        C94Tests.c95_market(self, eng, fake, mk[1], 0.10, (0.12, 0.13, 0.125), race="RX")
+        FMMTests.live(self, eng)
+        f_engine.FMM_C133 = dict(a_config.FMM_C133, clip_until="2099-01-01 00:00:00", c103_off_until="2099-01-01 00:00:00", bid_sell_at="2099-01-01 00:00:00")
+        eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 10_000.0
+        self.assertEqual(eng.fmm_plan(time.time()), {}, "C133 start: shadow, nothing sent")
+        self.assertEqual(eng.controls.state("fmm"), "pilot")
+        self.assertTrue(any("FMM SHADOW C133" in str(e.get("text")) for e in eng.events))
+        eng.controls.set_layer("fmm", "full", "test")
+        self.assertTrue(eng.fmm_plan(time.time()), "full: live")
+
     def test_fmm_250_share_clips_outside_c103_until_tue_12_and_its_lots_sold_into_the_bid_from_12(self):
         fake, eng, mk = FMMTests.rig(self)
         a, b, c = mk[:3]
