@@ -7389,7 +7389,8 @@ class C102Tests(EngineCase):
     def test_c121_recycling_at_095_only_while_a_later_wave_has_uncalled_races(self):
         fake, eng, a = self.rig(mode="live")
         f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], mode="live"))
-        self.assertEqual(f_engine.ELECTION["recycle"]["bid"], 0.95)
+        self.assertEqual(f_engine.ELECTION["recycle"]["bid"], 0.97)                # C135 (Piero 16:05 Nov 3): 0.97, was 0.95
+        self.assertEqual(f_engine.ELECTION["recycle"]["margin"], 0.02)
         self.assertTrue(f_engine.ELECTION["recycle"]["later_uncalled"])
         E = eng.election
         eng.el_mode_cached = "live"
@@ -7398,7 +7399,7 @@ class C102Tests(EngineCase):
         E.calls[a] = dict(side="yes", t=time.time(), signal_t=time.time(), rule="B", strict=True, bought=0.0, cost=0.0, fails=0, stopped=False, reversed=False)
         eng.ledger.subbooks[a] = {f"carry:{a}:yes": 1_000.0}
         eng.lots = lambda ex, side, sub: [(1000.0, 0.90, "engine")] if sub.startswith("carry:") else []
-        eng.rot_touch = lambda ex, side: (0.95, 0.955, 0.99)
+        eng.rot_touch = lambda ex, side: (0.97, 0.975, 0.99)
         eng.el_snap = dict(cash=el_mod.CASH_FLOOR + 1_000_000.0, pos={})   # the cash on hand no longer matters
         E.close.update({"Earlier": w - 3600, "Same wave": w})               # uncalled, but not after the sold book's wave: hold
         eng.el_recycle_scan(time.time())
@@ -7406,7 +7407,7 @@ class C102Tests(EngineCase):
         self.assertTrue(any(r.get("kind") == "recycle" and r.get("verdict") == "hold: no later wave has uncalled races" for r in eng.el_shadowq))
         E.close["Later"] = w + 1800                                           # one uncalled race in a later wave: sell
         eng.el_recycle_scan(time.time())
-        self.assertEqual(eng.el_recycle, {(a, f"carry:{a}:yes"): 0.95}, "0.95 sells while a later wave has uncalled races")
+        self.assertEqual(eng.el_recycle, {(a, f"carry:{a}:yes"): 0.97}, "0.97 sells while a later wave has uncalled races")
         E.race_stop.add("Later")                                              # a stopped race counts as not pending
         eng.el_recycle_scan(time.time())
         self.assertEqual(eng.el_recycle, {})
@@ -7678,9 +7679,9 @@ class C127Tests(EngineCase):
         self.assertIn(c, eng.carry_plan(t)); self.assertNotIn(e, eng.carry_plan(t), "less than 29 min of PM history: out")
         self.assertEqual(eng.carry_plan(ts("2026-11-04 08:55:00")), {}, "no orders from 08:55 (carry itself is off on the night)")
 
-    def test_the_wave_share_is_2_5_times_usable(self):
-        """Piero 00:10 Nov 1 item 2: WAVE_MULT 2.5 for top 50 (C126: 2.0), docs/night_size_top50.md."""
-        self.assertEqual(el_mod.WAVE_MULT, 2.5)
+    def test_the_wave_share_is_8_times_usable(self):
+        """C135 (Piero 16:05 Nov 3): WAVE_MULT 8 (Piero 00:10 Nov 1 item 2: 2.5; C126: 2.0), docs/night_size_top50.md."""
+        self.assertEqual(el_mod.WAVE_MULT, 8.0)
 
 
 class C106Tests(EngineCase):
@@ -7787,6 +7788,7 @@ class C111Tests(EngineCase):
         race = E.race(a)
         now = time.time()
         E.run0[(a, "yes")] = now - 300                          # a 0.95 run begun on real quotes
+        E.close[race] = max(E.close[race] or 0, now + 7200)   # date pin (Nov 3 16:30: the map's real last close passed)
         eng.el_inject_start(now, dict(ex=a, path=[[0, 0.90, 0.92], [300, 0.985, 0.99]], close_at=290), t0=now)
         self.assertIsNone(E.called(a))
         eng.el_step(now + 1)

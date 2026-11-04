@@ -11911,6 +11911,21 @@ class Engine:
         self.election = el.Election(meta, last, time.time, self.el_place, self.el_cancel, self.el_book, self.el_log, manual=tuple(str(x) for x in self.manual_ex),
                                     cash_floor=el.CASH_FLOOR, first_close=first, levels=self.el_levels, place_dry=self.el_place_dry,
                                     precall_dry=bool(ELECTION.get("precall_dry")))
+        try:                                                # C135 (Piero 16:05 Nov 3): after a restart the held call-snipe lots still count in the caps
+            pr = {}
+            for ex in meta:
+                for sub, q in list((self.ledger.subbooks.get(ex) or {}).items()):
+                    if str(sub).startswith("callsnipe:") and abs(q) >= 1:
+                        avg = self.el_sub_avg(ex, "yes" if q > 0 else "no", sub) or el.PRICE_CAP
+                        sh, c_ = pr.get(ex, (0.0, 0.0))
+                        pr[ex] = (sh + abs(q), c_ + abs(q) * avg)
+            self.election.prior = pr
+            if pr:
+                m_ = (f"ELECTION: call-snipe lots from before the start count in the race / state caps: {len(pr)} books, "
+                      f"{sum(v[0] for v in pr.values()):,.0f} shares, {sum(v[1] for v in pr.values()):,.0f} at cost")
+                self.event("NIGHT", m_); self.night.line(m_)
+        except Exception as err:                            # noqa: BLE001 - never blocks arming
+            self.event("ERR", f"election: call-snipe lots not carried into the caps: {err!r}")
         msg = (f"ELECTION armed ({self.el_mode()}): {len(meta)} books / {len(last)} races from poll_close.json; first close "
                f"{time.strftime('%m-%d %H:%M', time.localtime(min(first.values())))} PT, last {time.strftime('%m-%d %H:%M', time.localtime(max(last.values())))} PT; "
                f"call = PM side bid >= {el.CALL_HOLD} for {el.CALL_HOLD_S:.0f} s or >= {el.CALL_STRICT} once after the state's last close; sniper <= min({el.PRICE_CAP}, "
@@ -12337,6 +12352,7 @@ class Engine:
             return {}
         live = mode == "live" and self.el_mode_cached == "live"
         T, cap = float(cfg.get("bid", 0.97)), float(cfg.get("wave_cap", 30_000.0))
+        margin = float(cfg.get("margin", RULE0_MARGIN))       # C135 (Piero 16:05 Nov 3): lot avg + 2c
         excl = {str(x) for x in (cfg.get("exclude_ex") or ())}
         with E.lock:
             calls = {str(ex): dict(c) for ex, c in E.calls.items() if c.get("strict") and not c.get("reversed")}
@@ -12367,9 +12383,9 @@ class Engine:
                 avg = self.el_sub_avg(ex, side, sub)
                 if not avg:
                     continue
-                floor_ = bots.tick_up(round(avg + RULE0_MARGIN, 6))
+                floor_ = bots.tick_up(round(avg + margin, 6))
                 if sub == "inventory" and sig_avg:
-                    floor_ = max(floor_, bots.tick_up(round(sig_avg + RULE0_MARGIN, 6)))
+                    floor_ = max(floor_, bots.tick_up(round(sig_avg + margin, 6)))
                 cands.append((avg, ex, side, sub, abs(q), floor_, bid, c["t"]))
         out, rows = {}, []
         gate = cfg.get("later_uncalled")

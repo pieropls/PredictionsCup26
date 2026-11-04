@@ -153,6 +153,8 @@ class SniperTests(unittest.TestCase):
         self.assertLessEqual(r2.placed[0][0][0][4], el.RACE_SHARES, "<= 15k shares a race")
 
     def test_cash_floor_7k_counts_unfilled_orders_and_the_state_cap(self):
+        mult, el.WAVE_MULT = el.WAVE_MULT, 2.5                   # C135: the share under usable here (WAVE_MULT 8 would give one order all 2k)
+        self.addCleanup(setattr, el, "WAVE_MULT", mult)
         r = Rig(levels={"yes": [(0.95, 100_000)]})
         r.pm("1", 0.98, 0.99, 10_100.0, cash=9_000)           # usable 2k; wave share 2 x 2k / races of the wave
         q = r.placed[0][0][0][4]
@@ -164,6 +166,12 @@ class SniperTests(unittest.TestCase):
         r2.E.meta = dict(META, **{"9": dict(race="OH-01 House race", state="Ohio")})
         r2.pm("1", 0.98, 0.99, 10_100.0, cash=500_000)
         self.assertLessEqual(r2.placed[0][0][0][4] * 0.95, 200 + 1, "20k at cost a state")
+
+    def test_c135_call_lots_from_before_a_restart_count_in_the_race_cap(self):
+        r = Rig(levels={"yes": [(0.95, 100_000)]})
+        r.E.prior = {"1": (14_000.0, 13_300.0)}
+        r.pm("1", 0.98, 0.99, 10_100.0, cash=500_000)
+        self.assertLessEqual(r.placed[0][0][0][4], 1_000, "15k shares a race, the lots held from before the restart included")
 
     def test_no_snipe_on_a_book_where_we_hold_the_other_side(self):
         r = Rig()

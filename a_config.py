@@ -550,7 +550,8 @@ ELECTION = dict(on=True, shadow_from="2026-10-22 06:00:00", election_day="2026-1
                 # manual book, pair-set / lock legs and exclude_ex; into existing bids only, never under lot avg + 0.5c. mode: off / shadow
                 # (decisions to shadow.jsonl, would-be sales to RUN_LOG) / live (sells only while election_mode is live); the
                 # `election_recycle` control overrides it.
-                recycle=dict(mode="shadow", bid=0.95, wave_cap=30_000.0, exclude_ex=("1077", "894", "1045"),
+                recycle=dict(mode="shadow", bid=0.97, margin=0.02, wave_cap=30_000.0,   # C135 (Piero 16:05 Nov 3): >= max(0.97, lot avg + 2c), was max(0.95, avg + 0.5c)
+                             exclude_ex=("1077", "894", "1045"),
                              # C118 (spec Oct 27 item 5; docs/night_recycle.md "Oct 27"): 0.95 (beats 0.97 on the normal and slow nights,
                              # >= 0 on the reversal night under today's bids). C121 (Piero 10:10 Oct 27): sell only while a LATER wave (a
                              # last poll close after the sold book's) still has uncalled races; C118's "their projected need > cash" dropped

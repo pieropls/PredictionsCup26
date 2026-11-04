@@ -25,7 +25,7 @@ PRECALL_EVERY_S = 1800                  # a rule firing before the close is logg
 PRICE_CAP, PRICE_UNDER_PM = 0.97, 0.03  # <= min(0.97, PM side bid - 3c), walking the SIG book (Piero 11:40 Oct 22: 3c, was 2c; docs/night_sim.md)
 RACE_SHARES = 15_000                    # <= 15k shares a race (both books)
 STATE_CAP = 20_000.0                    # <= 20k at cost a state (its Senate, Governor and House races are called off the same count)
-WAVE_MULT = 2.5                         # the wave share: 2.5 x usable cash / the uncalled races of this and every later wave (C127, Piero 00:10 Nov 1 item 2:
+WAVE_MULT = 8.0                         # C135 (Piero 16:05 Nov 3: the snipes were starved at ~1.7k a race): 8, was 2.5. The wave share: WAVE_MULT x usable cash / the uncalled races of this and every later wave (C127, Piero 00:10 Nov 1 item 2:
                                         # 2.5 for top 50, accepting the last-wave shortfalls and the reversal-night cost, docs/night_size_top50.md;
                                         # was 2.0 from C126, Piero 11:40 Oct 30 item 3, and 1x from Piero 11:40 Oct 22)
 TTL_S = 120                             # SIG rejects 10-20 s expiries (RECAP §11 9.3)
@@ -68,6 +68,7 @@ class Election:
         self.place, self.cancel, self.book, self.log, self.levels = place, cancel, book, log, levels
         self.place_dry, self.precall_dry = place_dry, precall_dry
         self.manual, self.floor = set(manual), cash_floor
+        self.prior = {}                                      # C135 (Piero 16:05 Nov 3): {ex: (shares, cost)} call-snipe lots held from before a restart (race / state caps, wave share)
         self.lock = threading.RLock()
         self.pm = {}                                        # ex -> deque of (t, bid_yes, ask_yes)
         self.calls = {}                                     # ex -> dict(side, t, signal_t, rule, strict, bought, cost, fails, stopped, reversed)
@@ -325,6 +326,9 @@ class Election:
         sh_race = sum(v["bought"] for e, v in self.calls.items() if self.race(e) == race)
         cost_race = sum(v["cost"] for e, v in self.calls.items() if self.race(e) == race)
         cost_state = sum(v["cost"] for e, v in self.calls.items() if self.state(e) == st)
+        sh_race += sum(q_ for e, (q_, _) in self.prior.items() if self.race(e) == race)
+        cost_race += sum(c_ for e, (_, c_) in self.prior.items() if self.race(e) == race)
+        cost_state += sum(c_ for e, (_, c_) in self.prior.items() if self.state(e) == st)
         self.expire(now)
         usable = free_cash - self.floor - sum(e[1] for e in self.committed)
         share = WAVE_MULT * max(0.0, usable) / self._wave_races(ex) if wave else usable
