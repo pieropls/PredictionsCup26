@@ -179,6 +179,16 @@ class SniperTests(unittest.TestCase):
         self.assertTrue(r.E.calls["1"].get("strict"))
         self.assertEqual(r.placed[0][0][0][3], 0.96, "the 0.960 ask is under the strict cap 0.972 (3c would stop at 0.957)")
 
+    def test_c138_the_maker_bids_count_in_the_sniper_cash_and_the_race_cap(self):
+        r = Rig(levels={"yes": [(0.95, 100_000)]})
+        r.E.maker, r.E.maker_resting = {"1": (14_500.0, 13_775.0)}, 13_775.0
+        r.pm("1", 0.98, 0.99, 10_100.0, cash=500_000)
+        self.assertLessEqual(r.placed[0][0][0][4], 500, "15k shares a race, the maker's 14.5k included")
+        r2 = Rig(levels={"yes": [(0.95, 100_000)]})
+        r2.E.maker_resting = 9_000.0                            # cash 17k: usable 10k - 9k resting = 1k
+        r2.pm("1", 0.98, 0.99, 10_100.0, cash=17_000)
+        self.assertLessEqual(r2.placed[0][0][0][4] * 0.95, 1_000 + 1, "the maker's resting notional is not usable cash")
+
     def test_no_snipe_on_a_book_where_we_hold_the_other_side(self):
         r = Rig()
         self.assertIsNone(r.pm("1", 0.98, 0.99, 10_100.0, pos={"1": -2_000}))   # we hold NO; YES is called

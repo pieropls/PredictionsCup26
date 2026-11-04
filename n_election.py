@@ -36,7 +36,7 @@ MIN_QTY = 10
 PULL_BEFORE_S, NO_ENTRY_AFTER_S = 600, 3 * 3600
 PULL_LAYERS = ("fmm", "fmmtake", "fmmhedge", "carry", "rot", "dump", "fatfinger", "longshot", "scalp", "ladder", "set", "take", "touch", "mm",
                "wall", "sleeve", "swing", "fm")  # TM / SM keep their own glide (fm_poll_block)
-SNIPE_LAYERS = ("callsnipe", "settle", "drift")
+SNIPE_LAYERS = ("callsnipe", "settle", "drift", "callbid")   # C138: the post-call maker bids go with the kill switch
 # ---- C16 reversal: the side bid back under 0.90 within 10 min of a call -> the race stops and HOLDS (rule 0); re-armed by control
 REVERSAL_PM, REVERSAL_WINDOW_S = 0.90, 600
 # ---- C10 settlement morning: a strict call + PM side >= 0.98 held 2 h -> buy < 0.99 at the ask (06:00-08:30 PT); no at-market exit
@@ -70,6 +70,8 @@ class Election:
         self.place_dry, self.precall_dry = place_dry, precall_dry
         self.manual, self.floor = set(manual), cash_floor
         self.prior = {}                                      # C135 (Piero 16:05 Nov 3): {ex: (shares, cost)} call-snipe lots held from before a restart (race / state caps, wave share)
+        self.maker, self.maker_resting = {}, 0.0             # C138 (Piero 17:52 Nov 3): {ex: (shares, cost)} of the post-call maker bids (resting + filled), set by the engine each loop;
+                                                             # their resting notional is not usable cash, and both count in the race / state caps
         self.lock = threading.RLock()
         self.pm = {}                                        # ex -> deque of (t, bid_yes, ask_yes)
         self.calls = {}                                     # ex -> dict(side, t, signal_t, rule, strict, bought, cost, fails, stopped, reversed)
@@ -294,6 +296,21 @@ class Election:
                     n += 1
         return n
 
+    def room(self, ex, usable):
+        """C138: the post-call maker's room on ex's race, the sniper's own terms: (wave share, race shares, race cost, state cost),
+        the prior buys and the maker's resting + filled included."""
+        race, st = self.race(ex), self.state(ex)
+        with self.lock:
+            sh_race = sum(v["bought"] for e, v in self.calls.items() if self.race(e) == race)
+            cost_race = sum(v["cost"] for e, v in self.calls.items() if self.race(e) == race)
+            cost_state = sum(v["cost"] for e, v in self.calls.items() if self.state(e) == st)
+            for d_ in (self.prior, self.maker):
+                sh_race += sum(q_ for e, (q_, _) in d_.items() if self.race(e) == race)
+                cost_race += sum(c_ for e, (_, c_) in d_.items() if self.race(e) == race)
+                cost_state += sum(c_ for e, (_, c_) in d_.items() if self.state(e) == st)
+            share = WAVE_MULT * max(0.0, usable) / self._wave_races(ex)
+        return share, sh_race, cost_race, cost_state
+
     def race_books(self, race):
         return [e for e, m in self.meta.items() if m.get("race") == race]
 
@@ -331,8 +348,11 @@ class Election:
         sh_race += sum(q_ for e, (q_, _) in self.prior.items() if self.race(e) == race)
         cost_race += sum(c_ for e, (_, c_) in self.prior.items() if self.race(e) == race)
         cost_state += sum(c_ for e, (_, c_) in self.prior.items() if self.state(e) == st)
+        sh_race += sum(q_ for e, (q_, _) in self.maker.items() if self.race(e) == race)
+        cost_race += sum(c_ for e, (_, c_) in self.maker.items() if self.race(e) == race)
+        cost_state += sum(c_ for e, (_, c_) in self.maker.items() if self.state(e) == st)
         self.expire(now)
-        usable = free_cash - self.floor - sum(e[1] for e in self.committed)
+        usable = free_cash - self.floor - sum(e[1] for e in self.committed) - self.maker_resting
         share = WAVE_MULT * max(0.0, usable) / self._wave_races(ex) if wave else usable
         cash = min(share - cost_race, STATE_CAP - cost_state, usable)
         qty = int(min(avail, RACE_SHARES - sh_race, max(0.0, cash) / limit))

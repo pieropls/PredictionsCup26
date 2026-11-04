@@ -550,11 +550,15 @@ ELECTION = dict(on=True, shadow_from="2026-10-22 06:00:00", election_day="2026-1
                 # manual book, pair-set / lock legs and exclude_ex; into existing bids only, never under lot avg + 0.5c. mode: off / shadow
                 # (decisions to shadow.jsonl, would-be sales to RUN_LOG) / live (sells only while election_mode is live); the
                 # `election_recycle` control overrides it.
+                maker=dict(mode="live", pm_min=0.98, pm_cancel=0.97, hold_pm=0.97, race_max=5_000.0, total_max=25_000.0, writes_min=6,
+                           usable_min=10_000.0, ttl_s=1800.0, exclude_states=("Georgia",),
+                           exclude_ex=("840", "841", "842", "843", "855", "856", "947", "948")),   # C138 (Piero 17:52 Nov 3): post-call maker bids; the control markets + VWAP-mode flags;
+                                                                                                     # hold_pm: the release layer never sells a called side with PM side bid >= 0.97
                 recycle=dict(mode="shadow", bid=0.97, margin=0.02, wave_cap=30_000.0,   # C135 (Piero 16:05 Nov 3): >= max(0.97, lot avg + 2c), was max(0.95, avg + 0.5c)
                              # C136 (Piero 16:42 Nov 3): only while cash is short (a sniper MISS for cash in the last miss_s, or usable < short_usable),
                              # a called side with PM side bid >= pm_min rests an ask at max(lot avg + margin, best competing ask - 0.5c, floor),
                              # re-pegged down only; otherwise the lots hold to settlement (bid is no longer used)
-                             pm_min=0.98, floor=0.94, miss_s=600.0, short_usable=15_000.0,
+                             pm_min=0.98, floor=0.97, miss_s=600.0, short_usable=15_000.0,   # C138 (Piero 17:52 Nov 3 b): floor 0.94 -> 0.97, and above the book's own call cap
                              exclude_ex=("1077", "894", "1045"),
                              # C118 (spec Oct 27 item 5; docs/night_recycle.md "Oct 27"): 0.95 (beats 0.97 on the normal and slow nights,
                              # >= 0 on the reversal night under today's bids). C121 (Piero 10:10 Oct 27): sell only while a LATER wave (a

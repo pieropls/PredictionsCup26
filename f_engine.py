@@ -711,7 +711,7 @@ class Engine:
                      "ladder": "ladder", "rebound": "ladder", "set": "pairs", "unwind": "pairs", "repair": "pairs",
                      "release": "release", "fatfinger": "fatfinger", "dump": "dump", "dumpexit": "dump",
                      "longshot": "longshot", "longexit": "longshot", "scalp": "scalp", "scalpexit": "scalp", "touch": "touch", "touchexit": "touch", "wall": "wall", "wallexit": "wall", "sleeve": "sleeve", "swing": "swing", "swingsell": "swing", "fm": "fm", "fmexit": "fm", "tm": "tm", "tmexit": "tm", "rot": "rot", "rotexit": "rot", "fmm": "fmm", "fmmtake": "fmm", "fmmexit": "fmm", "fmmhedge": "fmm", "carry": "carry", "sm": "sm", "smexit": "sm", "catch": "catch", "catchexit": "catch", "flip": "flip", "flipexit": "flip",   # C128
-                     "callsnipe": "election", "callexit": "election", "settle": "election", "drift": "election", "driftexit": "election"}   # C102
+                     "callsnipe": "election", "callexit": "election", "settle": "election", "drift": "election", "driftexit": "election", "callbid": "election"}   # C102; C138
     REDUCING = {"exit", "recycle", "rebound", "unwind", "repair", "release", "dumpexit", "longexit", "scalpexit", "touchexit", "wallexit", "tmexit", "fmexit", "swingsell", "smexit", "rotexit", "fmmexit", "callexit", "driftexit", "catchexit", "flipexit"}
 
     def gate(self, b, wants):
@@ -10093,9 +10093,13 @@ class Engine:
             rec = getattr(self, "el_recycle", None) or {}     # C117: the recycle scan's picks (live only)
             cbs = (not bidsell and self.carry_bidsell_on(now) and str(ex) not in (CARRY_BIDSELL.get("exclude") or ())
                    and (self.carry_ev_held(ex, side) if self.carry_ev_held(ex, side) is not None else 1.0) <= CARRY_BIDSELL["ev_max"] + 1e-9)   # C100 item 4
+            hold_side = self.el_called_hold(now)            # C138 (Piero 17:52 Nov 3 a): called winners are not the release layer's
             for sub, v in subs_iter:
                 if sub == "inventory" and fresh_inv:
                     continue
+                if (str(ex), sub) not in rec and (str(sub).startswith(("callsnipe:", "callbid:")) or (str(ex), side) in hold_side):
+                    continue                                # C138 (a): no CORE LOCK / NO-EDGE / other release ask on a call-snipe or maker lot, nor on a called
+                                                            # side with PM side bid >= 0.97 (only RECYCLE FAST, while cash is short, sells those)
                 if v * q <= 0 or sub.startswith(("manual", "pairset:", "fmm:", "fmmlock:")) or (sub.startswith(("catch2:", "catch:", "flip:")) and (str(ex), sub) not in rec) or (not allow_all and (sub.startswith(("sleeve:", "swing:")) or sub in res_subs)) or ((str(ex), sub) in self.core_set and str(ex) not in rot_left and str(ex) not in fund_left and (str(ex), sub) not in rec and (str(ex), sub) not in conv):
                     continue                                # never a core lot (unless Piero named the market for the rotation, C94), his manual / pair / sleeve lots, or the RI reservoir; C128b / C129: a CATCH v2 lot has its own exit (only the night's wave recycling sells it here); C132: v1's too
                 key = f"{ex}|{sub}"
@@ -11908,6 +11912,7 @@ class Engine:
             meta[ex] = dict(race=race, party=r.get("party"), title=r.get("title"), state=state)
             f_, l_ = ep(r["first_close_pt"]), ep(r["last_close_pt"])
             first[race] = min(first.get(race, f_), f_); last[race] = max(last.get(race, l_), l_)
+        self.el_build_t = time.time()                       # C138: maker fills from here are the maker's; before it they are prior buys
         self.election = el.Election(meta, last, time.time, self.el_place, self.el_cancel, self.el_book, self.el_log, manual=tuple(str(x) for x in self.manual_ex),
                                     cash_floor=el.CASH_FLOOR, first_close=first, levels=self.el_levels, place_dry=self.el_place_dry,
                                     precall_dry=bool(ELECTION.get("precall_dry")))
@@ -11915,7 +11920,7 @@ class Engine:
             pr = {}                                         # C137 (Piero 17:05 item 4): what the sniper BOUGHT tonight (its fills), not what is still held:
             for f in list(self.ledger.fills):               # a lot sold since (by hand, VA Senate R NO) is never re-bought to restore it
                 ex = str(f.get("ex"))
-                if f.get("layer") == "callsnipe" and ex in meta and str(f.get("t")) >= f"{day} 00:00:00" and f.get("action", "buy") == "buy":
+                if f.get("layer") in ("callsnipe", "callbid") and ex in meta and str(f.get("t")) >= f"{day} 00:00:00" and f.get("action", "buy") == "buy":
                     sh, c_ = pr.get(ex, (0.0, 0.0))
                     pr[ex] = (sh + float(f["qty"]), c_ + float(f["qty"]) * float(f["price"]))
             self.election.prior = pr
@@ -11928,7 +11933,8 @@ class Engine:
         msg = (f"ELECTION armed ({self.el_mode()}): {len(meta)} books / {len(last)} races from poll_close.json; first close "
                f"{time.strftime('%m-%d %H:%M', time.localtime(min(first.values())))} PT, last {time.strftime('%m-%d %H:%M', time.localtime(max(last.values())))} PT; "
                f"call = PM side bid >= {el.CALL_HOLD} for {el.CALL_HOLD_S:.0f} s or >= {el.CALL_STRICT} once after the state's last close; sniper <= min({el.PRICE_CAP}, "
-               f"PM bid - {el.PRICE_UNDER_PM * 100:.0f}c), {el.RACE_SHARES:,} shares a race, {el.STATE_CAP:,.0f} a state, {el.TTL_S} s; no post-call bids") if meta else "ELECTION: no books mapped"
+               f"PM bid - {el.PRICE_UNDER_PM * 100:.0f}c; a strict call - {el.PRICE_UNDER_PM_STRICT * 100:.1f}c), {el.RACE_SHARES:,} shares a race, {el.STATE_CAP:,.0f} a state, {el.TTL_S} s; "
+               f"post-call maker bids {self.el_maker_mode()} (strict calls, <= min(0.97, PM bid - 1.5c), 5k a race, 25k resting)") if meta else "ELECTION: no books mapped"
         self.event("NIGHT", msg); self.night.line(msg)
 
     def el_book(self, ex):
@@ -12287,6 +12293,10 @@ class Engine:
         except Exception as err:
             self.el_recycle = {}
             self.event("ERR", f"recycle scan: {err!r}")
+        try:
+            self.el_maker_step(now)                         # C138 (Piero 17:52 Nov 3): the post-call maker bids
+        except Exception as err:
+            self.event("ERR", f"maker: {err!r}")
         if not self.el_lane_paused() and E.queue:
             E.run_queue(now, cash, pos)
         if WIND_DOWN.get("on") and not getattr(self, "el_checklist_done", False) and time.strftime("%Y-%m-%d %H:%M", time.localtime(now)) >= f"{ELECTION['election_day']} {WIND_DOWN['checklist_at'][11:]}":
@@ -12337,6 +12347,23 @@ class Engine:
             return sum(l[0] * l[1] for l in lots) / tot
         a = (self.ledger.tranches.get(sub) or {}).get("avg")
         return float(a) if a else (float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0) or None)
+
+    def el_called_hold(self, now):
+        """C138 (Piero 17:52 Nov 3 a): {(ex, side)} of the called sides (not reversed) whose PM side bid is >= 0.97, once a loop."""
+        c = self.__dict__.get("_el_hold")
+        if c and now - c[0] < 1.0:
+            return c[1]
+        E, out = self.election, set()
+        if E is not None:
+            thr = float((ELECTION.get("maker") or {}).get("hold_pm", 0.97))
+            with E.lock:
+                for ex, c_ in E.calls.items():
+                    if not c_.get("reversed"):
+                        sb = E._side_bid(str(ex), c_["side"])
+                        if sb is not None and sb >= thr - 1e-9:
+                            out.add((str(ex), c_["side"]))
+        self._el_hold = (now, out)
+        return out
 
     def el_recycle_short(self, now, cfg):
         """C136 (Piero 16:42 Nov 3): cash is short = a sniper MISS for cash in the last 10 min, or the sniper's usable < 15k. -> reason or None"""
@@ -12411,12 +12438,14 @@ class Engine:
             sig_avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
             comp = self.fmm_others_ask(ex, side)
             for sub, q in list((self.ledger.subbooks.get(ex) or {}).items()):
-                if abs(q) < MIN_QTY or (q > 0) != (side == "yes") or sub == "manual" or str(sub).startswith(("manual", "pairset:", "fmmlock:")):
-                    continue
+                if abs(q) < MIN_QTY or (q > 0) != (side == "yes") or sub == "manual" or str(sub).startswith(("manual", "pairset:", "fmmlock:", "callbid:")):
+                    continue                                # C138: the maker's fills are held
                 avg = self.el_sub_avg(ex, side, sub)
                 if not avg:
                     continue
                 floor_ = max(bots.tick_up(round(avg + margin, 6)), low_px)
+                under = el.PRICE_UNDER_PM_STRICT if c.get("strict") and pmb[ex] >= el.CALL_STRICT - 1e-9 else el.PRICE_UNDER_PM
+                floor_ = max(floor_, bots.tick_up(round(min(el.PRICE_CAP, pmb[ex] - under) + TICK, 6)))   # C138: above our own sniper's cap on the book (I4)
                 if sub == "inventory" and sig_avg:
                     floor_ = max(floor_, bots.tick_up(round(sig_avg + margin, 6)))
                 cands.append((avg, ex, side, sub, abs(q), floor_, comp, c["t"]))
@@ -12499,6 +12528,146 @@ class Engine:
                     break
         if len(seen) > 5000:
             self.el_rf_seen = set(list(seen)[-2000:])
+
+    def el_maker_mode(self):
+        cfg = ELECTION.get("maker") or {}
+        return str(((self.controls.d.get("election") or {}).get("maker_mode")) or cfg.get("mode") or "off")
+
+    def el_maker_orders(self):
+        return [o for o in self.open if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "callbid"]
+
+    def el_maker_write(self, now, cfg):
+        """C138: <= writes_min writes (a place or a cancel) a minute for the maker; True when one may go now (and counts it)."""
+        w = self.__dict__.setdefault("el_mk_w", collections.deque())
+        while w and now - w[0] > 60:
+            w.popleft()
+        if len(w) >= int(cfg.get("writes_min", 6)):
+            return False
+        w.append(now)
+        return True
+
+    def el_maker_step(self, now):
+        """C138 (Piero 17:52 Nov 3): POST-CALL MAKER BIDS. On each strictly called side (rule B, not reversed / stopped, the race not
+        stopped, PM side bid >= 0.98 for a new bid) one bid at the best bid of the others + 0.5c, never above min(0.97, PM bid - 1.5c),
+        never at or above our own asks in that book nor at the others' best ask (the snipes take those); sized to the race's remaining
+        wave share (the sniper's terms: prior buys and the maker's own resting + filled included), <= race_max notional a race and
+        total_max resting in all; re-pegged UP when outbid (cancel first, the new bid the next loop), never down; every bid cancelled on a
+        reversal / race stop / PM side bid < 0.97 / the cap moving under it / our own ask at or under it / the maker off; <= writes_min
+        writes a minute; no new bid while usable < usable_min or new risk is paused; never Georgia, the control markets or the VWAP-mode
+        flags; fills held (sub callbid:, no seller). Kill switch: the election.maker_mode control (off / live)."""
+        cfg = ELECTION.get("maker") or {}
+        E = self.election
+        mine = self.el_maker_orders()
+        live = E is not None and self.el_mode_cached == "live" and self.el_maker_mode() == "live" and not E.stopped
+        pm_new, pm_keep = float(cfg.get("pm_min", 0.98)), float(cfg.get("pm_cancel", 0.97))
+        excl = {str(x) for x in (cfg.get("exclude_ex") or ())}
+        excl_st = set(cfg.get("exclude_states") or ())
+        targets = {}
+        if live:
+            with E.lock:
+                calls = {str(ex): dict(c) for ex, c in E.calls.items()}
+                pmb = {ex: E._side_bid(ex, c["side"]) for ex, c in calls.items()}
+                stopped = set(E.race_stop)
+            for ex, c in calls.items():
+                m = E.meta.get(ex) or {}
+                if (not c.get("strict") or c.get("reversed") or c.get("stopped") or E.race(ex) in stopped or ex in excl
+                        or m.get("state") in excl_st or "control" in str(m.get("race", "")).lower() or ex in self.manual_ex
+                        or ex not in self.owner or pmb.get(ex) is None):
+                    continue
+                targets[(ex, c["side"])] = float(pmb[ex])
+        filled_t0 = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(getattr(self, "el_build_t", 0)))
+        filled = collections.defaultdict(lambda: [0.0, 0.0])
+        for f in self.ledger.fills[-2000:]:
+            if f.get("layer") == "callbid" and str(f.get("t")) >= filled_t0:
+                filled[str(f["ex"])][0] += float(f["qty"]); filled[str(f["ex"])][1] += float(f["qty"]) * float(f["price"])
+        self.el_maker_fill_lines(filled_t0)
+        keep, resting = {}, collections.defaultdict(lambda: [0.0, 0.0])
+        for o in mine:
+            k = (str(o["ex"]), o["side"])
+            resting[k[0]][0] += float(o["qty"]); resting[k[0]][1] += float(o["qty"]) * float(o["price"])
+            if o["id"] in self.ex.cancelling:
+                continue
+            sb, why = targets.get(k), None
+            if not live:
+                why = "the maker is off" if E is None or not E.stopped else "election_stop"
+            elif sb is None:
+                why = "the call is reversed / stopped, the race stopped, or not a strict call"
+            elif sb < pm_keep - 1e-9:
+                why = f"PM side bid {sb:.3f} < {pm_keep:.2f}"
+            else:
+                cap = round(min(el.PRICE_CAP, sb - el.PRICE_UNDER_PM_STRICT), 3)
+                oa = self.own_ask(k[0], k[1])
+                if o["price"] > cap + 1e-9:
+                    why = f"over the cap {cap:.3f}"
+                elif oa is not None and o["price"] >= oa - 1e-9:
+                    why = f"at or above our own ask {oa:.3f}"
+                elif k in keep:
+                    why = "a second bid on the side"
+            if why is None:
+                keep[k] = o
+                continue
+            if self.el_maker_write(now, cfg):
+                self.ex.cancel(o, reason=f"maker: {why}", front=True)
+                self.el_log("MAKER", f"MAKER CANCEL {self.name(k[0])} {k[1].upper()} {o['qty']:,.0f} at {o['price']:.3f}: {why}")
+        if E is not None:
+            with E.lock:
+                E.maker = {ex: (filled[ex][0] + resting[ex][0], filled[ex][1] + resting[ex][1]) for ex in set(filled) | set(resting)}
+                E.maker_resting = sum(v[1] for v in resting.values())
+        self.ex.step_cancels()
+        if not live:
+            return
+        cash = min(self.cash_raw_hist) if getattr(self, "cash_raw_hist", None) else 0.0
+        with E.lock:
+            usable = cash - E.floor - sum(e[1] for e in E.committed) - E.maker_resting
+        tot = E.maker_resting
+        for (ex, side), sb in sorted(targets.items(), key=lambda kv: -kv[1]):
+            if sb < pm_new - 1e-9 and (ex, side) not in keep:
+                continue
+            cap = round(min(el.PRICE_CAP, sb - el.PRICE_UNDER_PM_STRICT), 3)
+            cap = bots.tick_down(cap + 1e-9) if abs(cap / TICK - round(cap / TICK)) > 1e-6 else cap
+            ob = self.catch_others_bid(ex, side)
+            oa_o = self.fmm_others_ask(ex, side)
+            oa = self.own_ask(ex, side)
+            if ob is None:
+                continue
+            px = min(cap, round(ob + TICK, 3))
+            if oa is not None:
+                px = min(px, round(oa - TICK, 3))
+            if oa_o is not None and px >= oa_o - 1e-9:
+                continue                                    # the bid would take the others' ask: the sniper's job
+            cur = keep.get((ex, side))
+            if cur is not None:
+                if ob > cur["price"] + 1e-9 and px > cur["price"] + 1e-9 and self.el_maker_write(now, cfg):
+                    self.ex.cancel(cur, reason=f"maker: outbid at {ob:.3f}, re-peg up to {px:.3f}", front=True)
+                    self.el_log("MAKER", f"MAKER REPEG {self.name(ex)} {side.upper()}: outbid at {ob:.3f}; {cur['price']:.3f} cancelled, {px:.3f} next")
+                continue                                    # never down
+            if px < 0.01 or usable < float(cfg.get("usable_min", 10_000.0)) or self.el_lane_paused():
+                continue
+            share, sh_race, cost_race, cost_state = E.room(ex, usable)
+            race_rest = sum(resting[e][1] for e in resting if E.race(e) == E.race(ex))
+            room = min(share - cost_race, el.STATE_CAP - cost_state, float(cfg.get("race_max", 5_000.0)) - race_rest,
+                       float(cfg.get("total_max", 25_000.0)) - tot, usable)
+            qty = int(min(max(0.0, room) / px, el.RACE_SHARES - sh_race))
+            if qty < MIN_QTY or not self.el_maker_write(now, cfg):
+                continue
+            self.ex.place([(self.owner[ex].name, f"callbid:{ex}:{side}", "callbid", (ex, side, "buy", round(px, 3), qty))], ttl_s=float(cfg.get("ttl_s", 1800.0)))
+            tot += qty * px; usable -= qty * px
+            resting[ex][0] += qty; resting[ex][1] += qty * px
+            self.el_log("MAKER", f"MAKER BID {self.name(ex)} {side.upper()} {qty:,} at {px:.3f} (others' best bid {ob:.3f} + 0.5c, cap {cap:.3f} = min(0.97, PM {sb:.3f} - 1.5c); "
+                                 f"wave share {share:,.0f}, race cost {cost_race:,.0f}; resting {tot:,.0f} of {float(cfg.get('total_max', 25_000.0)):,.0f})")
+        self.ex.step_placements()
+
+    def el_maker_fill_lines(self, t0):
+        """C138: one MAKER FILL line per fill of a maker bid (held: no exit)."""
+        seen = self.__dict__.setdefault("el_mk_seen", set())
+        for f in self.ledger.fills[-500:]:
+            if f.get("layer") != "callbid" or str(f.get("t")) < t0:
+                continue
+            k = self.fill_key(f)
+            if k in seen:
+                continue
+            seen.add(k)
+            self.el_log("MAKER", f"MAKER FILL {self.name(str(f['ex']))} {str(f['side']).upper()} {float(f['qty']):,.0f} at {float(f['price']):.3f} at {str(f.get('t'))[11:19]} (held)")
 
     def el_fill_events(self, fills):
         """night_reconcile §4 item 9: each fill of an election layer (call snipe, drift, call exit, settle) -> one NIGHT line and a row of
@@ -14457,6 +14626,16 @@ class EngineControls:
                 c.d.setdefault("election", {})["rearm_req"] = dict(t=stamp(), race=race)
                 c.save()
             return f"election_rearm queued for the next loop: {race or 'every race and the kill switch'}"
+        if action == "election_maker":                     # C138 (Piero 17:52 Nov 3): the post-call maker bids' kill switch (off cancels every maker bid)
+            m = str(args.get("mode") or "")
+            if m not in ("off", "live"):
+                raise ValueError("mode must be off or live")
+            with c.lock:
+                c.d.setdefault("election", {})["maker_mode"] = m
+                c.save()
+            msg = f"election_maker -> {m}" + (" (every maker bid is cancelled, <= 6 a minute)" if m == "off" else "")
+            self.eng.event("NIGHT", msg); self.eng.night.line(f"ELECTION {msg}")
+            return msg
         if action == "election_recycle":                   # C117: wave recycling off / shadow / live without a push
             m = str(args.get("mode") or "")
             if m not in ("off", "shadow", "live"):

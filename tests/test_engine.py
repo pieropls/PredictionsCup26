@@ -7415,7 +7415,7 @@ class C102Tests(EngineCase):
                          "lowest avg first; the wave cap (here 1,500) takes 975 of it, the dump lot (+975) would pass it; the FMM lot's floor 0.995 > 0.99; never the manual book")
         eng.fmm_others_ask = lambda ex, side: 0.93
         eng.el_recycle_scan(time.time())
-        self.assertEqual(eng.el_recycle, {(a, f"carry:{a}:yes"): 0.94}, "never under 0.94")
+        self.assertEqual(eng.el_recycle, {(a, f"carry:{a}:yes"): 0.975}, "C138: never under 0.97, nor at or under the book's own call cap 0.970 (+ 0.5c)")
         f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], later_uncalled=False, mode="live", exclude_ex=(a,)))
         eng.el_recycle_scan(time.time())
         self.assertEqual(eng.el_recycle, {}, "exclude_ex (RI Senate R NO, the SELL_HOLD lots)")
@@ -7425,6 +7425,149 @@ class C102Tests(EngineCase):
         eng.el_recycle_scan(time.time())
         self.assertEqual(eng.el_recycle, {}, "the wave's 30k is used")
         self.assertTrue(any("RECYCLE FAST FILL" not in str(t) for _, t in eng.el_logq))
+
+    def mk_rig(self, ob=0.95, oa=0.975, own=None, pm=0.985):
+        """C138: a live election with a strict call on a's YES, the maker's book helpers stubbed, its writes recorded (one engine a test)."""
+        if getattr(self, "_mk", None) is None:
+            fake, eng, a = self.rig(mode="live")
+            self._mk = (fake, eng, a, dict(eng.election.meta[a]))
+        fake, eng, a, meta0 = self._mk
+        E = eng.election
+        E.meta[a] = dict(meta0); E.race_stop.clear(); E.stopped = False; E.maker, E.maker_resting = {}, 0.0
+        eng.controls.d.setdefault("election", {}).pop("maker_mode", None)
+        eng.el_mode_cached = "live"
+        E.calls[a] = dict(side="yes", t=time.time(), signal_t=time.time(), rule="B", strict=True, bought=0.0, cost=0.0, fails=0, stopped=False, reversed=False)
+        E.pm[a] = [(time.time(), pm, 0.99)]
+        E.committed, E.prior = [], {}
+        eng.cash_raw_hist = [100_000.0]
+        eng.catch_others_bid = lambda ex, side: ob
+        eng.fmm_others_ask = lambda ex, side: oa
+        eng.own_ask = lambda ex, side: own
+        rec = dict(place=[], cancel=[])
+        eng.ex.place = lambda items, **kw: rec["place"].append(items) or "k"
+        eng.ex.cancel = lambda o, reason="", front=False: rec["cancel"].append((o, reason)) or True
+        eng.ex.step_placements = lambda *a_, **k_: None
+        eng.ex.step_cancels = lambda *a_, **k_: None
+        eng.el_maker_orders = lambda: []
+        eng.el_mk_w = collections.deque()
+        f_engine.ELECTION = dict(a_config.ELECTION, on=True, shadow_from="2000-01-01 00:00:00")
+        return fake, eng, a, E, rec
+
+    def test_c138_maker_bids_one_tick_over_the_others_best_bid_under_the_strict_cap_and_our_asks(self):
+        fake, eng, a, E, rec = self.mk_rig()
+        eng.el_maker_step(time.time())
+        (it,), = rec["place"]
+        ex_, side, action, px, qty = it[3]
+        self.assertEqual((ex_, side, action, px, it[2], it[1]), (a, "yes", "buy", 0.955, "callbid", f"callbid:{a}:yes"), "others' best bid 0.950 + 0.5c")
+        self.assertLessEqual(qty * px, 5_000 + 1, "<= 5k notional a race")
+        self.assertTrue(any("MAKER BID" in str(t) for _, t in eng.el_logq))
+        fake, eng, a, E, rec = self.mk_rig(ob=0.965, oa=0.99, pm=0.98)
+        eng.el_maker_step(time.time())
+        self.assertEqual(rec["place"][0][0][3][3], 0.965, "never above min(0.97, PM 0.980 - 1.5c) = 0.965")
+        fake, eng, a, E, rec = self.mk_rig(ob=0.95, own=0.955)
+        eng.el_maker_step(time.time())
+        self.assertEqual(rec["place"][0][0][3][3], 0.95, "under our own ask 0.955 (never at or above it)")
+        fake, eng, a, E, rec = self.mk_rig(ob=0.95, oa=0.955)
+        eng.el_maker_step(time.time())
+        self.assertEqual(rec["place"], [], "0.955 would take the others' ask: the sniper's job")
+        fake, eng, a, E, rec = self.mk_rig(pm=0.975)
+        eng.el_maker_step(time.time())
+        self.assertEqual(rec["place"], [], "a new bid needs the PM side bid >= 0.98")
+        fake, eng, a, E, rec = self.mk_rig()
+        E.calls[a]["strict"] = False
+        eng.el_maker_step(time.time())
+        self.assertEqual(rec["place"], [], "rule A calls get no maker bid")
+        fake, eng, a, E, rec = self.mk_rig()
+        eng.cash_raw_hist = [16_000.0]                         # usable 9k < 10k
+        eng.el_maker_step(time.time())
+        self.assertEqual(rec["place"], [], "no new maker bid while usable < 10k")
+        fake, eng, a, E, rec = self.mk_rig()
+        E.meta[a] = dict(E.meta[a], state="Georgia")
+        eng.el_maker_step(time.time())
+        self.assertEqual(rec["place"], [], "never Georgia")
+        fake, eng, a, E, rec = self.mk_rig()
+        f_engine.ELECTION = dict(a_config.ELECTION, maker=dict(a_config.ELECTION["maker"], exclude_ex=(a,)))
+        eng.el_maker_step(time.time())
+        self.assertEqual(rec["place"], [], "never the control markets / VWAP-mode flags (exclude_ex)")
+        fake, eng, a, E, rec = self.mk_rig()
+        eng.controls.d["election"]["maker_mode"] = "off"
+        eng.el_maker_step(time.time())
+        self.assertEqual(rec["place"], [], "the kill switch")
+
+    def test_c138_maker_re_pegs_up_when_outbid_never_down_and_cancels_on_reversal_stop_pm_and_the_kill_switch(self):
+        fake, eng, a, E, rec = self.mk_rig(ob=0.955)
+        mine = dict(id="m1", ex=a, side="yes", action="buy", price=0.95, qty=1_000.0)
+        eng.el_maker_orders = lambda: [mine]
+        eng.el_maker_step(time.time())
+        self.assertEqual([o["id"] for o, _ in rec["cancel"]], ["m1"], "outbid at 0.955: cancel first")
+        self.assertEqual(rec["place"], [], "the new bid goes the next loop (I6)")
+        for ob, why in ((0.94, "never down"), (0.95, "a bid that joins ours does not outbid it")):
+            fake, eng, a, E, rec = self.mk_rig(ob=ob)
+            eng.el_maker_orders = lambda: [mine]
+            eng.el_maker_step(time.time())
+            self.assertEqual((rec["cancel"], rec["place"]), ([], []), why)
+        def cancelled(setup):
+            fake, eng, a, E, rec = self.mk_rig()
+            eng.el_maker_orders = lambda: [mine]
+            setup(eng, E, a)
+            eng.el_maker_step(time.time())
+            return [r for _, r in rec["cancel"]]
+        self.assertTrue(cancelled(lambda eng, E, a: E.calls[a].update(reversed=True)), "a reversal")
+        self.assertTrue(cancelled(lambda eng, E, a: E.race_stop.add(E.race(a))), "a race stop")
+        self.assertTrue(cancelled(lambda eng, E, a: E.pm.__setitem__(a, [(time.time(), 0.965, 0.97)])), "PM side bid < 0.97")
+        self.assertTrue(cancelled(lambda eng, E, a: eng.controls.d["election"].update(maker_mode="off")), "the kill switch")
+        self.assertTrue(cancelled(lambda eng, E, a: setattr(eng, "own_ask", lambda ex, side: 0.95)), "our own ask at its price")
+        self.assertTrue(cancelled(lambda eng, E, a: setattr(E, "stopped", True)), "election_stop")
+        self.assertFalse(cancelled(lambda eng, E, a: E.pm.__setitem__(a, [(time.time(), 0.975, 0.98)])), "PM 0.975 >= 0.97 keeps the bid (cap 0.960 >= 0.950)")
+        self.assertIn("callbid", el_mod.SNIPE_LAYERS, "election_stop pulls the maker bids too")
+
+    def test_c138_maker_writes_6_a_minute_25k_resting_and_its_bids_count_in_the_sniper_cash_and_caps(self):
+        fake, eng, a, E, rec = self.mk_rig()
+        exs = [str(9000 + i) for i in range(10)]
+        for i, x in enumerate(exs):
+            E.meta[x] = dict(race=f"R{i}", party="R", state=f"S{i}")
+            E.calls[x] = dict(E.calls[a]); E.pm[x] = [(time.time(), 0.99, 0.995)]
+            eng.owner[x] = eng.owner[a]
+        eng.el_maker_step(time.time())
+        self.assertEqual(len(rec["place"]), 5, "the 25k resting cap (5 x 5k) binds before the 6 writes a minute")
+        self.assertLessEqual(sum(it[0][3][3] * it[0][3][4] for it in rec["place"]), 25_000 + 1, "<= 25k resting")
+        placed = [dict(id=f"m{i}", ex=it[0][3][0], side="yes", action="buy", price=it[0][3][3], qty=it[0][3][4]) for i, it in enumerate(rec["place"])]
+        eng.el_maker_orders = lambda: placed
+        eng.el_mk_w = collections.deque()
+        rec["place"].clear()
+        eng.el_maker_step(time.time())
+        self.assertGreater(E.maker_resting, 20_000, "the resting maker bids are known to the sniper")
+        self.assertEqual(rec["place"], [], "one bid a side; 25k resting")
+        share, sh, cost_race, cost_state = E.room(placed[0]["ex"], 50_000.0)
+        self.assertGreater(cost_race, 4_000, "the maker's resting bid counts in its race's cost")
+        f_engine.ELECTION = dict(a_config.ELECTION, maker=dict(a_config.ELECTION["maker"], total_max=1e9, race_max=1e9))
+        rec["place"].clear(); eng.el_maker_orders = lambda: []; eng.el_mk_w = collections.deque(); E.maker, E.maker_resting = {}, 0.0
+        eng.el_maker_step(time.time())
+        self.assertEqual(len(rec["place"]), 6, "<= 6 writes a minute")
+
+    def test_c138_the_release_layer_never_sells_a_call_snipe_or_maker_lot_nor_a_called_side_with_pm_097(self):
+        fake, eng, a = self.rig(mode="live")
+        E = eng.election
+        sub = f"callsnipe:{a}:yes"
+        C93Tests.lot(self, eng, fake, a, sub, 3000, 0.85, (0.90, 0.905, 0.9025), 0.93)   # 2.8% left at the touch: a NO-EDGE ask before C138
+        loop(eng, fake); loop(eng, fake)
+        eng.ledger.subbooks[a] = {sub: 3000.0}; fake.pos[a] = 3000; eng.lots_cache = (None, {})
+        f_engine.ROTATION = dict(a_config.ROTATION, on=True, sells={a: 4000}, buys=[])
+        eng.controls.d["rotation"] = dict(since="x", sell_left={a: 4000}, cash_freed=0.0, sold=0.0, skipped={})
+        self.assertNotIn(a, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time()), "a call-snipe lot: never the release layer's")
+        eng.ledger.subbooks[a] = {f"dump:{a}:yes:1": 3000.0}; eng.lots_cache = (None, {})
+        eng.ledger.tranches[f"dump:{a}:yes:1"] = dict(ex=a, side="yes", kind="dump", state="open", ts=time.time() - 60, t="x", avg=0.85)
+        self.assertIn(a, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time()), "an uncalled lot still sells")
+        E.calls[a] = dict(side="yes", t=time.time(), signal_t=time.time(), rule="A", strict=False, bought=0.0, cost=0.0, fails=0, stopped=False, reversed=False)
+        E.pm[a] = [(time.time(), 0.97, 0.98)]
+        eng._el_hold = None
+        self.assertNotIn(a, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time() + 2), "a called side with PM side bid >= 0.97: held")
+        E.pm[a] = [(time.time(), 0.965, 0.97)]
+        self.assertIn(a, eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time() + 4), "PM 0.965 < 0.97: the release rules again")
+        E.pm[a] = [(time.time(), 0.99, 0.995)]
+        eng.el_recycle = {(str(a), f"dump:{a}:yes:1"): 0.975}
+        plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time() + 6)
+        self.assertEqual(plan[a]["why"], "recycle fast", "only RECYCLE FAST (cash short) sells a called winner")
 
     def test_c121_recycling_at_095_only_while_a_later_wave_has_uncalled_races(self):
         fake, eng, a = self.rig(mode="live")
@@ -7450,7 +7593,7 @@ class C102Tests(EngineCase):
         self.assertTrue(any(r.get("kind") == "recycle" and r.get("verdict") == "hold: no later wave has uncalled races" for r in eng.el_shadowq))
         E.close["Later"] = w + 1800                                           # one uncalled race in a later wave: sell
         eng.el_recycle_scan(time.time())
-        self.assertEqual(eng.el_recycle, {(a, f"carry:{a}:yes"): 0.97}, "max(0.92, 0.975 - 0.5c, 0.94) while a later wave has uncalled races")
+        self.assertEqual(eng.el_recycle, {(a, f"carry:{a}:yes"): 0.975}, "C138: max(0.92, 0.975 - 0.5c, 0.97, the strict cap 0.970 + 0.5c) while a later wave has uncalled races")
         E.race_stop.add("Later")                                              # a stopped race counts as not pending
         eng.el_recycle_scan(time.time())
         self.assertEqual(eng.el_recycle, {})
