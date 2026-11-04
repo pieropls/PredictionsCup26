@@ -10118,8 +10118,8 @@ class Engine:
                 floor_ = bots.tick_up(round(float(avg) + RULE0_MARGIN, 6))
                 if sub == "inventory" and sig_avg:
                     floor_ = max(floor_, bots.tick_up(round(sig_avg + RULE0_MARGIN, 6)))   # C99e: 'inventory' has no lots of its own (its tranche key is shared): never under SIG's position average + 0.5c (Delaware 02:2x)
-                if (str(ex), sub) in rec and bid is not None and bid >= floor_ - 1e-9:
-                    px, reason = bid, "recycle at the bid"   # C117 (C7): wave recycling of a strict-called winner at >= 0.97 (core included)
+                if (str(ex), sub) in rec:
+                    px, reason = max(floor_, float(rec[(str(ex), sub)])), "recycle fast"   # C136 (Piero 16:42 Nov 3): the scan's ask while cash is short (core included)
                 elif (str(ex), sub) in getattr(self, "conv_elastic", set()) and (str(ex), sub) in conv:
                     fl_e = max(floor_, bots.tick_up(round(fs - float(ELECTION_RESERVE["elastic_below_fair"]), 6)))   # C114: the elastic 15k, never under fair - 5c
                     px, reason = (bid, "elastic bid") if (bid is not None and bid >= fl_e - 1e-9) else (max(ask, fl_e), "elastic")
@@ -10170,7 +10170,7 @@ class Engine:
                         continue                            # item 1: >= 6% return left -> HOLD
                 if reason in ("convergence", "elastic", "elastic bid") and self.wd_after("conv_no_ev_floor", now):
                     pass                                    # C110 (Piero 11:40 Oct 22 item 3): from Oct 29 the ramp overrides the 5% floor (lowest EV/$ first)
-                elif reason != "h1 shortfall" and ev_fl:    # C101 item C (Piero 15:15 Oct 21): no fire sale — EV/$ held <= 5% at the sale price
+                elif reason not in ("h1 shortfall", "recycle fast") and ev_fl:    # C101 item C (Piero 15:15 Oct 21): no fire sale — EV/$ held <= 5% at the sale price
                     if reason.endswith("at the bid"):
                         if px < ev_fl - 1e-9:
                             continue                        # the bid would sell above 5% EV/$: no
@@ -10185,7 +10185,7 @@ class Engine:
                     take = min(take, int(rot_left[str(ex)]))
                 if reason.startswith("fund sale"):
                     take = min(take, int(fund_left[str(ex)]))
-                if reason == "recycle at the bid":
+                if reason == "recycle fast":
                     pass                                    # C117: the scan sized it (whole lots inside the wave's 30k); rule 0 clips it above
                 elif reason.endswith("at the bid"):
                     left_ = (float(NIGHT_SELL["cap"]) - self.night_sold()) if bidsell else (float(CARRY_BIDSELL["day_cap"]) - self.carry_bid_sold_today(now))
@@ -10207,7 +10207,7 @@ class Engine:
                 if anc_wait and not any(str(o["ex"]) == str(ex) and (self.ledger.orders.get(o["id"]) or {}).get("layer") == "release" for o in self.open):
                     self.sale_anchor.pop(str(ex), None)      # C100: no lot clears the kept price and nothing rests: the next post starts a new anchor
                 continue
-            if why != "h1 shortfall" and not why.endswith("at the bid") and str(ex) not in self.sale_anchor:
+            if why not in ("h1 shortfall", "recycle fast") and not why.endswith("at the bid") and str(ex) not in self.sale_anchor:
                 self.sale_anchor[str(ex)] = dict(px=px_sale, side=side, t=now)   # posted once: this price is kept (item 4; C100: every sale rule)
             n = sum(split.values())
             left = fs - px_sale
@@ -12339,28 +12339,62 @@ class Engine:
         a = (self.ledger.tranches.get(sub) or {}).get("avg")
         return float(a) if a else (float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0) or None)
 
+    def el_recycle_short(self, now, cfg):
+        """C136 (Piero 16:42 Nov 3): cash is short = a sniper MISS for cash in the last 10 min, or the sniper's usable < 15k. -> reason or None"""
+        E = self.election
+        if not getattr(self, "cash_raw_hist", None):
+            return None                                     # no cash read yet (the first loop after a start): never "short"
+        miss_s, low = float(cfg.get("miss_s", 600.0)), float(cfg.get("short_usable", 15_000.0))
+        t0 = getattr(self, "boot_t", 0) + STARTUP_HOLD_S    # a MISS in the first 2 min after a start came before the first cash read (16:14 Nov 3)
+        with E.lock:
+            ms = {k: t for k, t in E.miss_t.items() if len(k) == 2 and k[1] == "cash" and t >= t0}
+            committed = sum(e[1] for e in E.committed)
+        ex_m = max(ms, key=ms.get, default=None)
+        last = ms[ex_m] if ex_m else None
+        cash = min(self.cash_raw_hist)
+        usable = cash - E.floor - committed
+        if last is not None and now - last <= miss_s:
+            return f"MISS for cash {self.name(ex_m[0])} at {time.strftime('%H:%M:%S', time.localtime(last))}; usable {usable:,.0f}"
+        if usable < low:
+            return f"usable {usable:,.0f} < {low:,.0f}"
+        return None
+
     def el_recycle_scan(self, now):
-        """C117 (Piero 00:20 Oct 26 item 5; docs/night_recycle.md), C7 rebuilt: from the first strict call (rule B, not reversed), our lots of
-        the called side sell into SIG's existing bids at >= max(0.95 (C118), lot avg + 0.5c) while a later wave still has uncalled races
-        (C121, Piero 10:10 Oct 27), lowest lot average first, at most 30k a wave (a race's
-        last poll close) counting the sales of called sides at >= 0.97 since their calls. Every lot but Piero's manual book, pair-set / lock
-        legs and exclude_ex. -> self.el_recycle {(ex, sub): bid} for the sellers (live only); shadow logs each decision instead."""
+        """C136 (Piero 16:42 Nov 3: RECYCLE FAST WHEN CASH-SHORT; was C117 / C118 / C121 / C135 into SIG's bids at >= 0.97): only while cash is
+        short (el_recycle_short), the engine's lots of a called side (not reversed) whose PM side bid is >= 0.98 rest an ask at
+        max(lot avg + 2c, the best competing ask - 0.5c, 0.94), first in queue; re-pegged down with the best competing ask, never up and never
+        under the floor; lowest lot average first, at most 30k a wave, only while a LATER wave still has uncalled races (C121). Otherwise
+        nothing recycles: the lots hold to settlement. Never Piero's manual book, pair-set / lock legs or exclude_ex. -> self.el_recycle
+        {(ex, sub): ask} for the sellers (live only); shadow logs each decision; RECYCLE FAST lines for each ask and each fill."""
         cfg = ELECTION.get("recycle") or {}
         E, mode = self.election, self.el_recycle_mode()
         self.el_recycle = {}
+        rf = self.__dict__.setdefault("el_rf", {})          # (ex, sub) -> dict(px, t, side, avg, q): the asks this rule rests
         if E is None or mode == "off" or self.el_mode_cached not in ("shadow", "live"):
             return {}
         live = mode == "live" and self.el_mode_cached == "live"
-        T, cap = float(cfg.get("bid", 0.97)), float(cfg.get("wave_cap", 30_000.0))
-        margin = float(cfg.get("margin", RULE0_MARGIN))       # C135 (Piero 16:05 Nov 3): lot avg + 2c
+        if live:
+            self.el_rf_fills(now, rf)
+        pm_min, low_px = float(cfg.get("pm_min", 0.98)), float(cfg.get("floor", 0.94))
+        margin, cap = float(cfg.get("margin", 0.02)), float(cfg.get("wave_cap", 30_000.0))
         excl = {str(x) for x in (cfg.get("exclude_ex") or ())}
+        short = self.el_recycle_short(now, cfg)
+        was = self.__dict__.get("el_rf_short")
+        if bool(short) != bool(was):
+            m_ = f"RECYCLE FAST {'on: cash short (' + short + ')' if short else 'off: cash no longer short; the called lots hold to settlement'}"
+            self.el_log("RECYCLE", m_)
+        self.el_rf_short = short
+        if not short:
+            rf.clear()
+            return {}
         with E.lock:
-            calls = {str(ex): dict(c) for ex, c in E.calls.items() if c.get("strict") and not c.get("reversed")}
+            calls = {str(ex): dict(c) for ex, c in E.calls.items() if not c.get("reversed")}
+            pmb = {ex: E._side_bid(ex, c["side"]) for ex, c in calls.items()}
         if not calls:
             return {}
         wave = lambda ex: E.close.get(E.race(ex))
         done = collections.Counter()
-        for f in self.ledger.fills[-4000:]:                  # recycled so far: sales of a called side at >= T since its call
+        for f in self.ledger.fills[-4000:]:                  # recycled so far: sales of a called side at >= the 0.94 floor since its call
             ex = str(f.get("ex")); c = calls.get(ex)
             if not c or f.get("action") != "buy" or f.get("layer") not in self.REDUCING or f.get("side") == c["side"]:
                 continue
@@ -12368,25 +12402,25 @@ class Engine:
                 ft = ts_s(str(f.get("t")))
             except ValueError:
                 continue
-            if ft >= c["t"] - 1 and 1 - float(f["price"]) >= T - 1e-9:
+            if ft >= c["t"] - 1 and 1 - float(f["price"]) >= low_px - 1e-9:
                 done[wave(ex)] += float(f["qty"]) * (1 - float(f["price"]))
         cands = []
         for ex, c in calls.items():
-            if ex in excl:
+            if ex in excl or pmb.get(ex) is None or pmb[ex] < pm_min - 1e-9:
                 continue
             side = c["side"]
-            bid = self.rot_touch(ex, side)[0]
             sig_avg = float(((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
+            comp = self.fmm_others_ask(ex, side)
             for sub, q in list((self.ledger.subbooks.get(ex) or {}).items()):
-                if abs(q) < MIN_QTY or (q > 0) != (side == "yes") or sub == "manual" or str(sub).startswith(("pairset:", "fmmlock:")):
+                if abs(q) < MIN_QTY or (q > 0) != (side == "yes") or sub == "manual" or str(sub).startswith(("manual", "pairset:", "fmmlock:")):
                     continue
                 avg = self.el_sub_avg(ex, side, sub)
                 if not avg:
                     continue
-                floor_ = bots.tick_up(round(avg + margin, 6))
+                floor_ = max(bots.tick_up(round(avg + margin, 6)), low_px)
                 if sub == "inventory" and sig_avg:
                     floor_ = max(floor_, bots.tick_up(round(sig_avg + margin, 6)))
-                cands.append((avg, ex, side, sub, abs(q), floor_, bid, c["t"]))
+                cands.append((avg, ex, side, sub, abs(q), floor_, comp, c["t"]))
         out, rows = {}, []
         gate = cfg.get("later_uncalled")
         called_r = {E.race(e) for e in list(E.calls)}
@@ -12398,34 +12432,74 @@ class Engine:
                 n_after[w] = sum(1 for r, t in list(E.close.items()) if t is not None and w is not None and t > w
                                  and r not in called_r and r not in E.race_stop)
             return n_after[w]
-        for avg, ex, side, sub, q, floor_, bid, t_call in sorted(cands):
+        for avg, ex, side, sub, q, floor_, comp, t_call in sorted(cands):
             w = wave(ex)
-            if bid is None or bid < max(T, floor_) - 1e-9:
-                verdict = f"hold: bid {'none' if bid is None else f'{bid:.3f}'} < max({T:.2f}, floor {floor_:.3f})"
+            px = max(floor_, round(comp - TICK, 3)) if comp is not None else max(floor_, 0.99)
+            prev = rf.get((ex, sub))
+            if prev is not None and prev["px"] >= floor_ - 1e-9:
+                px = max(floor_, min(px, prev["px"]))       # re-pegged down with the competing ask, never up
+            if px > 0.99 + 1e-9:
+                verdict = f"hold: floor {floor_:.3f} > 0.99"
             elif gate and not later(w):
                 verdict = "hold: no later wave has uncalled races"
-            elif done[w] + q * bid > cap + 1e-6:
+            elif done[w] + q * px > cap + 1e-6:
                 verdict = f"hold: the wave's {cap:,.0f} recycled ({done[w]:,.0f} so far)"
             else:
-                done[w] += q * bid
-                out[(ex, sub)] = bid
-                verdict = "sell"
-            rows.append((ex, side, sub, q, avg, floor_, bid, w, t_call, verdict))
+                done[w] += q * px
+                out[(ex, sub)] = px
+                verdict = "ask"
+            rows.append((ex, side, sub, q, avg, floor_, comp, px, w, t_call, verdict))
         seen = self.__dict__.setdefault("el_recycle_seen", set())
-        for ex, side, sub, q, avg, floor_, bid, w, t_call, verdict in rows:
+        for ex, side, sub, q, avg, floor_, comp, px, w, t_call, verdict in rows:
+            if verdict == "ask":
+                prev = rf.get((ex, sub))
+                rf[(ex, sub)] = dict(px=px, t=prev["t"] if prev else now, side=side, avg=avg, q=q)
+                if prev is None or abs(prev["px"] - px) > 1e-9:
+                    self.el_log("RECYCLE", f"RECYCLE FAST {self.name(ex)} {side.upper()} {q:,.0f} ({sub}, lot avg {avg:.3f}) {'ask' if live else 'would ask'} "
+                                           f"{px:.3f} = max(lot avg + {margin * 100:.0f}c {bots.tick_up(round(avg + margin, 6)):.3f}, competing ask "
+                                           f"{'none' if comp is None else f'{comp:.3f}'} - 0.5c, {low_px:.2f}){' (re-pegged from ' + format(prev['px'], '.3f') + ')' if prev else ''}; "
+                                           f"PM side bid {pmb.get(ex) or 0:.3f}; {short}")
             k = (ex, sub, round(t_call), verdict[:4], live)
             if k in seen:
                 continue
             seen.add(k)
-            self.el_shadowq.append(dict(t=stamp(), kind="recycle", why="recycle", mode="live" if live else "shadow", ex=ex, side=side, sub=sub,
-                                        qty=round(q), avg=round(avg, 4), floor=floor_, bid=bid, threshold=T, wave=w, verdict=verdict))
-            if verdict == "sell":
-                self.el_log("RECYCLE", f"{self.name(ex)} {side.upper()} {q:,.0f} ({sub}, lot avg {avg:.3f}) {'sold' if live else 'would sell'} into the "
-                                       f"bid {bid:.3f} (>= {T:.2f}; wave {time.strftime('%H:%M', time.localtime(w)) if w else '?'} recycled {done[w]:,.0f} of {cap:,.0f})")
+            self.el_shadowq.append(dict(t=stamp(), kind="recycle", why="recycle fast", mode="live" if live else "shadow", ex=ex, side=side, sub=sub,
+                                        qty=round(q), avg=round(avg, 4), floor=floor_, comp=comp, ask=px, wave=w, short=short, verdict=verdict))
+        for k_ in [k_ for k_ in rf if k_ not in out]:
+            rf.pop(k_, None)
         if len(seen) > 20_000:
             self.el_recycle_seen = set(list(seen)[-5_000:])
         self.el_recycle = out if live else {}
         return out
+
+    def el_rf_fills(self, now, rf):
+        """C136: one RECYCLE FAST FILL line per sale of a lot this rule rests an ask for: the lot, the price, the fill time, the cash freed."""
+        seen = self.__dict__.setdefault("el_rf_seen", set())
+        if not rf:
+            return
+        by_ex = collections.defaultdict(list)
+        for (ex, sub), a in rf.items():
+            by_ex[ex].append((sub, a))
+        for f in self.ledger.fills[-500:]:
+            ex = str(f.get("ex"))
+            if ex not in by_ex or f.get("action") != "buy" or f.get("layer") not in self.REDUCING:
+                continue
+            k = self.fill_key(f)
+            if k in seen:
+                continue
+            try:
+                ft = ts_s(str(f.get("t")))
+            except ValueError:
+                continue
+            for sub, a in by_ex[ex]:
+                if f.get("side") != a["side"] and ft >= a["t"] - 1:
+                    seen.add(k)
+                    px = 1 - float(f["price"])
+                    self.el_log("RECYCLE", f"RECYCLE FAST FILL {self.name(ex)} {a['side'].upper()} {float(f['qty']):,.0f} at {px:.3f} at {str(f.get('t'))[11:19]} "
+                                           f"({f.get('layer')}; lot {sub}, avg {a['avg']:.3f}, ask {a['px']:.3f}): cash freed {float(f['qty']) * px:,.0f}")
+                    break
+        if len(seen) > 5000:
+            self.el_rf_seen = set(list(seen)[-2000:])
 
     def el_fill_events(self, fills):
         """night_reconcile §4 item 9: each fill of an election layer (call snipe, drift, call exit, settle) -> one NIGHT line and a row of

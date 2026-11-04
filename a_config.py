@@ -551,6 +551,10 @@ ELECTION = dict(on=True, shadow_from="2026-10-22 06:00:00", election_day="2026-1
                 # (decisions to shadow.jsonl, would-be sales to RUN_LOG) / live (sells only while election_mode is live); the
                 # `election_recycle` control overrides it.
                 recycle=dict(mode="shadow", bid=0.97, margin=0.02, wave_cap=30_000.0,   # C135 (Piero 16:05 Nov 3): >= max(0.97, lot avg + 2c), was max(0.95, avg + 0.5c)
+                             # C136 (Piero 16:42 Nov 3): only while cash is short (a sniper MISS for cash in the last miss_s, or usable < short_usable),
+                             # a called side with PM side bid >= pm_min rests an ask at max(lot avg + margin, best competing ask - 0.5c, floor),
+                             # re-pegged down only; otherwise the lots hold to settlement (bid is no longer used)
+                             pm_min=0.98, floor=0.94, miss_s=600.0, short_usable=15_000.0,
                              exclude_ex=("1077", "894", "1045"),
                              # C118 (spec Oct 27 item 5; docs/night_recycle.md "Oct 27"): 0.95 (beats 0.97 on the normal and slow nights,
                              # >= 0 on the reversal night under today's bids). C121 (Piero 10:10 Oct 27): sell only while a LATER wave (a

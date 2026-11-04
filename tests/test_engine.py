@@ -7329,31 +7329,67 @@ class C102Tests(EngineCase):
         self.assertTrue({1, 50, 51, 70, 100, 89} <= ranks, sorted(ranks)[-8:])
         self.assertNotIn(71, ranks)
 
-    def test_c117_wave_recycling_sells_a_strict_winner_into_097_bids_from_the_first_call_with_no_usable_gate(self):
+    def test_c136_recycle_fast_rests_a_first_in_queue_ask_only_while_cash_is_short(self):
+        """C136 (Piero 16:42 Nov 3): cash short (a MISS for cash in 10 min, or usable < 15k) and PM side >= 0.98 -> an ask at
+        max(lot avg + 2c, best competing ask - 0.5c, 0.94), re-pegged down only; otherwise nothing recycles."""
         fake, eng, a = self.rig(mode="live")
         f_engine.SELL_EV_MAX = 0.05
-        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], bid=0.97, later_uncalled=False, mode="live"))
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], later_uncalled=False, mode="live"))
         C93Tests.lot(self, eng, fake, a, f"callsnipe:{a}:yes", 20_000, 0.95, (0.975, 0.98, 0.9775), 0.995)
         loop(eng, fake); loop(eng, fake)
         eng.ledger.subbooks[a] = {f"callsnipe:{a}:yes": 20_000.0}; eng.lots_cache = (None, {})
         E = eng.election
-        E.calls[a] = dict(side="yes", t=time.time(), signal_t=time.time(), rule="B", strict=True, bought=0.0, cost=0.0, fails=0, stopped=False, reversed=False)
+        E.calls[a] = dict(side="yes", t=time.time(), signal_t=time.time(), rule="A", strict=False, bought=0.0, cost=0.0, fails=0, stopped=False, reversed=False)
+        E.pm[a] = [(time.time(), 0.985, 0.99)]
+        E.miss_t.clear(); E.committed = []
         eng.el_mode_cached = "live"
-        eng.el_snap = dict(cash=a_config.CASH_RESERVE + 2_000 + 50_000.0, pos={})   # 50k usable: C7's old 20k gate would have held
+        eng.fmm_others_ask = lambda ex, side: 0.98
+        hold, f_engine.STARTUP_HOLD_S = f_engine.STARTUP_HOLD_S, 120
+        self.addCleanup(setattr, f_engine, "STARTUP_HOLD_S", hold)
+        eng.boot_t, eng.cash_raw_hist = time.time(), []
+        E.miss_t[(a, "cash")] = time.time()
         eng.el_recycle_scan(time.time())
-        self.assertEqual(eng.el_recycle, {(a, f"callsnipe:{a}:yes"): 0.975}, "19.5k of a 30k wave: the whole lot")
+        self.assertEqual(eng.el_recycle, {}, "no cash read yet, and a MISS in the first 2 min after a start: not short")
+        eng.cash_raw_hist = [100_000.0]
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle, {}, "a MISS in the first 2 min after a start (before the first cash read) is not cash short")
+        eng.boot_t = time.time() - 3600; E.miss_t.clear()
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle, {}, "cash not short: the lots hold to settlement")
+        E.miss_t[(a, "cash")] = time.time() - 60
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle, {(a, f"callsnipe:{a}:yes"): 0.975}, "max(0.95 + 2c, 0.98 - 0.5c, 0.94); a rule-A call counts")
         plan = eng.rotation_plan(a_config.CASH_RESERVE + 2_000, time.time())
-        self.assertEqual((plan[a]["why"], plan[a]["px"]), ("recycle at the bid", 0.975))
-        self.assertTrue(any("RECYCLE" in str(k) for k, _ in eng.el_logq))
-        E.calls[a]["strict"] = False                           # rule A only: no recycling (C7 needs the strict call)
+        self.assertEqual((plan[a]["why"], plan[a]["px"]), ("recycle fast", 0.975))
+        self.assertTrue(any("RECYCLE FAST" in str(t) for _, t in eng.el_logq))
+        eng.fmm_others_ask = lambda ex, side: 0.975
         eng.el_recycle_scan(time.time())
-        self.assertEqual(eng.el_recycle, {})
-        E.calls[a]["strict"] = True
-        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], bid=0.97, later_uncalled=False, mode="shadow"))
+        self.assertEqual(eng.el_recycle[(a, f"callsnipe:{a}:yes")], 0.97, "re-pegged down with the competing ask")
+        eng.fmm_others_ask = lambda ex, side: 0.99
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle[(a, f"callsnipe:{a}:yes")], 0.97, "never up")
+        eng.fmm_others_ask = lambda ex, side: 0.95
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle[(a, f"callsnipe:{a}:yes")], 0.97, "never under lot avg + 2c")
+        E.pm[a] = [(time.time(), 0.975, 0.98)]
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle, {}, "PM side bid 0.975 < 0.98")
+        E.pm[a] = [(time.time(), 0.985, 0.99)]
+        E.miss_t[(a, "cash")] = time.time() - 700
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle, {}, "the MISS is older than 10 min")
+        eng.cash_raw_hist = [20_000.0]                          # usable 13k < 15k
+        eng.el_recycle_scan(time.time())
+        self.assertIn((a, f"callsnipe:{a}:yes"), eng.el_recycle, "usable < 15k is cash short")
+        E.calls[a]["reversed"] = True
+        eng.el_recycle_scan(time.time())
+        self.assertEqual(eng.el_recycle, {}, "a reversed call: nothing")
+        E.calls[a]["reversed"] = False
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], later_uncalled=False, mode="shadow"))
         eng.el_shadowq.clear()
         eng.el_recycle_scan(time.time())
         self.assertEqual(eng.el_recycle, {}, "shadow: nothing for the sellers")
-        self.assertEqual([r["verdict"] for r in eng.el_shadowq if r.get("kind") == "recycle"], ["sell"], "shadow: the decision is logged")
+        self.assertEqual([r["verdict"] for r in eng.el_shadowq if r.get("kind") == "recycle"], ["ask"], "shadow: the decision is logged")
         msg = f_engine.EngineControls(eng).apply("election_recycle", dict(mode="live"))
         self.assertIn("live", msg)
         eng.el_recycle_scan(time.time())
@@ -7361,30 +7397,34 @@ class C102Tests(EngineCase):
         with self.assertRaises(ValueError):
             f_engine.EngineControls(eng).apply("election_recycle", dict(mode="on"))
 
-    def test_c117_recycling_keeps_the_097_bar_rule_0_the_wave_cap_and_never_sells_the_manual_book(self):
+    def test_c136_recycle_fast_keeps_the_floors_the_wave_cap_and_never_sells_the_manual_book(self):
         fake, eng, a = self.rig(mode="live")
-        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], bid=0.97, later_uncalled=False, mode="live", wave_cap=1_500.0))
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], later_uncalled=False, mode="live", wave_cap=1_500.0))
         E = eng.election
         eng.el_mode_cached = "live"
         E.calls[a] = dict(side="yes", t=time.time(), signal_t=time.time(), rule="B", strict=True, bought=0.0, cost=0.0, fails=0, stopped=False, reversed=False)
+        E.pm[a] = [(time.time(), 0.99, 0.995)]
+        E.miss_t[(a, "cash")] = time.time()
+        eng.boot_t, eng.cash_raw_hist = time.time() - 3600, [100_000.0]
         eng.ledger.subbooks[a] = {f"carry:{a}:yes": 1_000.0, f"fmm:{a}:yes:0.972": 500.0, "manual": 4_000.0, f"dump:{a}:yes:L0": 1_000.0}
         avgs = {f"carry:{a}:yes": 0.90, f"dump:{a}:yes:L0": 0.93}
         eng.lots = lambda ex, side, sub: [(1000.0, avgs[sub], "engine")] if sub in avgs else []
-        eng.rot_touch = lambda ex, side: (0.968, 0.972, 0.99)
+        eng.fmm_others_ask = lambda ex, side: 0.98
         eng.el_recycle_scan(time.time())
-        self.assertEqual(eng.el_recycle, {}, "bid 0.968 < 0.97: hold")
-        eng.rot_touch = lambda ex, side: (0.975, 0.98, 0.99)
+        self.assertEqual(eng.el_recycle, {(a, f"carry:{a}:yes"): 0.975},
+                         "lowest avg first; the wave cap (here 1,500) takes 975 of it, the dump lot (+975) would pass it; the FMM lot's floor 0.995 > 0.99; never the manual book")
+        eng.fmm_others_ask = lambda ex, side: 0.93
         eng.el_recycle_scan(time.time())
-        self.assertEqual(set(eng.el_recycle), {(a, f"carry:{a}:yes")},
-                         "lowest avg first; the 30k cap (here 1,500) takes 975 of it, the dump lot (+975) would pass it; the FMM lot's floor 0.98 > 0.975; never the manual book")
-        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], bid=0.97, later_uncalled=False, mode="live", exclude_ex=(a,)))
+        self.assertEqual(eng.el_recycle, {(a, f"carry:{a}:yes"): 0.94}, "never under 0.94")
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], later_uncalled=False, mode="live", exclude_ex=(a,)))
         eng.el_recycle_scan(time.time())
         self.assertEqual(eng.el_recycle, {}, "exclude_ex (RI Senate R NO, the SELL_HOLD lots)")
-        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], bid=0.97, later_uncalled=False, mode="live"))
-        f = dict(key="r:1", order="9101", ex=a, side="no", action="buy", qty=30_000.0, price=0.02, layer="release", t=time.strftime("%Y-%m-%d %H:%M:%S"))
-        eng.ledger.fills.append(f)                              # 30k x 0.98 of this wave already recycled since the call
+        f_engine.ELECTION = dict(a_config.ELECTION, recycle=dict(a_config.ELECTION["recycle"], later_uncalled=False, mode="live"))
+        f = dict(key="r:1", order="9101", ex=a, side="no", action="buy", qty=31_000.0, price=0.02, layer="release", t=time.strftime("%Y-%m-%d %H:%M:%S"))
+        eng.ledger.fills.append(f)                              # 31k x 0.98 of this wave already recycled since the call
         eng.el_recycle_scan(time.time())
         self.assertEqual(eng.el_recycle, {}, "the wave's 30k is used")
+        self.assertTrue(any("RECYCLE FAST FILL" not in str(t) for _, t in eng.el_logq))
 
     def test_c121_recycling_at_095_only_while_a_later_wave_has_uncalled_races(self):
         fake, eng, a = self.rig(mode="live")
@@ -7400,6 +7440,9 @@ class C102Tests(EngineCase):
         eng.ledger.subbooks[a] = {f"carry:{a}:yes": 1_000.0}
         eng.lots = lambda ex, side, sub: [(1000.0, 0.90, "engine")] if sub.startswith("carry:") else []
         eng.rot_touch = lambda ex, side: (0.97, 0.975, 0.99)
+        E.pm[a] = [(time.time(), 0.985, 0.99)]; E.miss_t[(a, "cash")] = time.time()   # C136: cash short, PM side >= 0.98
+        eng.boot_t, eng.cash_raw_hist = time.time() - 3600, [100_000.0]
+        eng.fmm_others_ask = lambda ex, side: 0.975
         eng.el_snap = dict(cash=el_mod.CASH_FLOOR + 1_000_000.0, pos={})   # the cash on hand no longer matters
         E.close.update({"Earlier": w - 3600, "Same wave": w})               # uncalled, but not after the sold book's wave: hold
         eng.el_recycle_scan(time.time())
@@ -7407,7 +7450,7 @@ class C102Tests(EngineCase):
         self.assertTrue(any(r.get("kind") == "recycle" and r.get("verdict") == "hold: no later wave has uncalled races" for r in eng.el_shadowq))
         E.close["Later"] = w + 1800                                           # one uncalled race in a later wave: sell
         eng.el_recycle_scan(time.time())
-        self.assertEqual(eng.el_recycle, {(a, f"carry:{a}:yes"): 0.97}, "0.97 sells while a later wave has uncalled races")
+        self.assertEqual(eng.el_recycle, {(a, f"carry:{a}:yes"): 0.97}, "max(0.92, 0.975 - 0.5c, 0.94) while a later wave has uncalled races")
         E.race_stop.add("Later")                                              # a stopped race counts as not pending
         eng.el_recycle_scan(time.time())
         self.assertEqual(eng.el_recycle, {})
