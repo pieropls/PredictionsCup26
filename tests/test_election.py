@@ -148,8 +148,8 @@ class SniperTests(unittest.TestCase):
         self.assertEqual(items[:4], ("1", "yes", "buy", 0.94), "the 0.90 and 0.94 levels; 0.97 is over the cap")
         self.assertEqual(items[4], 5_000)
         r2 = Rig()
-        r2.pm("1", 0.999, 1.0, 10_100.0)                      # cap min(0.97, 0.969): the 0.97 level stays out
-        self.assertEqual(r2.placed[0][0][0][3], 0.94)
+        r2.pm("1", 0.999, 1.0, 10_100.0)                      # C137: a strict call, cap min(0.97, 0.999 - 1.5c) = 0.97: the 0.97 level is in
+        self.assertEqual(r2.placed[0][0][0][3], 0.97)
         self.assertLessEqual(r2.placed[0][0][0][4], el.RACE_SHARES, "<= 15k shares a race")
 
     def test_cash_floor_7k_counts_unfilled_orders_and_the_state_cap(self):
@@ -172,6 +172,12 @@ class SniperTests(unittest.TestCase):
         r.E.prior = {"1": (14_000.0, 13_300.0)}
         r.pm("1", 0.98, 0.99, 10_100.0, cash=500_000)
         self.assertLessEqual(r.placed[0][0][0][4], 1_000, "15k shares a race, the lots held from before the restart included")
+
+    def test_c137_a_strict_call_caps_at_pm_bid_less_1_5c_rule_a_at_3c(self):
+        r = Rig(levels={"yes": [(0.955, 1_000), (0.96, 1_000)]})
+        r.pm("1", 0.987, 0.99, 10_100.0, cash=500_000)          # rule B (>= 0.98 once after the close): cap min(0.97, 0.987 - 1.5c) = 0.972
+        self.assertTrue(r.E.calls["1"].get("strict"))
+        self.assertEqual(r.placed[0][0][0][3], 0.96, "the 0.960 ask is under the strict cap 0.972 (3c would stop at 0.957)")
 
     def test_no_snipe_on_a_book_where_we_hold_the_other_side(self):
         r = Rig()

@@ -23,6 +23,7 @@ GUARD_COMPLEMENT = 0.04                 # the race's other books' PM <= 0.04 whe
 PRECALL_EVERY_S = 1800                  # a rule firing before the close is logged (PRECALL) once per book per 30 min
 # ---- C2 price, C3 / C4 size, C5 TTL
 PRICE_CAP, PRICE_UNDER_PM = 0.97, 0.03  # <= min(0.97, PM side bid - 3c), walking the SIG book (Piero 11:40 Oct 22: 3c, was 2c; docs/night_sim.md)
+PRICE_UNDER_PM_STRICT = 0.015           # C137 (Piero 17:05 Nov 3): a strict call (rule B) with the PM side bid >= 0.98: <= min(0.97, PM bid - 1.5c); rule A keeps 3c
 RACE_SHARES = 15_000                    # <= 15k shares a race (both books)
 STATE_CAP = 20_000.0                    # <= 20k at cost a state (its Senate, Governor and House races are called off the same count)
 WAVE_MULT = 8.0                         # C135 (Piero 16:05 Nov 3: the snipes were starved at ~1.7k a race): 8, was 2.5. The wave share: WAVE_MULT x usable cash / the uncalled races of this and every later wave (C127, Piero 00:10 Nov 1 item 2:
@@ -277,7 +278,8 @@ class Election:
             return None if dry else self._miss(ex, c, "no PM side bid", now)
         if not dry and any(p_["ex"] == ex for p_ in self.pending.values()):
             return self._miss(ex, c, "the previous order is not answered yet", now)   # C118: a retry never sends into the same asks twice
-        return self._buy(ex, c, round(min(PRICE_CAP, sb - PRICE_UNDER_PM), 3), now, free_cash, pos, "callsnipe", dry=dry, sb=sb, wave=True)
+        under = PRICE_UNDER_PM_STRICT if c.get("strict") and sb >= CALL_STRICT - 1e-9 else PRICE_UNDER_PM
+        return self._buy(ex, c, round(min(PRICE_CAP, sb - under), 3), now, free_cash, pos, "callsnipe", dry=dry, sb=sb, wave=True)
 
     def requeue(self, exs, now):
         """C118 (item 1): the event-driven retry — a called book still unbought goes back to the call lane's queue (every SIG book update

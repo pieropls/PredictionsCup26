@@ -11911,17 +11911,16 @@ class Engine:
         self.election = el.Election(meta, last, time.time, self.el_place, self.el_cancel, self.el_book, self.el_log, manual=tuple(str(x) for x in self.manual_ex),
                                     cash_floor=el.CASH_FLOOR, first_close=first, levels=self.el_levels, place_dry=self.el_place_dry,
                                     precall_dry=bool(ELECTION.get("precall_dry")))
-        try:                                                # C135 (Piero 16:05 Nov 3): after a restart the held call-snipe lots still count in the caps
-            pr = {}
-            for ex in meta:
-                for sub, q in list((self.ledger.subbooks.get(ex) or {}).items()):
-                    if str(sub).startswith("callsnipe:") and abs(q) >= 1:
-                        avg = self.el_sub_avg(ex, "yes" if q > 0 else "no", sub) or el.PRICE_CAP
-                        sh, c_ = pr.get(ex, (0.0, 0.0))
-                        pr[ex] = (sh + abs(q), c_ + abs(q) * avg)
+        try:                                                # C135 (Piero 16:05 Nov 3): after a restart the call snipes' buys still count in the caps
+            pr = {}                                         # C137 (Piero 17:05 item 4): what the sniper BOUGHT tonight (its fills), not what is still held:
+            for f in list(self.ledger.fills):               # a lot sold since (by hand, VA Senate R NO) is never re-bought to restore it
+                ex = str(f.get("ex"))
+                if f.get("layer") == "callsnipe" and ex in meta and str(f.get("t")) >= f"{day} 00:00:00" and f.get("action", "buy") == "buy":
+                    sh, c_ = pr.get(ex, (0.0, 0.0))
+                    pr[ex] = (sh + float(f["qty"]), c_ + float(f["qty"]) * float(f["price"]))
             self.election.prior = pr
             if pr:
-                m_ = (f"ELECTION: call-snipe lots from before the start count in the race / state caps: {len(pr)} books, "
+                m_ = (f"ELECTION: tonight's call-snipe buys before the start count in the race / state caps: {len(pr)} books, "
                       f"{sum(v[0] for v in pr.values()):,.0f} shares, {sum(v[1] for v in pr.values()):,.0f} at cost")
                 self.event("NIGHT", m_); self.night.line(m_)
         except Exception as err:                            # noqa: BLE001 - never blocks arming

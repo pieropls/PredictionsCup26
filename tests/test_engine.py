@@ -7124,7 +7124,7 @@ class C102Tests(EngineCase):
         eng.el_step(time.time())
         o = [r for r in self.lines("shadow.jsonl") if r.get("why") == "call"]
         self.assertTrue(o, "a call: the would-be order")
-        self.assertEqual(o[-1]["items"][0][:4], [a, "yes", "buy", 0.95], "<= min(0.97, PM bid 0.985 - 3c) = 0.955: the 0.95 level")
+        self.assertEqual(o[-1]["items"][0][:4], [a, "yes", "buy", 0.96], "C137: a strict call, <= min(0.97, PM bid 0.985 - 1.5c) = 0.97: the 0.96 level")
         self.assertFalse([c for c in fake.calls if c[0] in ("batch", "multileg", "place")], "shadow: nothing sent")
         self.assertTrue([r for r in self.lines("calls.jsonl") if r["kind"] == "CALL"])
 
