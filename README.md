@@ -10,14 +10,14 @@
 <div align="center">
 <table>
 <tr>
-<td align="center"><sub>Final rank</sub><br><b>#70</b> <sub>of 1,969 · top 3.6%</sub></td>
-<td align="center"><sub>P&amp;L</sub><br><b>+71.3k</b> <sub>+71%</sub></td>
+<td align="center"><sub>Final rank</sub><br><b>#67</b> <sub>of 1,969 · top 3.4%</sub></td>
+<td align="center"><sub>P&amp;L</sub><br><b>+73.3k</b> <sub>+73%</sub></td>
 <td align="center"><sub>Best rank</sub><br><b>#62</b></td>
 <td align="center"><sub>Trades</sub><br><b>20,544</b></td>
 <td align="center"><sub>Volume</sub><br><b>3.6M</b></td>
 </tr>
 </table>
-<sub>SIG settlement in progress (board as of 02:58 PT, Nov 5) · 179.7k if every market settles on its result.</sub>
+<sub>SIG settlement in progress (board as of 04:43 PT, Nov 5) · 179.7k if every market settles on its result.</sub>
 </div>
 
 <table>
@@ -25,7 +25,7 @@
 <td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#account"><img src="img/mini_account.png" width="100%" alt="Account value from 100k: SIG marks vs Polymarket fair"></a><br><sub>Account from 100k</sub></td>
 <td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#rank"><img src="img/mini_rank.png" width="100%" alt="Our rank over time, log scale"></a><br><sub>Rank over time</sub></td>
 <td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#daily"><img src="img/mini_daily.png" width="100%" alt="Daily P&L per SIG day"></a><br><sub>Daily P&L</sub></td>
-<td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#ranking"><img src="img/mini_ranking.png" width="100%" alt="Every player's P&L on the last full board before settlement, us #90 then and #70 now"></a><br><sub>All players · #90 → #70</sub></td>
+<td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#ranking"><img src="img/mini_ranking.png" width="100%" alt="Every player's P&L on the last full board before settlement, us #90 then and #67 now"></a><br><sub>All players · #90 → #67</sub></td>
 </tr>
 </table>
 <p align="center"><sub>Click a chart to explore it: hover, zoom, full size.</sub></p>
@@ -42,7 +42,7 @@
 *P&L per SIG day (00:00 UTC) at SIG's marks, with the day at Polymarket fair as a line.*
 
 ![Every player's P&L on the last full board, us marked](img/final_ranking.png)
-*Every player's P&L on the last full board (23:14 PT Nov 4, before settlement): hollow, us at #90 then; filled, #70 on the latest board.*
+*Every player's P&L on the last full board (23:14 PT Nov 4, before settlement): hollow, us at #90 then; filled, #67 on the latest board.*
 
 ![Final portfolio at the 09:00 lock](img/portfolio_snapshot.png)
 *136 positions at the 09:00 lock, before settlement: the top ten are worth 84.9k at SIG marks and 97.8k at Polymarket's results.*
@@ -262,7 +262,7 @@ Manual trades where the engine can't act: crashes, thin books, prices far below 
 ## Takeaways
 
 1. **Size a reserve by its opportunity cost.** The election reserve left the catchers idle for a week while the tape showed 1.56M of sweep edge vs fair (at full sweep size); they caught about 0.6k.
-2. **Optimise for the scoring rule, not the marks.** At the lock the board said 154.9k while settlement value was 179.7k, and the rank went from #62 to #90 on SIG's lagging marks.
+2. **Optimise for the scoring rule, not the marks.** At the lock the board said 154.9k while settlement value was 179.7k, and the rank went from #62 to #90 on SIG's lagging marks; settlement had brought it back to #67 by 04:13 PT Nov 5.
 3. **Size from the book, not one formula.** The first wave bought 1,803 Virginia Senate R NO with 388k shares on the book under the cap.
 4. **Every seller must read the call state.** The release layer sold 69,084 shares of called winners at 0.9527 while the sniper bought the same books at up to 0.97.
 5. **Keep one exclusion list for every layer.** The sniper bought 14,949 Alaska Senate R NO in a ranked-choice race; the forced exit cost about 1.8k.
