@@ -1,0 +1,14 @@
+[Unit]
+Description=SIG Cup server-side ops job %i (Piero 00:20 Oct 26: night-critical jobs on the server, never a Mac session)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=sig
+Group=sig
+WorkingDirectory=/opt/sig-engine
+EnvironmentFile=/etc/sig-engine/env
+Environment=TZ=America/Los_Angeles
+Nice=5
+TimeoutStartSec=900
+ExecStart=/usr/bin/python3 /opt/sig-engine/deploy/server/ops/ops.py %i

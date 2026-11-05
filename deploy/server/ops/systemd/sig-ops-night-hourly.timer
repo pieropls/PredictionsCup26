@@ -1,0 +1,11 @@
+[Unit]
+Description=SIG ops: NIGHT HOURLY line every hour at :50, 21:50 Nov 3 - 08:50 Nov 4 (Piero 21:05 Nov 3 item 4)
+
+[Timer]
+OnCalendar=2026-11-03 21..23:50:00
+OnCalendar=2026-11-04 00..08:50:00
+AccuracySec=1s
+Unit=sig-ops@night-hourly.service
+
+[Install]
+WantedBy=timers.target

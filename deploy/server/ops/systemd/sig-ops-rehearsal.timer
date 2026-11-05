@@ -1,0 +1,10 @@
+[Unit]
+Description=SIG ops: start the Oct 31 15:00 rehearsal 3 plan
+
+[Timer]
+OnCalendar=2026-10-31 14:55:00
+AccuracySec=1s
+Unit=sig-ops@rehearsal.service
+
+[Install]
+WantedBy=timers.target

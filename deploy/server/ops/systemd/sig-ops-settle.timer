@@ -1,0 +1,10 @@
+[Unit]
+Description=SIG ops: SETTLEMENT WATCH every 15 min until every market we hold is settled, read-only (Piero 10:25 Nov 4)
+
+[Timer]
+OnCalendar=*-*-* *:00/15:00
+AccuracySec=1s
+Unit=sig-ops@settle.service
+
+[Install]
+WantedBy=timers.target

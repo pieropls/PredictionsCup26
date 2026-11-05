@@ -1,0 +1,10 @@
+[Unit]
+Description=SIG ops: FINAL WATCH every 30 min 01:00-08:30 Nov 3 (Piero 00:50 Nov 3)
+
+[Timer]
+OnCalendar=2026-11-03 01..08:00,30:00
+AccuracySec=1s
+Unit=sig-ops@final-watch.service
+
+[Install]
+WantedBy=timers.target

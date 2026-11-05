@@ -1,0 +1,10 @@
+[Unit]
+Description=SIG ops: the golive timer's test on a harmless value (election_mode shadow, the mode it has) at 17:30 Nov 2
+
+[Timer]
+OnCalendar=2026-11-02 17:30:00
+AccuracySec=1s
+Unit=sig-ops@golive-test.service
+
+[Install]
+WantedBy=timers.target

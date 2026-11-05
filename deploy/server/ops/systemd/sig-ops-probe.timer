@@ -1,0 +1,10 @@
+[Unit]
+Description=SIG ops: the ex 947 probe at 15:03 Oct 31 (rehearsal 3)
+
+[Timer]
+OnCalendar=2026-10-31 15:03:00
+AccuracySec=1s
+Unit=sig-ops@probe.service
+
+[Install]
+WantedBy=timers.target

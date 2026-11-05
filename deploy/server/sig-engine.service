@@ -1,0 +1,26 @@
+[Unit]
+Description=SIG Predictions Cup engine (one instance across machines)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sig
+Group=sig
+WorkingDirectory=/opt/sig-engine
+EnvironmentFile=/etc/sig-engine/env
+ExecStart=/opt/sig-engine/deploy/server/start.sh
+StandardOutput=append:/opt/sig-engine/data/engine.log
+StandardError=append:/opt/sig-engine/data/engine.log
+Environment=TZ=America/Los_Angeles
+Restart=always
+RestartSec=20
+KillSignal=SIGTERM
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/sig-engine/data /opt/sig-engine/docs /opt/sig-engine/run
+
+[Install]
+WantedBy=multi-user.target

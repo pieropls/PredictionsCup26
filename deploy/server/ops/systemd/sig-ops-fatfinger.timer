@@ -1,0 +1,10 @@
+[Unit]
+Description=SIG ops: FATFINGER watch, a run a minute (3 scans 20 s apart), 02:15-08:55 Nov 4 (Piero 02:15 Nov 4)
+
+[Timer]
+OnCalendar=2026-11-04 02..08:*:00
+AccuracySec=1s
+Unit=sig-ops@fatfinger.service
+
+[Install]
+WantedBy=timers.target

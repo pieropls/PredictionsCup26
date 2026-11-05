@@ -1,0 +1,10 @@
+[Unit]
+Description=SIG ops: election_mode live at 14:40 Nov 3 (Piero 16:20 Nov 2, C1); the 14:45 checklist line confirms it
+
+[Timer]
+OnCalendar=2026-11-03 14:40:00
+AccuracySec=1s
+Unit=sig-ops@golive.service
+
+[Install]
+WantedBy=timers.target

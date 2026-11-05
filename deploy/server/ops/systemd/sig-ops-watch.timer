@@ -1,0 +1,10 @@
+[Unit]
+Description=SIG ops: alerts every minute (PAUSE, ERR burst, engine down, RULE0, FMM / election stops, Nov 3 calls)
+
+[Timer]
+OnCalendar=*-*-* *:*:20
+AccuracySec=1s
+Unit=sig-ops@watch.service
+
+[Install]
+WantedBy=timers.target

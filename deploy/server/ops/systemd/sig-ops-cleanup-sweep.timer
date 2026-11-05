@@ -1,0 +1,10 @@
+[Unit]
+Description=SIG ops: CLEANUP sweep every 10 min to 08:30 Nov 4 (Piero 01:00 Nov 4 items 1c + 2: VA-05 into bids, buys with cash above 1,000)
+
+[Timer]
+OnCalendar=2026-11-04 01..08:00/10:00
+AccuracySec=1s
+Unit=sig-ops@cleanup-sweep.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=SIG ops: FINAL SNAPSHOT refresh at 06:00 Nov 4 (Piero 01:00 Nov 4 item 4; 03:00 and 08:30 come with cleanup-report)
+
+[Timer]
+OnCalendar=2026-11-04 06:00:00
+AccuracySec=1s
+Unit=sig-ops@snapshot.service
+
+[Install]
+WantedBy=timers.target

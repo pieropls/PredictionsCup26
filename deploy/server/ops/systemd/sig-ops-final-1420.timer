@@ -1,0 +1,10 @@
+[Unit]
+Description=SIG ops: FINAL CHECK 14:20 Nov 3 (Piero 00:50 Nov 3)
+
+[Timer]
+OnCalendar=2026-11-03 14:20:00
+AccuracySec=1s
+Unit=sig-ops@final-1420.service
+
+[Install]
+WantedBy=timers.target

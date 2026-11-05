@@ -1,0 +1,10 @@
+[Unit]
+Description=SIG ops: the Nov 3 14:45 checklist to the phone
+
+[Timer]
+OnCalendar=2026-11-03 14:46:00
+AccuracySec=1s
+Unit=sig-ops@checklist.service
+
+[Install]
+WantedBy=timers.target

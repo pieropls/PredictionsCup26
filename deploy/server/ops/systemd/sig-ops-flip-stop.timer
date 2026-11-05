@@ -1,0 +1,10 @@
+[Unit]
+Description=SIG ops: FLIP entries off at 08:00 Nov 3 (FINAL 2) (Piero 00:50 Nov 3)
+
+[Timer]
+OnCalendar=2026-11-03 08:00:00
+AccuracySec=1s
+Unit=sig-ops@flip-stop.service
+
+[Install]
+WantedBy=timers.target

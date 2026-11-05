@@ -1,0 +1,10 @@
+[Unit]
+Description=SIG ops: the 30-min health line
+
+[Timer]
+OnCalendar=*-*-* *:00,30:40
+AccuracySec=1s
+Unit=sig-ops@health.service
+
+[Install]
+WantedBy=timers.target

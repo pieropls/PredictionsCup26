@@ -1,0 +1,205 @@
+release,date_pt,date_source,deployed,summary
+B-0105,2026-10-02T01:05:41-07:00,folder mtime,unknown (before the deploy log),"dashboard v2: token page, live stream, 7 views, controls"
+B2-0121,2026-10-02T01:21:59-07:00,folder mtime,unknown (before the deploy log),B rebuilt to fix a pair-set leg crash in the dashboard
+C1-0143,2026-10-02T01:43:31-07:00,folder mtime,unknown (before the deploy log),"strategy layers, fair tracker, cash floor and controller"
+C2-0152,2026-10-02T01:52:31-07:00,folder mtime,unknown (before the deploy log),layer tests; ladder entries no longer crowd out rebounds
+C3-0204,2026-10-02T02:04:49-07:00,folder mtime,unknown (before the deploy log),realtime feeds from SIG user channel and Polymarket socket
+C4-0222,2026-10-02T02:22:22-07:00,folder mtime,unknown (before the deploy log),fill notifications become the fill trigger for the loop
+C5-0245,2026-10-02T02:45:20-07:00,folder mtime,unknown (before the deploy log),ladder admission by sweep history; ladders to pilot
+C6-0250,2026-10-02T02:50:13-07:00,folder mtime,unknown (before the deploy log),kappa back to 1c; ladder pilot counts queued entries in caps
+C7-0319,2026-10-02T03:19:44-07:00,folder mtime,unknown (before the deploy log),partly-filled unwind handling; watchdog restarts silent engine
+C8-0345,2026-10-02T03:45:02-07:00,folder mtime,unknown (before the deploy log),"replan within 2 s of a realtime event, 6 s when reads high"
+C9-0353,2026-10-02T03:53:09-07:00,folder mtime,unknown (before the deploy log),cap requote cancels at 20/min for MM and ladder quotes
+C10-0417,2026-10-02T04:17:06-07:00,folder mtime,unknown (before the deploy log),sniper per-market cap now also holds per race
+C11-0450,2026-10-02T04:50:17-07:00,folder mtime,unknown (before the deploy log),breaker counts each market once by weighted direction
+C12-0453,2026-10-02T04:53:54-07:00,folder mtime,unknown (before the deploy log),hard cash floor maintained by cancelling lowest-ROC quotes
+C13-0458,2026-10-02T04:58:29-07:00,folder mtime,unknown (before the deploy log),two cancel workers to cut cancel latency
+C14-0608,2026-10-02T06:08:57-07:00,folder mtime,unknown (before the deploy log),breaker trip also needs Polymarket fair to move 1c against
+C15-0614,2026-10-02T06:14:33-07:00,folder mtime,unknown (before the deploy log),admission uses the minimum of the last 3 cash reads
+C16-0749,2026-10-02T07:49:47-07:00,folder mtime,unknown (before the deploy log),replan spacing tiered by SIG reads used per minute
+C17-1304,2026-10-02T13:04:04-07:00,folder mtime,unknown (before the deploy log),"day-2 config: MM cap 10k, reserve 10k, AK release to 50%"
+C18-1311,2026-10-02T13:11:00-07:00,folder mtime,unknown (before the deploy log),dashboard v3 payload from engine; one test failed at build
+C19-1313,2026-10-02T13:13:23-07:00,folder mtime,unknown (before the deploy log),no run-log note for this build
+C20-1321,2026-10-02T13:21:00-07:00,build time in the name (folder mtime touched later),unknown (before the deploy log),"opportunity reserve, ROC rule, release layer, recycler fixes"
+C21-1336,2026-10-02T13:36:00-07:00,build time in the name (folder mtime touched later),unknown (before the deploy log),dashboard v3 page and fat-finger layer built
+C22-1340,2026-10-02T13:40:00-07:00,build time in the name (folder mtime touched later),unknown (before the deploy log),"fat-finger pilot on (tier A, 8k resting cap)"
+C23-1346,2026-10-02T13:46:00-07:00,build time in the name (folder mtime touched later),unknown (before the deploy log),read governor: optional reads only when reads are spare
+C24-1353,2026-10-02T13:53:00-07:00,build time in the name (folder mtime touched later),unknown (before the deploy log),no run-log note for this build
+C25-1357,2026-10-02T13:57:00-07:00,build time in the name (folder mtime touched later),unknown (before the deploy log),account fill feed with setAuth; fill-to-exit priority
+C26-1414,2026-10-02T14:15:27-07:00,folder mtime,unknown (before the deploy log),intel tape collector; rebuilt after a failed release build
+C27-1417,2026-10-02T14:18:00-07:00,folder mtime,unknown (before the deploy log),no run-log note for this build
+C28-1420,2026-10-02T14:21:07-07:00,folder mtime,unknown (before the deploy log),no run-log note for this build
+C29-1422,2026-10-02T14:23:36-07:00,folder mtime,unknown (before the deploy log),no run-log note for this build
+C30-1424,2026-10-02T14:24:52-07:00,folder mtime,unknown (before the deploy log),no run-log note for this build
+C31-1427,2026-10-02T14:28:06-07:00,folder mtime,unknown (before the deploy log),no run-log note for this build
+C32-1515,2026-10-02T15:16:20-07:00,folder mtime,unknown (before the deploy log),fat-finger cap 300k; reserve 25k; release cost cap 5%
+C33-1523,2026-10-02T15:24:23-07:00,folder mtime,unknown (before the deploy log),dump catcher pilot with I4 own-order invariant guard
+C34-1530,2026-10-02T15:30:57-07:00,folder mtime,unknown (before the deploy log),turnover MM pilot on the 10 highest-volume markets
+C35-1541,2026-10-02T15:42:05-07:00,folder mtime,unknown (before the deploy log),dump tracker intel and dashboard capital-velocity KPIs
+C36-1544,2026-10-02T15:44:57-07:00,folder mtime,unknown (before the deploy log),dump catcher skips sides whose opposite we hold
+C37-1753,2026-10-02T17:54:08-07:00,folder mtime,unknown (before the deploy log),gate hold flag and auto-hold when fills are unhealthy
+C38-1803,2026-10-02T18:04:14-07:00,folder mtime,unknown (before the deploy log),order-truth fills in shadow mode and FILLS BLIND alarm
+C39-0028,2026-10-03T00:28:47-07:00,folder mtime,unknown (before the deploy log),exits clipped to own sub-book; late-fill audit; MM exit cap
+C40-0053,2026-10-03T00:54:23-07:00,folder mtime,unknown (before the deploy log),"subbook_fix control; dump arena sides, 8k, 12k cap"
+C41-0100,2026-10-03T01:01:34-07:00,folder mtime,unknown (before the deploy log),"longshot layer built, off; C40 plus 0.005 bids on 5% sides"
+C42-0435,2026-10-03T04:35:44-07:00,folder mtime,unknown (before the deploy log),fixes dump concentration cap that re-sized levels each loop
+C43-1135,2026-10-03T11:35:39-07:00,folder mtime,unknown (before the deploy log),"reserve 35k, arena 12k per side, release target 40k"
+C44-1900,2026-10-03T19:00:51-07:00,folder mtime,unknown (before the deploy log),"read budget cuts: 15 s gap, small release, fat-finger 0.12"
+C45-2017,2026-10-03T20:17:42-07:00,folder mtime,unknown (before the deploy log),no run-log note for this build
+C46-2020,2026-10-03T20:20:55-07:00,folder mtime,unknown (before the deploy log),"release cost 10%, fat-finger tier A only, dump 5k at 35k"
+C47-2107,2026-10-03T21:07:48-07:00,folder mtime,unknown (before the deploy log),fixes missing dump rebound after ledger order pruning
+C48-1702,2026-10-04T17:03:18-07:00,folder mtime,unknown (before the deploy log),CASH SHORT hard triggers only; pauses resume themselves
+C49-1714,2026-10-04T17:15:11-07:00,folder mtime,unknown (before the deploy log),"day-4 hygiene build, dead dump code removed"
+C50-1725,2026-10-04T17:25:48-07:00,folder mtime,unknown (before the deploy log),"housekeeping: dead v2 dump rules removed, no behaviour change"
+C51-1736,2026-10-04T17:37:16-07:00,folder mtime,unknown (before the deploy log),"dump catcher v3 pilot, release on demand, sale of one race"
+C52-1749,2026-10-04T17:50:22-07:00,folder mtime,unknown (before the deploy log),"re-quote band for the one-race exit sale (built, not deployed)"
+C53-1938,2026-10-04T19:38:54-07:00,folder mtime,unknown (before the deploy log),"day-5 sizing, ratchet, dashboard v4, SIG-day attribution"
+C54-2210,2026-10-04T22:11:10-07:00,folder mtime,unknown (before the deploy log),C53 plus scalper layer (off) and idle-cash rule
+C55-2221,2026-10-04T22:22:35-07:00,folder mtime,unknown (before the deploy log),attribution fix: drift as residual vs the 17:00 snapshot
+C56-2322,2026-10-04T23:22:57-07:00,folder mtime,unknown (before the deploy log),dashboard capital use = in use / (in use + free)
+C57-0047,2026-10-05T00:47:11-07:00,folder mtime,unknown (before the deploy log),"day 6: hourly ratchet, caps, L4, touch layer; rebuilt"
+C57-0048,2026-10-05T00:49:17-07:00,folder mtime,unknown (before the deploy log),"day 6: hourly ratchet, concentration caps, L4, touch layer"
+C58-0146,2026-10-05T01:47:19-07:00,folder mtime,unknown (before the deploy log),"rule 0, cash ratchet, release tiers, scalper all day"
+C59-0228,2026-10-05T02:29:26-07:00,folder mtime,unknown (before the deploy log),double-booking fix in synthetic fills plus ledger dedup
+C60-0310,2026-10-05T03:10:48-07:00,folder mtime,unknown (before the deploy log),"bookings bounded by order quantity, tranche trimmed"
+C61-0347,2026-10-05T03:47:58-07:00,folder mtime,unknown (before the deploy log),booked fills never exceed order quantity; rebuilt as 0349
+C61-0349,2026-10-05T03:50:26-07:00,folder mtime,unknown (before the deploy log),booked fills never exceed the order's quantity
+C62-0355,2026-10-05T03:55:48-07:00,folder mtime,unknown (before the deploy log),cancelled vanished order never a fill; phantom netting
+C63-0431,2026-10-05T04:31:53-07:00,folder mtime,unknown (before the deploy log),"restart release, hand-over tranche sell-back resting again"
+C64-1601,2026-10-05T16:01:58-07:00,folder mtime,unknown (before the deploy log),"day 7: touch book became dump L0 tranches, cash target 25k"
+C64-1603,2026-10-05T16:04:10-07:00,folder mtime,unknown (before the deploy log),"day 7: touch book became dump L0 tranches, cash target 25k"
+C65-2255,2026-10-05T22:55:38-07:00,folder mtime,unknown (before the deploy log),"cash guards, L0 budget, cash rebuild, phantom rule"
+C65-2257,2026-10-05T22:57:43-07:00,folder mtime,unknown (before the deploy log),"cash guards, L0 budget, cash rebuild, phantom rule"
+C65-2258,2026-10-05T22:58:40-07:00,folder mtime,unknown (before the deploy log),"cash guards, L0 budget, cash rebuild, phantom rule"
+C66-2333,2026-10-05T23:33:56-07:00,folder mtime,unknown (before the deploy log),"entry budget allocated dump L1-L4, L0, scalper, fat-finger"
+C66-2334,2026-10-05T23:35:00-07:00,folder mtime,unknown (before the deploy log),"entry budget allocated dump L1-L4, L0, scalper, fat-finger"
+C66-2335,2026-10-05T23:36:11-07:00,folder mtime,unknown (before the deploy log),"entry budget allocated dump L1-L4, L0, scalper, fat-finger"
+C67-2345,2026-10-05T23:46:29-07:00,folder mtime,unknown (before the deploy log),"wall layer for manual resting orders, budget fix"
+C68-2349,2026-10-05T23:49:50-07:00,folder mtime,unknown (before the deploy log),"wall bounded by its own 2k-free cut, not the day-2 reserve"
+C69-0054,2026-10-06T00:54:43-07:00,folder mtime,unknown (before the deploy log),day 8: weighted entry budget of 1.5 x free cash
+C70-0108,2026-10-06T01:08:41-07:00,folder mtime,unknown (before the deploy log),walls' resting cost taken off the top of the entry budget
+C71-1616,2026-10-06T16:16:58-07:00,folder mtime,unknown (before the deploy log),day 9: entry budget k x free cash (k up to 2)
+C72-1622,2026-10-06T16:22:38-07:00,folder mtime,unknown (before the deploy log),"keep levels until replaced, breadth-first, hysteresis"
+C72-1651,2026-10-06T16:52:28-07:00,folder mtime,unknown (before the deploy log),"keep levels until replaced, breadth-first, hysteresis"
+C73-1746,2026-10-06T17:46:44-07:00,folder mtime,unknown (before the deploy log),"budget k raised to 3 x free cash, faster ladder"
+C74-1753,2026-10-06T17:54:15-07:00,folder mtime,unknown (before the deploy log),RI Senate base recorded from sub-books at cost
+C75-1928,2026-10-06T19:29:25-07:00,folder mtime,unknown (before the deploy log),sleeve layer: settlement holds on two races above 20k free
+C76-1935,2026-10-06T19:36:27-07:00,folder mtime,unknown (before the deploy log),walls get min free cash and min edge; RI Senate R wall
+C77-2010,2026-10-06T20:11:16-07:00,folder mtime,unknown (before the deploy log),RI Senate R wall re-armed
+C78-0622,2026-10-07T06:22:58-07:00,folder mtime,unknown (before the deploy log),"hotfix: wall lots excluded from rebuild, 15k cut netted"
+C79-1650,2026-10-07T16:51:32-07:00,folder mtime,unknown (before the deploy log),"day 10: swing leg, 4.1 and 4.3 items, structural RI freeze"
+C79b-1657,2026-10-07T16:58:30-07:00,folder mtime,unknown (before the deploy log),RI wall buy-back covers only the hold part of the swing
+C80-1807,2026-10-07T18:08:19-07:00,folder mtime,unknown (before the deploy log),re-weighted dump levels from 24 h reach calibration
+C81-1837,2026-10-07T18:38:11-07:00,folder mtime,unknown (before the deploy log),fair maker pilot on the study's top 10 markets
+C81b-1844,2026-10-07T18:44:55-07:00,folder mtime,unknown (before the deploy log),fair maker budget reserved off top of dump budget
+C81c-2028,2026-10-07T20:28:56-07:00,folder mtime,unknown (before the deploy log),"rules v2: rebuild retired, hold-when-idle, RI unfrozen"
+C83-2045,2026-10-07T20:46:42-07:00,folder mtime,unknown (before the deploy log),"touch maker pilot on, day-5 scalper off"
+C82-0034,2026-10-08T00:34:54-07:00,folder mtime,unknown (before the deploy log),"fast path, L0 cap 15k, West Virginia test, snapshot retry"
+C84-0117,2026-10-08T01:17:51-07:00,folder mtime,unknown (before the deploy log),"spread maker pilot, RI Senate R band, C82 switches carried"
+C84b-1002,2026-10-08T10:03:24-07:00,folder mtime,unknown (before the deploy log),RI Senate R band buy leg made cash-neutral
+C84c-1013,2026-10-08T10:14:18-07:00,folder mtime,unknown (before the deploy log),RI Senate R reservoir replaces the band
+C84d-1017,2026-10-08T10:18:17-07:00,folder mtime,unknown (before the deploy log),reservoir PM-fair reference pinned on first priced loop
+C84e-1605,2026-10-08T16:06:37-07:00,folder mtime,unknown (before the deploy log),"reservoir ask ladder, ring-window cash order, exit floor"
+C84f-1609,2026-10-08T16:10:36-07:00,folder mtime,unknown (before the deploy log),migration adds the reservoir ladder levels missing live
+C84g-1622,2026-10-08T16:22:51-07:00,folder mtime,unknown (before the deploy log),RI Senate reservoir resized; Delaware and RI Gov reservoirs
+C84h-1625,2026-10-08T16:26:23-07:00,folder mtime,unknown (before the deploy log),reservoir levels that would cross rest one tick above the bid
+C86-1650,2026-10-08T16:51:08-07:00,folder mtime,unknown (before the deploy log),realtime market feed in log mode; RI offer cut to 20k
+C86b-1717,2026-10-08T17:18:25-07:00,folder mtime,unknown (before the deploy log),C86 follow-up build (no separate note)
+C86c-1741,2026-10-08T17:42:15-07:00,folder mtime,unknown (before the deploy log),"RI Senate hold 11.9k, unwind rest at position average"
+C86d-2021,2026-10-08T21:00:44-07:00,releases.log (deploy time),yes,"dashboard v5 payload and page, no trading change"
+C87-2040,2026-10-08T20:41:19-07:00,folder mtime,no,"touch maker full size, spread maker pilot, D5 stop on bots"
+C87-2048,2026-10-08T20:49:21-07:00,folder mtime,no,"touch maker full size, spread maker pilot, D5 stop on bots"
+C87-2105,2026-10-08T21:05:47-07:00,folder mtime,no,"touch maker full size, spread maker pilot, D5 stop on bots"
+C87-2107,2026-10-08T21:08:20-07:00,folder mtime,no,"touch maker full size, spread maker pilot, D5 stop on bots"
+C87-2109,2026-10-08T21:09:56-07:00,folder mtime,no,"touch maker full size, spread maker pilot, D5 stop on bots"
+C87-2156,2026-10-08T21:58:01-07:00,releases.log (deploy time),yes,"touch maker full size, spread maker pilot, D5 stop on bots"
+C87b-2247,2026-10-08T22:48:13-07:00,releases.log (deploy time),yes,touch maker held inside its cash allowance
+C88-0226,2026-10-09T02:26:50-07:00,folder mtime,no,"core/trading books, feed live, P&L stops as alerts"
+C88-0227,2026-10-09T06:00:43-07:00,releases.log (deploy time),yes,"core/trading books, feed live, P&L stops as alerts"
+C88b-0635,2026-10-09T06:36:12-07:00,releases.log (deploy time),yes,"spread maker reserve fix, exact core cap, pair books from feed"
+C88c-0709,2026-10-09T07:09:30-07:00,folder mtime,no,no L0 refills or fast re-arms into a core sub
+C88c-0711,2026-10-09T07:12:21-07:00,releases.log (deploy time),yes,no L0 refills or fast re-arms into a core sub
+C89-1719,2026-10-09T17:19:03-07:00,folder mtime,no,trading book sells lots to keep cash; core gain lock
+C89-1720,2026-10-09T17:21:14-07:00,releases.log (deploy time),yes,trading book sells lots to keep cash; core gain lock
+C90-1648,2026-10-11T16:49:02-07:00,folder mtime,no,"GTC quote A/B, pair locks, no double exit per lot"
+C90-1649,2026-10-11T16:50:23-07:00,releases.log (deploy time),yes,"GTC quote A/B, pair locks, no double exit per lot"
+C91-1721,2026-10-11T17:21:08-07:00,folder mtime,no,H1 arm follows top-10 universe; H3 swap seller A/B live
+C91-1722,2026-10-11T17:22:14-07:00,folder mtime,no,H1 arm follows top-10 universe; H3 swap seller A/B live
+C91-1723,2026-10-11T17:23:20-07:00,folder mtime,no,H1 arm follows top-10 universe; H3 swap seller A/B live
+C91-1724,2026-10-11T17:24:24-07:00,folder mtime,no,H1 arm follows top-10 universe; H3 swap seller A/B live
+C91-1726,2026-10-11T17:26:59-07:00,releases.log (deploy time),yes,H1 arm follows top-10 universe; H3 swap seller A/B live
+C92-1759,2026-10-11T18:00:23-07:00,releases.log (deploy time),yes,"cash for morning flow, dedup of synthetic fills, H1 verdict"
+C92b-1806,2026-10-11T18:31:40-07:00,releases.log (deploy time),yes,dedup moved after roster; verdict guard fixed
+C93-1548,2026-10-12T15:49:09-07:00,releases.log (deploy time),yes,"hold lots with 6%+ left, GTC asks keep place, H1 test"
+C93b-1618,2026-10-12T16:19:31-07:00,releases.log (deploy time),yes,H1 sleeve touch-maker only; release ask average fixes
+C93c-1639,2026-10-12T16:51:03-07:00,releases.log (deploy time),yes,ring stops lifted for H1 sleeve; no self-trade bids
+C93d-1655,2026-10-12T17:22:03-07:00,releases.log (deploy time),yes,release ask uses ledger lot average before SIG average
+C93e-1527,2026-10-13T15:28:52-07:00,releases.log (deploy time),yes,shorter cash-floor pause lift; H1 window to 18:00
+C94-2131,2026-10-13T21:32:49-07:00,releases.log (deploy time),yes,coin-flip rotation: GTC asks plus rotation bids
+C94b-2137,2026-10-13T22:03:36-07:00,releases.log (deploy time),yes,rotation sale takes core lots of the named markets
+C94c-2237,2026-10-13T22:38:18-07:00,releases.log (deploy time),yes,rotation funding pool shared across targets
+C94d-2241,2026-10-13T23:08:48-07:00,releases.log (deploy time),yes,"rotation pool recomputed from ledger fills, capped by cash"
+C94e-1652,2026-10-15T16:53:12-07:00,releases.log (deploy time),yes,rotation pool reads SIG cash; oversized bids pulled
+C94f-1657,2026-10-15T17:24:06-07:00,releases.log (deploy time),yes,rotation exit asks keep running during a pause
+C95-1511,2026-10-16T15:13:06-07:00,releases.log (deploy time),yes,"manual reserve, fund sales, coin-flip rotation buys"
+C95b-1516,2026-10-16T15:16:56-07:00,folder mtime,no,retired reservoirs stay retired; funding sale ordering
+C95c-1534,2026-10-16T15:43:34-07:00,releases.log (deploy time),yes,"Piero's own fills go to manual book, never sold"
+C95d-1547,2026-10-16T15:48:28-07:00,folder mtime,no,C95 follow-up build (no separate note)
+C95e-1557,2026-10-16T16:14:10-07:00,releases.log (deploy time),yes,"exit sizing to room left, resume clears I2 lock, token kept"
+C95f-1618,2026-10-16T16:44:40-07:00,releases.log (deploy time),yes,rotation skips markets where we hold the other side
+C95g-1818,2026-10-16T18:19:38-07:00,releases.log (deploy time),yes,"rotation reserve guard, 10% traded cap, gap-widening flag"
+C96-1927,2026-10-16T21:01:24-07:00,releases.log (deploy time),yes,"favourite market maker spec v2, paper then live"
+C96b-0603,2026-10-17T06:04:44-07:00,releases.log (deploy time),yes,"FMM locks from spare cash, fill booked once, dashboard 1/min"
+C96c-0607,2026-10-17T06:36:13-07:00,releases.log (deploy time),yes,FMM paper reads the feed's current book
+C97-1610,2026-10-17T16:11:57-07:00,releases.log (deploy time),yes,"capital allocation: reserve 2k, FMM/rotation caps, fund asks"
+C98-1644,2026-10-17T16:45:47-07:00,releases.log (deploy time),yes,carry book: 43 favourite lots held to settlement
+C98b-1719,2026-10-17T17:21:00-07:00,releases.log (deploy time),yes,net party exposure cap 10k on close races for rotation/carry
+C99a-0112,2026-10-18T01:13:59-07:00,releases.log (deploy time),yes,"sale asks keep place, sell at the bid, AZ-06 market paused"
+C99b-0127,2026-10-18T01:44:46-07:00,releases.log (deploy time),yes,foreign order direction read from SIG; manual line hourly
+C99d-0218,2026-10-18T02:19:17-07:00,releases.log (deploy time),yes,sale at the bid also needs SIG avg + 0.5c
+C99e-0252,2026-10-18T02:54:04-07:00,releases.log (deploy time),yes,inventory lots never sell under SIG position avg + 0.5c
+C99f-0819,2026-10-18T08:20:55-07:00,releases.log (deploy time),yes,FMM priority counts unread fills; pull uncovered carry bids
+C100-1736,2026-10-18T17:37:29-07:00,releases.log (deploy time),yes,keep-place for sale rules; carry bid-sales; FMM priority 15k
+C100b-1811,2026-10-18T18:12:49-07:00,releases.log (deploy time),yes,"sale ask under lot floor rests at floor, not dropped"
+C101-1526,2026-10-21T15:27:33-07:00,releases.log (deploy time),yes,"FMM coin-flip sides, cap 35k; sales only at EV/$ <= 5%"
+C102-1547,2026-10-21T15:58:56-07:00,releases.log (deploy time),yes,"election v2 in shadow: call detector, call sniper, pulls"
+C103-1626,2026-10-21T16:29:48-07:00,releases.log (deploy time),yes,"election cash calendar, call lane thread, election_inject"
+C104-1636,2026-10-21T17:00:36-07:00,releases.log (deploy time),yes,in-progress snipe record so answered snipes aren't re-spent
+C105-1732,2026-10-21T17:33:53-07:00,releases.log (deploy time),yes,election mode banner in the dashboard header
+C106-0249,2026-10-22T02:50:49-07:00,releases.log (deploy time),yes,"FMM room to Oct 28: race caps 8k/4k, inventory cap 40k"
+C107-0254,2026-10-22T06:02:58-07:00,releases.log (deploy time),yes,snipe/drift never buy into a book holding the other side
+C108-0605,2026-10-22T06:35:22-07:00,releases.log (deploy time),yes,"rehearsal injector stamps quotes with own time, exact ts"
+C109-0643,2026-10-22T07:07:53-07:00,releases.log (deploy time),yes,precall dry snipe no longer logs 'hold other side'
+C110-1156,2026-10-22T11:58:10-07:00,releases.log (deploy time),yes,"drift trades the change vs 6-h median gap, not the gap"
+C111-1204,2026-10-22T12:30:40-07:00,releases.log (deploy time),yes,election_rehearsal and election_probe controls
+C112-1247,2026-10-22T13:02:21-07:00,releases.log (deploy time),yes,"rehearsal fixes: injection feed thread, own-time quotes"
+C113-1048,2026-10-23T10:50:31-07:00,releases.log (deploy time),yes,FMM min clip 50; old FMM lots exit old rule; rotation re-peg
+C114-1454,2026-10-23T14:55:54-07:00,releases.log (deploy time),yes,election reserve ramp to 45k firm + 15k elastic
+C115-1518,2026-10-23T15:19:23-07:00,folder mtime,no,FMM cap taper to Nov 1; convergence backstop from Oct 30
+C115b-1528,2026-10-23T15:29:48-07:00,releases.log (deploy time),yes,FMM cap taper to Nov 1; convergence backstop from Oct 30
+C116-0020,2026-10-26T00:22:02-07:00,releases.log (deploy time),yes,cap lowered under FMM inventory isn't a breach; clean SIGTERM
+C117-0037,2026-10-26T00:53:47-07:00,releases.log (deploy time),yes,"C7 wave recycling rebuilt at 0.97, shadow mode"
+C118-0025,2026-10-27T00:26:27-07:00,releases.log (deploy time),yes,call lane: stale book no longer blocks a snipe; retries
+C119-0046,2026-10-27T01:00:42-07:00,releases.log (deploy time),yes,cached time parsing and tranche_avg; loop SIG rate stats
+C120-0132,2026-10-27T01:33:16-07:00,releases.log (deploy time),yes,call lane REST book reads only from lane/run_queue
+C121-1007,2026-10-27T10:31:12-07:00,releases.log (deploy time),yes,recycling gate: only a later wave with uncalled races
+C122-1753,2026-10-27T17:54:44-07:00,folder mtime,no,"call lane uses quiet feed book, reuses REST read"
+C122-2238,2026-10-27T22:40:32-07:00,releases.log (deploy time),yes,"call lane uses quiet feed book, reuses REST read"
+C123-2255,2026-10-27T23:11:54-07:00,releases.log (deploy time),yes,pair/FMM n-set screens take fresh or quiet feed book
+C124-0024,2026-10-29T00:25:38-07:00,releases.log (deploy time),yes,Oct 31 reduced-load window; rehearsal timers re-dated
+C125-1149,2026-10-30T11:50:58-07:00,releases.log (deploy time),yes,push never changes engine owner; controls never reset
+C126-1210,2026-10-30T12:52:45-07:00,releases.log (deploy time),yes,wave share multiplier 2.0; election reserve 60k firm
+C127-0700,2026-11-01T07:02:12-08:00,releases.log (deploy time),yes,wave multiplier 2.5 and reserve ramp from Nov 1 12:00
+C128-0018,2026-11-02T00:20:06-08:00,releases.log (deploy time),yes,CATCH ladder in shadow then live
+C129-1122,2026-11-02T11:23:37-08:00,releases.log (deploy time),yes,CATCH v2 in shadow then live
+C130-1310,2026-11-02T13:13:01-08:00,releases.log (deploy time),yes,CATCH fix so L2-L4 bids post
+C131-1330,2026-11-02T14:46:53-08:00,releases.log (deploy time),yes,CATCH anchors saved across restarts; re-anchor at once
+C132-1640,2026-11-02T16:42:45-08:00,releases.log (deploy time),yes,"CATCH v3: SIG-anchored exits, size x2, sides 0.25-0.995"
+C133-1818,2026-11-02T18:18:10-08:00,folder mtime,no,"FMM back on all books, 250 clips; FLIP on 60 widest books"
+C133-1823,2026-11-02T18:24:03-08:00,folder mtime,no,"FMM back on all books, 250 clips; FLIP on 60 widest books"
+C133-1824,2026-11-02T18:26:17-08:00,releases.log (deploy time),yes,"FMM back on all books, 250 clips; FLIP on 60 widest books"
+C134-0056,2026-11-03T00:58:35-08:00,releases.log (deploy time),yes,"FINAL: CATCH full stop Tue 12:30, cancel-all"
+C135-1612,2026-11-03T16:14:21-08:00,releases.log (deploy time),yes,wave multiplier 2.5 to 8; sell losers
+C136-1647,2026-11-03T16:48:42-08:00,folder mtime,no,RECYCLE FAST: ask called-side lots while cash is short
+C137-1707,2026-11-03T17:15:17-08:00,releases.log (deploy time),yes,"strict-call sniper cap min(0.97, PM bid - 1.5c)"
+C138-1809,2026-11-03T19:15:25-08:00,releases.log (deploy time),yes,release never sells call-snipe lots; post-call maker bids
