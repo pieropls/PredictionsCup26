@@ -17,7 +17,7 @@
 <td align="center"><sub>Volume</sub><br><b>3.6M</b></td>
 </tr>
 </table>
-<sub>SIG settlement in progress (board as of 04:43 PT, Nov 5) · 179.7k if every market settles on its result.</sub>
+<sub>SIG settlement in progress (board as of 04:58 PT, Nov 5) · 179.7k if every market settles on its result.</sub>
 </div>
 
 <table>
@@ -216,7 +216,7 @@ On books with a SIG spread ≥ 2c, one bid first in the queue at the best bid + 
 
 Favourites held to settlement as a carry book: bids at EV/$ ≥ 11%, sales at EV/$ ≤ 5%, never below the lot average + 0.5c. From Oct 29 the convergence sales funded the election reserve.
 - **Ran:** Oct 17 → Nov 4.
-- **Result:** at the first poll close, 20 lots, 8.3k at cost, EV +1.1k (13% per dollar). The peak was 33 lots, 25.4k at cost.
+- **Result:** at the first poll close, 20 lots, 8.3k at cost, EV +1.1k (+13% per dollar). The peak was 33 lots, 25.4k at cost.
 
 </details>
 
