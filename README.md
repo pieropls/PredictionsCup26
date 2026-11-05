@@ -47,33 +47,33 @@ One Python engine on one server: market data in on the left, orders out to SIG, 
 flowchart LR
   PM["Polymarket<br/>fair value · race calls"]
   POLL["Poll-close file<br/>who is called, when"]
-  subgraph SERVER["SERVER · Python engine, 24/7"]
+  subgraph SERVER["SERVER · one Python engine, 24/7"]
     direction TB
-    WS["Websocket listener"]
-    subgraph FEEDS["Live feeds"]
+    WS["websocket listener"]
+    subgraph FEEDS["live feeds"]
       direction LR
       F1[books] ~~~ F2[trades]
       F3[orders] ~~~ F4[positions]
       F5[fills] ~~~ F6[cash]
     end
-    LEDGER["Ledger + sub-books"]
-    LOOP["Engine loop"]
-    REH["Rehearsals + stress tests<br/>3 full runs · 421 tests"]
-    subgraph STRAT["Strategies"]
+    LEDGER["ledger + sub-books"]
+    LOOP["engine loop"]
+    REH["rehearsals + stress tests<br/>3 full runs · 421 tests"]
+    subgraph STRAT["strategies"]
       direction LR
-      MM["Market making<br/>FMM · CATCH · FLIP · carry"]
-      NIGHT["Election-night machine<br/>115 of 116 races · ~300 ms"]
+      MM["market making<br/>FMM · CATCH · FLIP · carry"]
+      NIGHT["election-night machine<br/>115 of 116 races · ~300 ms"]
     end
-    EXEC[["Risk + executor<br/>rule 0 · I2 · 25 writes/min"]]
-    OPS["Ops timers"]
-    DASHF["Dashboard feeder"]
+    EXEC[["risk + executor<br/>rule 0 · I2 · 25 writes/min"]]
+    OPS["ops timers"]
+    DASHF["dashboard feeder"]
     WS --> FEEDS --> LOOP
     LEDGER <--> LOOP
     LOOP --> STRAT
     REH -.- STRAT
     STRAT --> EXEC
+    LOOP ----> DASHF
     EXEC ~~~ OPS
-    EXEC ~~~ DASHF
   end
   subgraph LAPTOP["My laptop"]
     direction LR
@@ -92,13 +92,12 @@ flowchart LR
     DEC["Decisions + controls"]
     OVER["Discretionary overlay"]
   end
-  PM --> SERVER
-  POLL --> SERVER
-  SERVER ==>|orders| SIGG
-  SIGG --> SERVER
-  SERVER --> LAPTOP
-  LAPTOP -.->|deploys| SERVER
-  SERVER -.-> CLAUDE
+  PM -->|fair value · calls| SERVER
+  POLL -->|close times| SERVER
+  SIGG <==>|books · trades · fills<br/>orders| SERVER
+  SERVER -->|state| LAPTOP
+  LAPTOP -.->|releases| SERVER
+  SERVER -.->|logs · alerts| CLAUDE
   SERVER ~~~ PIERO
   PIERO -.->|controls| SERVER
   PIERO ==>|manual orders| SIGG
