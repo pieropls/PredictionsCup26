@@ -11,13 +11,13 @@
 <table>
 <tr>
 <td align="center"><sub>Final rank</sub><br><b>#70</b> <sub>of 1,969 · top 3.6%</sub></td>
-<td align="center"><sub>P&amp;L</sub><br><b>+71.3k</b></td>
-<td align="center"><sub>Return</sub><br><b>+71.3%</b></td>
+<td align="center"><sub>P&amp;L</sub><br><b>+71.3k</b> <sub>+71%</sub></td>
+<td align="center"><sub>Best rank</sub><br><b>#62</b></td>
 <td align="center"><sub>Trades</sub><br><b>20,544</b></td>
 <td align="center"><sub>Volume</sub><br><b>3.6M</b></td>
 </tr>
 </table>
-<sub>SIG settlement in progress (board as of 02:58 PT, Nov 5) · best rank #62 · 179.7k if every market settles on its result.</sub>
+<sub>SIG settlement in progress (board as of 02:58 PT, Nov 5) · 179.7k if every market settles on its result.</sub>
 </div>
 
 <table>
