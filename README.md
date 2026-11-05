@@ -16,6 +16,8 @@ My dashboard, frozen at the final values: **[pieropls.github.io/PredictionsCup26
 
 ## My journey
 
+Day one started by hand, with two big orders, and the board closed the day at −10.3k. Winning it back took a week, while the engine took over: on my laptop from that first afternoon, then on a server from Oct 7, running 24/7. From then on the system traded, and I stepped in by hand only where it couldn't act.
+
 - **100k → 154.9k on SIG's board: #90 of 1,969 (top 4.6%), best #62.**
 - **179.7k (+79.7%) if every market settles on Polymarket's result.** Settlement pending, so the official rank is too.
 
@@ -111,6 +113,10 @@ flowchart LR
 - **Recycling:** sells called winners to fund later waves. **31,079 shares at 0.979, +1.0k vs cost.**
 - **Poll-close pulls:** entry layers pull 600 s before the first close; **419–422 s measured** in the rehearsals.
 - **Final sweep, 01:03 → 08:30:** bought resolved winners still offered on SIG. **11,585 shares at 0.929, +0.8k.**
+
+### Discretionary overlay
+
+Manual trades where the engine can't act: crashes, thin books, prices far below a resolved value. They're booked in a separate manual sub-book that the engine never trades.
 
 ## The Election Night
 
