@@ -220,12 +220,12 @@ Favourites held to settlement as a carry book: bids at EV/$ ≥ 11%, sales at EV
 
 </details>
 
-<details><summary><b>05 · The Lock</b> · pair sets, H4, two-book locks · <i>NO + NO for under 1</i> · <b>+1.6k</b> locked at entry</summary>
+<details><summary><b>05 · The Lock</b> · pair sets, H4, two-book locks · <i>both sides for under 1</i> · <b>+2.2k</b> realized · +0.2k held to settlement</summary>
 
 Both sides of a two-candidate race bought for under 1 in total. Pair sets were unwound early once the set could be sold above cost; H4 and the two-book locks held to settlement.
 - **Parameters:** H4 ≤ 0.96 a set; the market maker's locks ≤ 0.99.
 - **Ran:** pair sets Oct 1–4, H4 from Oct 11, two-book locks Oct 17 → Oct 29.
-- **Result:** +1.6k locked at entry: 141 pair sets (+1.4k, unwound early) and the two-book locks (+0.2k on 11.7k shares). H4 itself never found a set.
+- **Result:** the 141 pair sets locked +1.4k at entry; 125 were unwound early above cost for +2.2k realized (the ledger's basket records: unwind value − cost). The two-book locks held to settlement: +0.2k on 11.7k shares. H4 itself never found a set.
 
 </details>
 
