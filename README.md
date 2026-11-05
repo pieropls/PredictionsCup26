@@ -40,17 +40,14 @@ My dashboard, frozen at the final values: **[pieropls.github.io/PredictionsCup26
 
 ```mermaid
 flowchart LR
-    subgraph SIG["SIG exchange"]
-        REST["REST /api/v1<br/>≤ 95 reads, 25 writes a min"]
-        WSS["websocket<br/>books and trades"]
-    end
+    SIG["SIG exchange<br/>REST /api/v1 + websocket<br/>≤ 95 reads, 25 writes a min"]
     PM["Polymarket quotes<br/>fair-value feed · race calls"]
     subgraph SRV["Server (one VPS)"]
         LIS["websocket listener"]
         ENG["engine loop<br/>ledger · sub-books"]
-        STR["strategies<br/>FMM · CATCH v1–v3 · FLIP · carry · H4 locks · pair sets<br/>touch maker · spread maker · rotation · walls · release<br/>call detector · sniper · recycler · reversal guard · final sweep"]
-        EXE["executor<br/>rate limits · rule 0 · I2"]
-        OPS["ops timers<br/>health · alerts · night jobs · settlement watch"]
+        STR["strategies<br/>FMM · CATCH v1–v3 · FLIP · carry<br/>H4 locks · pair sets · touch maker<br/>spread maker · rotation · walls · release<br/>call detector · sniper · recycler<br/>reversal guard · final sweep"]
+        EXE["executor<br/>REST client · rate limits<br/>rule 0 · I2"]
+        OPS["ops timers<br/>health · alerts · night jobs<br/>settlement watch"]
     end
     subgraph MAC["My Mac"]
         MIR["dashboard mirror"]
@@ -58,20 +55,19 @@ flowchart LR
         CC["Claude Code"]
     end
     CL["Claude<br/>monitoring · reports"]
-    ME["Me<br/>decisions · controls · discretionary overlay"]
-    WSS --> LIS --> ENG
-    REST -->|"positions · fills · cash"| ENG
-    PM --> ENG
-    ENG --> STR --> EXE -->|orders| REST
+    ME["Me<br/>decisions · controls<br/>discretionary overlay"]
+    SIG -->|"books · trades"| LIS --> ENG
+    PM -->|"fair · calls"| ENG
+    ENG --> STR --> EXE
+    SIG <-->|"orders · positions · fills · cash"| EXE
     ENG --> OPS
-    ENG -->|"state, every 60 s"| MIR
-    RES -->|releases| ENG
-    CC --- CL
+    ENG <-->|"state · controls"| MIR
+    ENG <-->|"data · releases"| RES
     OPS --> CL
+    CC --> CL
+    MIR <--> ME
     CL -->|reports| ME
-    MIR --> ME
-    ME -->|controls| ENG
-    ME -->|"manual orders"| REST
+    SIG <-->|"manual orders"| ME
 ```
 
 - One Python engine; **rule 0:** never sell below the lot average + 0.5c; **I2:** reducing orders never exceed the position.
