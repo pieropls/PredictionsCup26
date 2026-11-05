@@ -40,42 +40,145 @@ Day one started by hand, with two big orders, and the board closed the day at �
 
 ## My trading system
 
+One Python engine on one server: market data in on the left, orders out to SIG, three layers of oversight on the right.
+
 ```mermaid
+%%{init: {"look": "classic", "flowchart": {"curve": "basis", "nodeSpacing": 24, "rankSpacing": 40, "wrappingWidth": 320}, "themeVariables": {"fontSize": "16px"}}}%%
 flowchart LR
-    SIG["SIG exchange<br/>REST /api/v1 + websocket<br/>≤ 95 reads, 25 writes a min"]
-    PM["Polymarket quotes<br/>fair-value feed · race calls"]
-    subgraph SRV["Server (one VPS)"]
-        LIS["websocket listener"]
-        ENG["engine loop<br/>ledger · sub-books"]
-        STR["strategies<br/>FMM · CATCH v1–v3 · FLIP · carry<br/>H4 locks · pair sets · touch maker<br/>spread maker · rotation · walls · release<br/>call detector · sniper · recycler<br/>reversal guard · final sweep"]
-        EXE["executor<br/>REST client · rate limits<br/>rule 0 · I2"]
-        OPS["ops timers<br/>health · alerts · night jobs<br/>settlement watch"]
+  PM["Polymarket<br/>fair value · race calls"]
+  POLL["Poll-close file<br/>who is called, when"]
+  subgraph SERVER["SERVER · Python engine, 24/7"]
+    direction TB
+    WS["Websocket listener"]
+    subgraph FEEDS["Live feeds"]
+      direction LR
+      F1[books] ~~~ F2[trades]
+      F3[orders] ~~~ F4[positions]
+      F5[fills] ~~~ F6[cash]
     end
-    subgraph MAC["My Mac"]
-        MIR["dashboard mirror"]
-        RES["research · sims · rehearsals"]
-        CC["Claude Code"]
+    LEDGER["Ledger + sub-books"]
+    LOOP["Engine loop"]
+    REH["Rehearsals + stress tests<br/>3 full runs · 421 tests"]
+    subgraph STRAT["Strategies"]
+      direction LR
+      MM["Market making<br/>FMM · CATCH · FLIP · carry"]
+      NIGHT["Election-night machine<br/>115 of 116 races · ~300 ms"]
     end
-    CL["Claude<br/>monitoring · reports"]
-    ME["Me<br/>decisions · controls · orders"]
-    SIG -->|"books · trades"| LIS --> ENG
-    PM -->|"fair · calls"| ENG
-    ENG --> STR --> EXE
-    SIG <-->|"orders · positions · fills · cash"| EXE
-    ENG --> OPS
-    ENG <-->|"state · controls"| MIR
-    ENG <-->|"data · releases"| RES
-    OPS --> CL
-    CC --> CL
-    MIR <--> ME
-    CL -->|reports| ME
-    SIG <-->|orders| ME
+    EXEC[["Risk + executor<br/>rule 0 · I2 · 25 writes/min"]]
+    OPS["Ops timers"]
+    DASHF["Dashboard feeder"]
+    WS --> FEEDS --> LOOP
+    LEDGER <--> LOOP
+    LOOP --> STRAT
+    REH -.- STRAT
+    STRAT --> EXEC
+    EXEC ~~~ OPS
+    EXEC ~~~ DASHF
+  end
+  subgraph LAPTOP["My laptop"]
+    direction LR
+    MIRROR["Dashboard mirror<br/>Piero's Intel"]
+    RES["Research + simulations"]
+    CC["Claude Code<br/>204 releases"]
+  end
+  subgraph CLAUDE["Claude app"]
+    direction LR
+    MON["Live monitoring"]
+    MORN["Morning reports"]
+  end
+  subgraph PIERO["Piero"]
+    direction LR
+    READ["Reads reports"]
+    DEC["Decisions + controls"]
+    OVER["Discretionary overlay"]
+  end
+  PM --> SERVER
+  POLL --> SERVER
+  SERVER ==>|orders| SIGG
+  SIGG --> SERVER
+  SERVER --> LAPTOP
+  LAPTOP -.->|deploys| SERVER
+  SERVER -.-> CLAUDE
+  SERVER ~~~ PIERO
+  PIERO -.->|controls| SERVER
+  PIERO ==>|manual orders| SIGG
+  %% declared last: the layout's cycle-breaking starts here, which keeps SIG on the left
+  subgraph SIGG["SIG exchange"]
+    SIGT["REST + websocket"]
+  end
+  classDef default fill:none,stroke:#8b949e,stroke-width:1.5px
+  classDef key fill:none,stroke-width:3.5px
+  classDef feed font-size:14px
+  classDef bare fill:none,stroke:none
+  class EXEC key
+  class F1,F2,F3,F4,F5,F6 feed
+  class SIGT bare
+  style SIGG fill:none,stroke:#8b949e,stroke-width:3.5px
+  style SERVER fill:none,stroke:#8b949e,stroke-width:2px
+  style FEEDS fill:none,stroke:#8b949e
+  style STRAT fill:none,stroke:#8b949e
+  style LAPTOP fill:none,stroke:#8b949e,stroke-dasharray:6 4
+  style CLAUDE fill:none,stroke:#8b949e,stroke-dasharray:6 4
+  style PIERO fill:none,stroke:#8b949e,stroke-dasharray:6 4
 ```
 
-- One Python engine; **rule 0:** never sell below the lot average + 0.5c; **I2:** reducing orders never exceed the position.
-- 204 releases in 34 days, one commit each in this repo's history.
-- 421 tests, including an I2 property test over 500 seeds.
-- 3 election-night rehearsals with synthetic Polymarket paths injected into the live feed.
+**204 releases in 34 days · 421 tests · 3 full rehearsals · ~300 ms from race call to order**
+
+<details><summary><b>Data</b></summary>
+
+| Box | What it does |
+|---|---|
+| **SIG exchange** | One YES book per contract (NO = 1 − YES); 237 contracts across 116 races. REST for orders, cancels and positions: ≤ 95 reads and 25 writes a minute. Websocket for books, trades and fills. The board shows SIG marks; the score is cash after every market resolves. |
+| **Polymarket** | The deeper market on the same races; its mid is the fair value for every SIG contract. A race counts as called when the side bid holds ≥ 0.95 for 20 s, or prints ≥ 0.98 once, after the last poll close. |
+| **Poll-close file** | Every race, its state, and when its last polls close. No call is trusted before that time; resting orders are pulled 10 minutes before each first close. |
+
+</details>
+
+<details><summary><b>Server</b></summary>
+
+| Box | What it does |
+|---|---|
+| **Websocket listener** | Holds the live connection to SIG and turns each message into a state update; Polymarket is polled alongside. |
+| **Live feeds** | Books, trades, orders, positions, fills, cash, all in memory. Every strategy reads the same snapshot, and all reads share one budget of ≤ 95 a minute. |
+| **Engine loop** | Refreshes state; each layer proposes orders; the executor checks them and sends them. Runs under systemd on the server, 24/7, from Oct 7 to Nov 4 (on my laptop before that). |
+| **Ledger + sub-books** | Every share belongs to exactly one layer, and a layer can only sell its own lots. The sub-books always sum to the real SIG position; I2 (reducing orders never exceed the position) is property-tested over 500 seeds. |
+| **Market making** | FMM quotes favourites under fair: 3,912 round trips, +5.5k realized.<br>CATCH v1 → v3 posts deep bids that catch sweeps and sells them on the snap-back: +7.9k realized.<br>FLIP takes first in queue and flips on the fill: 442 flips, +0.9k.<br>Carry and two-book locks hold to settlement. |
+| **Election-night machine** | A call detector after each state closes.<br>A sniper under min(0.97, PM − 3c), up to 15k shares a race.<br>A reversal guard: if PM drops under 0.90 within 10 min, that race stops.<br>Recycling at ≥ 0.97 to fund the next wave.<br>The result: calls on 229 books in 115 of 116 races; 296k shares at an average of 0.940, +9.8k vs fair; 297 ms p50 from call to order. |
+| **Rehearsals + stress tests** | 3 full rehearsals with synthetic calls injected into the live feed; a night simulator at different cash levels; 421 tests. |
+| **Risk + executor** | Rule 0 (never sell below the lot average + 0.5c); I2 and the cash floor checked before every order; 25 writes a minute, 5 of them reserved for the call lane; a kill switch per layer. |
+| **Ops timers** | systemd timers for every scheduled step (the 14:40 go-live, poll-close pulls, wind-downs), plus health checks, alerts, the run log and a settlement watch. |
+| **Dashboard feeder** | Publishes the account at SIG marks and at fair, the rank, cash and the night's calls. |
+
+</details>
+
+<details><summary><b>My laptop</b></summary>
+
+| Box | What it does |
+|---|---|
+| **Dashboard mirror** | Piero's Intel: the live account, rank, cash and calls by wave. |
+| **Research + simulations** | Tape studies, the night simulator, parameter sweeps before each change. |
+| **Claude Code** | Writes, tests and deploys the engine: 204 releases in 34 days. |
+
+</details>
+
+<details><summary><b>Claude app</b></summary>
+
+| Box | What it does |
+|---|---|
+| **Live monitoring** | Reads the live state and logs, flags faults and drift, checks every release. |
+| **Morning reports** | P&L, rank vs #50 / #100, what changed overnight, what to decide. Decisions become written specs for Claude Code. |
+
+</details>
+
+<details><summary><b>Piero</b></summary>
+
+| Box | What it does |
+|---|---|
+| **Reads reports** | Turns morning and live reports into the day's changes. |
+| **Decisions + controls** | Turns layers on and off, sets caps and timings, stops and re-arms the election machine. |
+| **Discretionary overlay** | Manual trades where the engine can't act (crashes, thin books, prices far below a resolved value). They're booked in a separate manual sub-book that the engine never trades. |
+
+</details>
 
 ## My strategies
 
