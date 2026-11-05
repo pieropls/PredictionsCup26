@@ -751,7 +751,7 @@ def pm_book(bots):
 
 def our_fills():
     """Every fill of the account, oldest first (SIG fill ids grow): data/fills_archive.jsonl (SIG's fills since Oct 1), each with the
-    ledger's action where the ledger has its key (the archive leaves `action` out of older fills and of some hand fills, e.g. Piero's
+    ledger's action where the ledger has its key (the archive leaves `action` out of older fills and of some hand fills, e.g. the operator's
     23:27 Nov 3 Alaska Senate R NO sale); ledger-only fills added."""
     L = json.load(open(f"{DATA}/ledger.json"))
     led = {f["key"]: f for f in L.get("fills") or [] if f.get("key")}
@@ -852,7 +852,7 @@ def snapshot_data():
         elif f.get("layer") == "swingsell":                 # a sell_now: a buy of the complement at p sells the held side at 1 - p
             k = (f["ex"], "no" if f["side"] == "yes" else "yes")
             sold[k][0] += f["qty"]; sold[k][1] += f["qty"] * (1 - f["price"])
-        elif not f.get("layer"):                            # no engine layer: Piero's hand fills
+        elif not f.get("layer"):                            # no engine layer: manual fills
             k = (f["ex"], f["side"], f["action"])
             hand[k][0] += f["qty"]; hand[k][1] += f["qty"] * f["price"]
     names = {str(b["ex"]): (lambda rp: f"{rp[0]} {rp[1]}" if rp else b["name"])(race_party(b.get("market"))) for b in bots}
@@ -913,7 +913,7 @@ def snapshot_write(d):
           "| Market | Side | Shares | Avg price | Cost |", "|---|---|---:|---:|---:|"]
     for (ex, side), (q, v) in sorted(d["bought"].items(), key=lambda kv: -kv[1][1]):
         L.append(f"| {d['names'].get(ex, ex)} | {side.upper()} | {q:,.0f} | {v / q:.4f} | {v:,.0f} |")
-    L += ["", "Piero's hand fills since 01:00:", ""]
+    L += ["", "manual fills since 01:00:", ""]
     if d["hand"]:
         L += ["| Market | Side | Action | Shares | Avg price | Notional |", "|---|---|---|---:|---:|---:|"]
         for (ex, side, act), (q, v) in sorted(d["hand"].items(), key=lambda kv: -kv[1][1]):
@@ -978,7 +978,7 @@ def cleanup_report(st):
     held = {r["ex"]: r["n"] for r in d["rows"]}
     rest = ", ".join(f"{d['names'].get(ex, ex)} {held[ex]:,.0f}" for ex, _ in LEFT_BY_HAND if held.get(ex, 0) >= 1) or "none"
     runlog(f"CLEANUP REPORT {time.strftime('%H:%M')}: sold {sold} (proceeds {sum(v for _, v in d['sold'].values()):,.0f}); still held of the sales: {rest}; "
-           f"bought {bought} (cost {sum(v for _, v in d['bought'].values()):,.0f}); Piero's hand fills since 01:00: {hand}; cash {d['cash']:,.0f}; value at PM (account at settlement) {t['at_settle']:,.0f} "
+           f"bought {bought} (cost {sum(v for _, v in d['bought'].values()):,.0f}); manual fills since 01:00: {hand}; cash {d['cash']:,.0f}; value at PM (account at settlement) {t['at_settle']:,.0f} "
            f"({t['at_settle'] - START_VALUE:+,.0f} vs 100k); open risk left {t['open_cost']:,.0f} at cost in {t['open_n']} race(s), worst case {-t['open_cost']:+,.0f}")
 
 
@@ -1213,7 +1213,7 @@ def ff_event(st, kind, name, side, q, px, amount, cash_):
 
 def ff_fund(st, res, need, skip_ex, names, snap):
     """Item 3: sell near-certain winners (PM side resolved / proposed for us, or open with PM side >= 0.99) into SIG bids >= 0.965,
-    engine sub-books only (never Piero's manual book), highest bid first, until `need` is raised. -> cash raised."""
+    engine sub-books only (never the manual book), highest bid first, until `need` is raised. -> cash raised."""
     cands = []
     for ex, books in (ledger_now().get("subbooks") or {}).items():
         ex, net, p = str(ex), sum(books.values()), res.get(str(ex))
@@ -1261,7 +1261,7 @@ def ff_scan(st):
     cands, n_books = [], 0
     for ex, p in res.items():
         b = bots.get(ex)
-        if p[0] != "resolved" or not b or not str(b.get("name", "")).startswith("MKT"):   # resolved only; never Piero's position markets
+        if p[0] != "resolved" or not b or not str(b.get("name", "")).startswith("MKT"):   # resolved only; never manual position markets
             continue
         rp = race_party(b.get("market"))
         side = "yes" if p[1] >= 0.999 else "no" if p[1] <= 0.001 else None

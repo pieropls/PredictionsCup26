@@ -41,7 +41,7 @@ SEEDS = {"normal": 8, "slow": 5, "reversal": 5}
 EARLY = "17:00"                                             # the early-close favourites: race's last poll close <= 17:00 PT
 FAV_MIN = 0.75
 NEED_TARGET = 20_000.0                                      # C7 as built: recycle while usable < 20k (ELECTION['recycle_target'])
-# Piero's gate (spec item 5, Oct 27): a wave's projected snipe need = its unlimited-cash sniper spend (docs/night_reserve.md's wave table)
+# the operator's gate (spec item 5, Oct 27): a wave's projected snipe need = its unlimited-cash sniper spend (docs/night_reserve.md's wave table)
 # x the share of its races still uncalled; the recycler sells a book only while the later waves' (after the book's own) need > usable.
 WAVE_NEED = {"16:00": 43e3, "16:30": 6e3, "17:00": 160e3, "17:30": 10e3, "18:00": 175e3, "19:00": 21e3, "20:00": 31e3, "21:00": 12e3, "22:00": 15e3}
 _P = {}
@@ -179,7 +179,7 @@ def recycle_rig(rig, el, nw):
                     return
             orders, pend = [], 0.0
             after = None
-            if self.cfg.get("gate2"):                      # Piero's gate: the later waves' projected need, per wave of the sold book
+            if self.cfg.get("gate2"):                      # the operator's gate: the later waves' projected need, per wave of the sold book
                 called = {self.W.meta[e]["race"] for e, c in E.calls.items() if not c.get("reversed")}
                 proj = {w: WAVE_NEED.get(nw.hm(w)[:5], 0.0) * sum(1 for r_ in rr if r_ not in called) / len(rr) for w, rr in self.wave_races.items()}
                 after = {w: sum(v for w2, v in proj.items() if w2 > w) for w in proj}
@@ -328,7 +328,7 @@ T27 = (0.97, 0.96, 0.95)
 
 def plan_oct27(srv):
     """Spec item 5 (Oct 27): T 0.97 / 0.96 / 0.95 at 60k, D 25%, under today's bid structure (clip kept) and the main model (no clip),
-    each with and without Piero's later-wave gate; plus bids capped at 0.95 (the Oct 26 rehearsal) and C117's 30k-a-wave limit."""
+    each with and without the operator's later-wave gate; plus bids capped at 0.95 (the Oct 26 rehearsal) and C117's 30k-a-wave limit."""
     out = []
     for scen, n in SEEDS.items():
         for s_ in range(1, n + 1):

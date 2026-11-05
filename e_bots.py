@@ -406,7 +406,7 @@ class MarketBot:
             q = abs(subs.get(x["sub"], 0))
             if q >= MIN_QTY:
                 reduce_buy(x["side"], x["px"], int(q), "touchexit", x["sub"], TOUCH_TTL_S, band=0.0, a2=False)
-        # manual walls (Piero's pilot): one resting order per wall, exact price, its own TTL; the buy-back for what filled
+        # manual walls (manual pilot): one resting order per wall, exact price, its own TTL; the buy-back for what filled
         out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], 2 * QTY_TOL, "wall", sub=x["sub"], ttl=x.get("ttl") or WALL_TTL_S)
                 for x in (s.get("wall") or [])]
         out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], 2 * QTY_TOL, "sleeve", sub=x["sub"], ttl=x["ttl"])   # day 9 sleeve: a limit clip at the touch
@@ -449,7 +449,7 @@ class MarketBot:
                 reduce_buy(x["side"], x["px"], int(q), "fmmexit", x["sub"], 86400, band=0.0, a2=False)
         out += [want(x["side"], "buy", x["px"], x["qty"], x["px"], x["px"], QTY_TOL, "drift", sub=x["sub"], ttl=x.get("ttl") or 120)   # C102: the night drift's takes
                 for x in (s.get("drift") or [])]
-        for x in s.get("callexit") or []:                    # C102 (C17, Piero's §5.4 YES): a lot a strict call says loses rests a sell at the best bid
+        for x in s.get("callexit") or []:                    # C102 (C17, the operator's §5.4 YES): a lot a strict call says loses rests a sell at the best bid
             q = abs(subs.get(x["sub"], 0))
             if q >= MIN_QTY:
                 n0 = len(out)

@@ -679,7 +679,7 @@ def main():
     blob_exp = json.dumps(expected, indent=1, default=str).encode()
     with open(LOCAL_EXPECTED, "wb") as fh:
         fh.write(blob_exp)
-    ssh(f"mkdir -p {REMOTE_DIR} && chmod 755 {REMOTE_DIR}")   # never /opt/research itself: Piero's 750 root:sig (00:25 Oct 26 PERMS FAIL)
+    ssh(f"mkdir -p {REMOTE_DIR} && chmod 755 {REMOTE_DIR}")   # never /opt/research itself: the required 750 root:sig (00:25 Oct 26 PERMS FAIL)
     for path, blob in ((REMOTE_PLAN, blob_plan), (REMOTE_EXPECTED, blob_exp)):
         ssh(f"cat > {path}.tmp && mv {path}.tmp {path} && chmod a+r {path}", data=blob)
     chk = ssh(f"sudo -u sig {ENGINE}/.venv/bin/python3 -I -c 'import json; p=json.load(open(\"{REMOTE_PLAN}\")); "

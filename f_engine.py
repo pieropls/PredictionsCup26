@@ -492,7 +492,7 @@ class Engine:
         self.release_fund_log, self.dump_refresh_t = [], {}   # day 6 §3.3 funding per hour; §4.1 level refresh times
         self.release_why = {}                               # ex -> (t, branch) of the last release plan (fill labels)
         self.touch_now, self.touch_view, self.touch_block, self.touch_note = {}, {}, {}, {}   # day 6 §2
-        self.wall_now, self.wall_view = {}, {}               # Piero's manual walls (control `wall`)
+        self.wall_now, self.wall_view = {}, {}               # the manual walls (control `wall`)
         self.sleeve_now, self.sleeve_last, self.sleeve_block, self.sleeve_log = {}, {}, {}, []   # day 9 sleeve (settlement holds)
         self.swing_now, self.swing_block, self.swing_note = {}, 0.0, {}   # day 10 §3: the RI swing
         self.big_sweep, self.big_sweep_t = set(), 0.0                    # day 10 §4.2: big-sweep sides (clips to 4k)
@@ -607,7 +607,7 @@ class Engine:
             if not (self.controls.d.get("c95c") or {}).get("since"):
                 with self.controls.lock:
                     self.controls.d["c95c"] = dict(since=stamp()); self.controls.save()
-                self.night.line("C95c: Piero's own fills go to the 'manual' sub-book from now on (never sold by the engine); new unexplained inventory is left alone 10 min; "
+                self.night.line("C95c: manual fills go to the 'manual' sub-book from now on (never sold by the engine); new unexplained inventory is left alone 10 min; "
                                 "the dashboard header shows a paused banner with its reason and a Resume now button")
         except Exception as err:
             print(f"C88 / C90 migration: {err!r}")
@@ -922,11 +922,11 @@ class Engine:
         fixed_ = self.ledger.audit_subbooks(pos, log=lambda s: self.event("AUDIT", s.strip()[6:].strip()), skip=self.audit_skip(pos, now))
         for ex_, diff_ in fixed_ or ():
             if abs(diff_) >= 1:
-                self.inv_new_t[str(ex_)] = now               # C95c: new unexplained inventory (maybe Piero's trade, its fill not read yet): no seller for 10 min
+                self.inv_new_t[str(ex_)] = now               # C95c: new unexplained inventory (maybe a manual trade, its fill not read yet): no seller for 10 min
         try:
             self.foreign_fill_actions()                     # C99: SIG's fills carry no buy / sell; a foreign order's direction comes from its record
-            self.manual_book(now)                           # C95c: Piero's own fills -> the 'manual' sub-book (never sold by the engine)
-            self.az06_audit()                               # C100 item 2: once, SIG's record of Piero's four Oct 17 AZ-06 orders
+            self.manual_book(now)                           # C95c: manual fills -> the 'manual' sub-book (never sold by the engine)
+            self.az06_audit()                               # C100 item 2: once, SIG's record of the four manual Oct 17 AZ-06 orders
         except Exception as err:
             self.event("ERR", f"manual book: {err!r}")
         try:
@@ -2062,7 +2062,7 @@ class Engine:
                     ok, why = True, f"{len(done)} sets with no one-leg residue"
             if ok:
                 c.set_layer(l, "full", f"pilot gate passed: {why}")
-        # Piero's unattended rule: writes/cancels failing with 5xx / UNKNOWN repeatedly -> stop and pull at-risk orders
+        # the unattended rule: writes/cancels failing with 5xx / UNKNOWN repeatedly -> stop and pull at-risk orders
         try:
             self.ratchet("dump", now)
             self.ratchet("scalp", now)
@@ -2082,7 +2082,7 @@ class Engine:
         self.auto_resume(now)
         # D5 loss stop and the SIG 5xx pause
         bot_24h = sum(self.fill_pnl_fair(f) for f in self.fills_since(now - 86400)
-                      if self.strategy_of(f["bot"], f["layer"]) not in ("position", "old engine") and f["layer"] not in D5_EXCLUDE_LAYERS)   # C87: Piero's RI / wall orders are not bot P&L
+                      if self.strategy_of(f["bot"], f["layer"]) not in ("position", "old engine") and f["layer"] not in D5_EXCLUDE_LAYERS)   # C87: manual RI / wall orders are not bot P&L
         if bot_24h < -LOSS_STOP and now - self.pnl_alert_t.get("D5", 0) >= 3600:   # C88: the D5 loss stop is an ALERT, never a pause
             self.pnl_alert_t["D5"] = now
             msg = f"ALERT D5: bot P&L at fair {bot_24h:+,.0f} over 24 h (< {-LOSS_STOP:+,}) — alert only, no pause (Piero 01:55)"
@@ -3142,10 +3142,10 @@ class Engine:
             self.ex.cancel(o, reason="refresh (make-before-break)" if due else "re-price (make-before-break)")
         if len(self.refreshed) > 3000:
             self.refreshed = {k: v for k, v in self.refreshed.items() if v >= now - 7200}
-        # Day 9 §2-§3: the budget is k x free cash above the floor (minus Piero's walls); levels are allocated resting-first
+        # Day 9 §2-§3: the budget is k x free cash above the floor (minus manual walls); levels are allocated resting-first
         # (hysteresis: a resting level loses its slot only when the resting set alone no longer fits), L0 first within its
         # 8k cap (held + resting), then by expected edge = (fair - price) x reach / weight.
-        budget = max(0.0, self.entry_budget(cash) - self.wall_resting() - self.fm_reserve() - self.tm_reserve() - self.sm_reserve() - self.reservoir_resting() - self.h1_sleeve_reserve(now) - self.carry_bid_notional())   # C93 item 4: the H1 sleeve ahead of the catcher; C95: the rotation's cash and the manual reserve are already off `cash`   # C84c: the reservoir's rebuys come first   # C70: Piero's walls, (C81b) the FM's cap and (C83) the TM's cap come off the top (weight 1.0)
+        budget = max(0.0, self.entry_budget(cash) - self.wall_resting() - self.fm_reserve() - self.tm_reserve() - self.sm_reserve() - self.reservoir_resting() - self.h1_sleeve_reserve(now) - self.carry_bid_notional())   # C93 item 4: the H1 sleeve ahead of the catcher; C95: the rotation's cash and the manual reserve are already off `cash`   # C84c: the reservoir's rebuys come first   # C70: manual walls, (C81b) the FM's cap and (C83) the TM's cap come off the top (weight 1.0)
         if ALLOC.get("on"):
             budget = min(budget, max(0.0, float(ALLOC["catcher_slice"]) - self.catcher_new_cost()))   # C97 item 4a: a fixed 10k slice (new lots at cost + resting levels)
         out, cut, spent = self.allocate_levels(rows, budget, float(DUMP_L0_BUDGET) if DUMP_L0_CAP_RESTING else max(0.0, DUMP_L0_BUDGET - self.l0_held()))   # fix #1: the L0 rows themselves (resting + new) fit the cap
@@ -4056,7 +4056,7 @@ class Engine:
         return q if f.get("side") == "yes" else -q
 
     def manual_spent(self):
-        """C95 item 1: net cash Piero's own fills (orders the engine did not place: no layer) took since the reserve was set; a sale
+        """C95 item 1: net cash manual fills (orders the engine did not place: no layer) took since the reserve was set; a sale
         that frees cash counts back. Positions are walked back from now so each fill is split into its reducing and adding part."""
         cfg = self.controls.d.get("manual_reserve") or {}
         since = cfg.get("since")
@@ -4171,11 +4171,11 @@ class Engine:
                         books.pop("manual", None)
                     moved.append((ex, mv))
         for ex, mv in moved:
-            msg = f"MANUAL {self.name(ex)}: Piero's own fill {mv:+,.0f} YES booked to the manual sub-book (manual {float(self.ledger.subbooks.get(ex, {}).get('manual', 0)):+,.0f}); no engine seller touches it"
+            msg = f"MANUAL {self.name(ex)}: manual fill {mv:+,.0f} YES booked to the manual sub-book (manual {float(self.ledger.subbooks.get(ex, {}).get('manual', 0)):+,.0f}); no engine seller touches it"
             self.event("AUDIT", msg); self.night.line(msg)
 
     def manual_reserve_left(self):
-        """C95 item 1: what is left of Piero's manual reserve (his sales refill it up to the amount)."""
+        """C95 item 1: what is left of the manual reserve (his sales refill it up to the amount)."""
         amt = float((self.controls.d.get("manual_reserve") or {}).get("amount") or 0.0)
         if amt <= 0:
             return 0.0
@@ -4755,7 +4755,7 @@ class Engine:
         return max(0.0, self.manual_reserve_left() - live)
 
     def fmm_free(self):
-        """Free cash for FMM: cash - 5,000 - Piero's reserve left (2,000 for FMM: item 4), less the buys filled since the last cash read."""
+        """Free cash for FMM: cash - 5,000 - manual reserve left (2,000 for FMM: item 4), less the buys filled since the last cash read."""
         t0 = self.pnl_read_t
         self.fmm_unread = [(t, n) for t, n in self.fmm_unread if t >= t0]
         c103 = self.el_reserve(time.time()) if time.strftime("%Y-%m-%d %H:%M:%S") < FMM_C133.get("c103_off_until", "") else 0.0
@@ -4868,7 +4868,7 @@ class Engine:
         free = self.fmm_free() - (sum(q * p for _, _, q, p in P["lots"]) if paper else 0.0)
         allow = K * max(0.0, free)
         vol = self.rot_vol48(now)
-        hand = {str(o["ex"]) for o in self.open if not self.ex.owned(o["id"])}   # Piero's own resting orders (RI-GOV-D): FMM stays out of those books
+        hand = {str(o["ex"]) for o in self.open if not self.ex.owned(o["id"])}   # manual resting orders (RI-GOV-D): FMM stays out of those books
         books = collections.defaultdict(list)
         cf = set()                                           # C101 item B: the coin-flip books (side fair 0.25-0.75): the touch only, <= fair - 3c, 500 a clip, 3k a race
         party = dict(net=self.party_view()["net"]) if (ROTATION.get("party_cap") and FMM_CF.get("on") and not paper) else None
@@ -5295,7 +5295,7 @@ class Engine:
                         by_race[rc] -= n
         if pulled:
             msg = (f"FMM GUARD ({why}): free {cash0:,.0f} at the last cash read -> {free:,.0f} after the fills; pulled {len(pulled)} bids / {sum(pulled):,.0f} "
-                   f"(largest first), {total:,.0f} left resting (<= K {K:g} x free; every clip and the two largest race ladders <= free): the 5,000 floor and Piero's reserve hold")
+                   f"(largest first), {total:,.0f} left resting (<= K {K:g} x free; every clip and the two largest race ladders <= free): the 5,000 floor and manual reserve hold")
             self.event("FMM", msg); self.night.line(msg)
         return pulled
 
@@ -5545,7 +5545,7 @@ class Engine:
         return float(st.get("realized") or 0) + open_fair
 
     def fmm_gate(self, now):
-        """§3.3 v2: Sat 10:00 — live (K 3, inventory cap 15k at cost, 5k a race; Piero's reserve cut to 2,000: 18:30 item 4) if the replay was
+        """§3.3 v2: Sat 10:00 — live (K 3, inventory cap 15k at cost, 5k a race; manual reserve cut to 2,000: 18:30 item 4) if the replay was
         positive on >= 6 of 9 days and paper realized >= 0, else off; Sun 10:00 — inventory cap 30k and K 5 if live realized > 0, every cap
         held, no funds event and the replay's 5-s measure supports it; stop and report (no auto-restart) on live P&L at fair < -150, a cap
         break, or an I2 trim from FMM."""
@@ -5571,7 +5571,7 @@ class Engine:
             msg = (f"FMM GATE {t[11:16]}: {'LIVE' if ok else 'stays OFF'} — replay {'positive on >= 6 of 9 days' if FMM.get('replay_ok') else 'not positive enough'} "
                    f"({FMM.get('replay_note', '')}); paper realized {pr:+,.1f} ({(paper or {}).get('fills', self.fmm_paper['fills'])} fills, {(paper or {}).get('rt', self.fmm_paper['rt'])} round trips)"
                    + (f"; K {FMM['k_live']:g} (resting <= K x free), inventory cap {FMM['inv_cap_live']:,.0f} at cost ({FMM['race_cap']:,.0f} a race) from the rotation pool "
-                      f"(its cap {ROTATION['total_cap']:,.0f} -> {FMM['rot_cap_live']:,.0f}); Piero's manual reserve counts as {FMM['manual_reserve_live']:,.0f} for FMM: "
+                      f"(its cap {ROTATION['total_cap']:,.0f} -> {FMM['rot_cap_live']:,.0f}); the manual reserve counts as {FMM['manual_reserve_live']:,.0f} for FMM: "
                       f"{st.get('reserve_release', 0):,.0f} of it goes to FMM only, the other layers keep the full reserve (item 4)" if ok else ""))
             self.event("FMM", msg); self.night.line(msg); self.alerts.append(f"{time.strftime('%H:%M')} {msg}")
         if st.get("decided") and not st.get("status10") and now - ts_s(st["decided"]) >= 600:
@@ -5613,7 +5613,7 @@ class Engine:
             if raw + fmm_spent >= CASH_RESERVE:              # FMM's own fills of the last 15 min took cash under the floor
                 why = why or f"cash {raw:,.0f} under the {CASH_RESERVE:,} floor after FMM fills ({fmm_spent:,.0f} in 15 min)"
             elif ("floor-other", int(now // 3600)) not in self.fmm_logged:
-                self.fmm_logged.add(("floor-other", int(now // 3600)))   # Piero's AZ-06 buy, Oct 17 15:54: not FMM's — the engine's cash-floor pause handles it
+                self.fmm_logged.add(("floor-other", int(now // 3600)))   # the manual AZ-06 buy, Oct 17 15:54: not FMM's — the engine's cash-floor pause handles it
                 msg = f"FMM: cash {raw:,.0f} under the {CASH_RESERVE:,} floor, not from FMM's fills ({fmm_spent:,.0f} in 15 min): FMM keeps its quotes (the fill guard sizes them to free cash); the cash-floor pause handles new risk"
                 self.event("FMM", msg); self.night.line(msg)
         if why:
@@ -5956,7 +5956,7 @@ class Engine:
                f"realized >= 0: every eligible favourite-side book (fair >= {FMM['fav_min']:.2f}, touch <= fair - {FMM['edge'] * 100:.0f}c) quoted GTC at the touch, the race's cheaper book "
                f"also -1 / -2 / -3c; resting bids lock no cash, total <= K x (cash - 5,000 - manual reserve left), K {FMM['k_live']:g}; race budget K x free x 48-h volume share, clip "
                f"max({FMM['min_clip']}, budget / 4), no clip above free; inventory cap {FMM['inv_cap_live']:,.0f} at cost ({FMM['race_cap']:,.0f} a race; resting + inventory inside both) "
-               f"from the rotation pool (rotation cap {ROTATION['total_cap']:,.0f} -> {FMM['rot_cap_live']:,.0f}); Piero's manual reserve counts as {FMM['manual_reserve_live']:,.0f} for FMM only "
+               f"from the rotation pool (rotation cap {ROTATION['total_cap']:,.0f} -> {FMM['rot_cap_live']:,.0f}); the manual reserve counts as {FMM['manual_reserve_live']:,.0f} for FMM only "
                f"(item 4). Fill guard on every FMM fill: pull bids, largest first, until each clip AND the two largest race ladders fit free and resting <= K x free (FMM GUARD; "
                f"the replay's worst burst is one race's whole ladder, 5,010, <= 2 races: with this rule cash never went under floor + reserve at guard latencies 2-15 s). Exits at max(fill + 0.5c "
                f"(ring hours + 1c), best ask), re-pegged down to the best ask, never below fill + 0.5c. Sweep refill: take asks <= fair - 2c, re-post the cleared levels. "
@@ -5985,7 +5985,7 @@ class Engine:
             c.d["layers"].setdefault("rot", dict(state="off", since=now, caps={}, killed=None))["state"] = "full"
             c.save()
         msg = (f"C95 (Piero 15:05 Oct 16): (1) MANUAL RESERVE {MANUAL_RESERVE:,.0f}: the engine never spends below the {CASH_RESERVE:,} floor + the reserve left "
-               f"(engine free cash = cash - {CASH_RESERVE + MANUAL_RESERVE:,.0f}); Piero's own fills (orders the engine did not place) draw from it and pause nothing above the floor; "
+               f"(engine free cash = cash - {CASH_RESERVE + MANUAL_RESERVE:,.0f}); manual fills (orders the engine did not place) draw from it and pause nothing above the floor; "
                f"shown on the dashboard Overview. (2) FUND: GTC asks at max(lot avg + 0.5c, touch), place kept, cash counted on SIG fills only: " +
                ", ".join(f"{self.name(k)} {v:,}" for k, v in ROTATION["sells"].items()) +
                "; KEEP Rhode Island Senate R NO, Delaware's reservoir / swing half and every lot below lot avg + 0.5c; Rhode Island Governor R's reservoir retired (no rebuy). "
@@ -6010,7 +6010,7 @@ class Engine:
                f" (~29k; cash counted on SIG fills only). (2) BUY only from that cash, GTC bids at min(touch, cap) while the gap to PM fair >= {ROTATION['gap_min'] * 100:.0f}c, a target closed if PM moves >= {ROTATION['pm_skip_c'] * 100:.0f}c against it after posting: " +
                "; ".join(f"{b['name']} <= {' / '.join(f'{cp:.3f}' for _, _, cp in b['legs'])} cap {b['cap']:,.0f}" for b in ROTATION["buys"]) +
                f". (3) EXIT: an ask at max(entry + 0.5c, PM fair - {ROTATION['exit_fair_c'] * 100:.1f}c) per lot, a swap into a gap >= {ROTATION['swap_gap_c'] * 100:.0f}c bigger; rotation lots are exempt from the no-edge release above {ROTATION['release_exempt_ret']:.0%} left. "
-               f"Invariants unchanged: never below lot average + 0.5c, the 5,000 floor, I2 / I3, Piero's manual positions untouched (swing / pairset / manual sub-books are never sold).")
+               f"Invariants unchanged: never below lot average + 0.5c, the 5,000 floor, I2 / I3, the manual positions untouched (swing / pairset / manual sub-books are never sold).")
         self.event("CONTROL", msg); self.night.line(msg)
 
     def c93e_migration(self, now):
@@ -6273,7 +6273,7 @@ class Engine:
             sub = rec.get("sub") or "inventory"
             strat = dash5.bucket_of_layer(f.get("layer"), sub, f["ex"])
             apart = strat in ("ri", "walls") or sub.startswith(CORE_SKIP_SUBS) or f["ex"] in dash5.RI_EX or f.get("bot") in self.position_names
-            book = "apart" if apart else "core" if ((f["ex"], sub) in core_subs or (f["ex"], sub) in sold_core) else "trading"   # Piero's position orders are neither book
+            book = "apart" if apart else "core" if ((f["ex"], sub) in core_subs or (f["ex"], sub) in sold_core) else "trading"   # manual position orders are neither book
             exit_ = f.get("action") == "sell" or f.get("layer") in self.REDUCING
             e = float(f["edge"]) * float(f["qty"])
             for scope in (("since",) + (("today",) if t >= day0 else ())):
@@ -6301,7 +6301,7 @@ class Engine:
             res[scope] = {}
             for grp in ("strategy", "book"):
                 res[scope][grp] = {k: dict((x, round(y, 2)) for x, y in v.items()) | {"net": round(v["bought"] - v["given"], 2)} for k, v in out[scope][grp].items()}
-        today_net = sum(v["net"] for k, v in res["today"]["book"].items() if k != "apart")   # the target is for the two books; Piero's own orders are apart
+        today_net = sum(v["net"] for k, v in res["today"]["book"].items() if k != "apart")   # the target is for the two books; manual orders are apart
         frac = max(0.05, (now - day0) / 86400)
         res.update(t=stamp(), target_day=SCOREBOARD_TARGET_DAY, today_net=round(today_net, 2), pace_day=round(today_net / frac, 2), core_cost=(self.controls.d.get("core") or {}).get("cost"))
         self.scoreboard = res
@@ -7054,7 +7054,7 @@ class Engine:
                 + f"; total held {sum(r[1] for r in rows.values()):,.0f}, sellable now {sum(r[4] for r in rows.values()):,.0f}; unsold lots stay held "
                   f"(+EV to settlement, recycled after calls)")
 
-    # ---- C133 FLIP (Piero 18:05 Nov 2, docs/flip_nov2.md): Piero's fill-then-flip — first in queue on one side of a wide book; on a fill,
+    # ---- C133 FLIP (Piero 18:05 Nov 2, docs/flip_nov2.md): the operator's fill-then-flip — first in queue on one side of a wide book; on a fill,
     # at once first in queue on the other side. Lots in 'flip:{ex}:{side}' sub-books; the control 'flip' (pilot = shadow, full = live, off).
     def flip_plan(self, now):
         """-> ({ex: [entry bid]}, {ex: [flip ask]}). Entries: sides with a fresh PM fair 0.25-0.995 (CATCH's exclusions, its news guard, the
@@ -7738,12 +7738,12 @@ class Engine:
                 self.event("RATCHET", msg)
                 self.night.line(msg)
 
-    # ------------------------------------------------------------------------------------------------ manual walls (Piero's pilot)
+    # ------------------------------------------------------------------------------------------------ manual walls (manual pilot)
     def walls(self):
         return list(self.controls.d.get("walls") or [])
 
     def wall_resting(self):
-        """Day 8 §2 (C70): Piero's walls resting or queued, at cost x their weight (1.0): they come off the top of the entry
+        """Day 8 §2 (C70): manual walls resting or queued, at cost x their weight (1.0): they come off the top of the entry
         budget before the dump levels are allocated (the walls are his orders, the engine never cuts them for its own levels)."""
         out = sum(o["qty"] * o["price"] for o in self.open
                   if (self.ledger.orders.get(o["id"]) or {}).get("layer") == "wall" and o["action"] == "buy" and o["id"] not in self.ex.cancelling)
@@ -8288,7 +8288,7 @@ class Engine:
                     shortfall=min(hour_left, max(0.0, CONSTRAINED_FREE - (cash - CASH_RESERVE))) if on else 0.0)
 
     def release_plan(self, cash, now, used=None):
-        """Day 4 §3 (Piero's rule), release on demand: a holding is sold into the SIG bid only if (1) the bid is >= its average
+        """Day 4 §3 (the operator's rule), release on demand: a holding is sold into the SIG bid only if (1) the bid is >= its average
         entry cost (a realized profit) with the price still >= fair_side - 5%, or (2) the dump catcher is cash-constrained now,
         the holding returns less per day to settlement than the dump catcher made per day over 24 h, and the cost vs fair is
         <= 5% (then only up to the shortfall). Never while new risk is paused; not 07:00-08:00 PT. Lowest return per day
@@ -8431,7 +8431,7 @@ class Engine:
         return int(max(0, min(qty, ok)))
 
     def rule0(self, b, wants, s):
-        """Piero's rule (day 6 §9.0): the engine never sells its own trades at a loss. Every reducing want of a market bot
+        """The operator's rule (day 6 §9.0): the engine never sells its own trades at a loss. Every reducing want of a market bot
         (release, recycler, exits, unwinds) is clipped to the shares rule 0 allows at its sale price; position bots (the
         manual AK / RI book) are not the engine's trades."""
         if b.kind != "market":
@@ -8545,7 +8545,7 @@ class Engine:
 
     def rebuild_plan(self, cash, now, free, pending):
         """Oct 5 22:50 (Piero): while free cash above the floor is under 15k, sell engine lots at the SIG bid: lots the bid
-        clears at entry + 0.5c (rule 0), and — Piero's exception — lots <= 5c under fair down to entry - 1c; lowest gap
+        clears at entry + 0.5c (rule 0), and — the operator's exception — lots <= 5c under fair down to entry - 1c; lowest gap
         to fair first, <= 7c under fair first, then 7-10c only if still short. Every sub-book but manual, pair sets and
         recycle lots; no hourly cap, no age rule. Each sale is logged with its gap, origin and EV given up."""
         need = REBUILD_FREE - free - pending
@@ -8821,7 +8821,7 @@ class Engine:
     def run_sell_now(self, now):
         """Piero 17:15 Oct 8: run a 'sell_now' instruction — cancel the market's resting reservoir asks, send the clips (limit buy of the
         complement at 1 - px: never worse than px), cancel whatever did not fill once its TTL passed (not chased, not left resting), then log
-        the fills with SIG's position average before / after and the free cash right after. Piero's order: the per-lot rule 0 is his call
+        the fills with SIG's position average before / after and the free cash right after. the operator's order: the per-lot rule 0 is his call
         here (the sale is at the position average)."""
         c = self.controls
         sn = c.d.get("sell_now") or {}
@@ -8949,9 +8949,9 @@ class Engine:
                 out_room -= q
                 while q >= MIN_QTY:
                     take = int(min(q, r["clip"]))
-                    x_ = dict(side=side, px=ask_px, qty=take, sub=sub, ttl=float(r.get("ask_ttl_s") or SWING_TTL_S))   # C87: Piero's 'queue kept' asks live 12 h
+                    x_ = dict(side=side, px=ask_px, qty=take, sub=sub, ttl=float(r.get("ask_ttl_s") or SWING_TTL_S))   # C87: the operator's 'queue kept' asks live 12 h
                     if r.get("avg_floor"):
-                        x_["rule0_margin"] = -1.0           # the engine's rule-0 filter lets these lots go at the position-average floor (Piero's order)
+                        x_["rule0_margin"] = -1.0           # the engine's rule-0 filter lets these lots go at the position-average floor (the operator's order)
                     plan["sells"].append(x_)
                     q -= take
             out_sh = self.reservoir_out(r)
@@ -9124,7 +9124,7 @@ class Engine:
             except Exception:
                 continue
             if bad >= MIN_QTY and f["layer"] == "callexit":
-                msg = f"RULE0-CALLED {self.name(f['ex'])} {held.upper()} {sub}: {bad:,.0f} of {f['qty']:,.0f} sold at {sale:.3f} after a strict call against it (Piero's §5.4 exemption)"
+                msg = f"RULE0-CALLED {self.name(f['ex'])} {held.upper()} {sub}: {bad:,.0f} of {f['qty']:,.0f} sold at {sale:.3f} after a strict call against it (the operator's §5.4 exemption)"
                 self.event("RULE0", msg)
                 self.night.line(msg)
             elif bad >= MIN_QTY:
@@ -10013,7 +10013,7 @@ class Engine:
 
     ROTATION_SKIP = ("manual", "pairset:", "recycle:", "sleeve:", "wall:", "swing:", "fm:", "tm:", "sm:")   # Piero 22:15: never manual, wall, sleeve or pair-set lots; swing / fm / recycle / tm / sm have their own exits (the TM's and SM's already sit at the touch ask)
 
-    ROTATION_SKIP = ("manual", "pairset:", "sleeve:", "wall:", "swing:")   # C89: Piero's position orders and pair sets only; every trading lot can be sold
+    ROTATION_SKIP = ("manual", "pairset:", "sleeve:", "wall:", "swing:")   # C89: manual position orders and pair sets only; every trading lot can be sold
     OWN_EXIT_SUBS = ("dump:", "tm:", "sm:", "fm:", "touch:", "scalp:", "longshot:", "rot:", "fmm:")   # subs whose layer rests its own exit while the lot is not held
 
     def trading_cost(self):
@@ -10053,7 +10053,7 @@ class Engine:
         for ex, b in self.book.items():
             q = b["pos"]
             if not q or ex not in self.owner or self.owner[ex].kind != "market" or self.ex.is_frozen(ex) or ex in self.manual_ex or (str(ex) in dash5.RI_EX and str(ex) not in rot_left) or (ex in self.reservoirs() and str(ex) not in rot_left and str(ex) not in fund_left):
-                continue                                    # Piero's manual market (RI-GOV-D), RI Senate R (his reservoir) and any reservoir market stay out (C94: unless he named it for the rotation; its reservoir subs still stay)
+                continue                                    # the manual market (RI-GOV-D), RI Senate R (his reservoir) and any reservoir market stay out (C94: unless he named it for the rotation; its reservoir subs still stay)
             res_subs = self.reservoir_subs(ex) if ex in self.reservoirs() else set()
             allow_all = (str(ex) in rot_left and str(ex) in (ROTATION.get("sell_all_subs") or ())) or (str(ex) in fund_left and str(ex) in (FUND.get("sell_all_subs") or ()))   # C95 / C97: the whole holding (swing sub included)
             side = "yes" if q > 0 else "no"
@@ -10070,7 +10070,7 @@ class Engine:
                     t_ = self.ledger.tranches.get(kv[0]) or {}
                     return float(t_.get("avg") or ((self.book.get(ex) or {}).get("row") or {}).get("avgCost") or 0)
                 subs_iter.sort(key=_avg)
-            fresh_inv = now - self.inv_new_t.get(str(ex), 0.0) < 600   # C95c: maybe Piero's own trade, its fill record still coming
+            fresh_inv = now - self.inv_new_t.get(str(ex), 0.0) < 600   # C95c: maybe a manual trade, its fill record still coming
             ev_fl = min(0.99, bots.tick_up(round(fs / (1 + SELL_EV_MAX), 6))) if SELL_EV_MAX < 1 else 0.0   # C101 item C: no sale above EV/$ 5% (price >= fair / 1.05)
             anc = self.sale_anchor.get(str(ex))            # C100 item 3: every sale rule keeps its place (was fund / carry only)
             if anc is not None and anc.get("side") != side:
@@ -11562,7 +11562,7 @@ class Engine:
         """{ex: [carry want-spec]}: a bid at the ask on every side whose ask is >= 2c and >= 3% per $ under PM fair, highest EV/$ first, sized
         to carry's race cap and the cash above the floor + the manual reserve + the cushion; only a side the election lane called or with PM
         fair >= 0.95; skipped: a race whose PM fair moved > 5c in 30 min (a book with < 29 min of history), one the reversal guard stopped,
-        Piero's books, carry's sale list; a resting bid keeps its place."""
+        the manual books, carry's sale list; a resting bid keeps its place."""
         cushion = END_SWEEP["cushion"] if time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) < END_SWEEP["cushion_to_0"] else 0.0
         race_cost, resting = collections.Counter(), {}
         for sub, (ex, side, q, avg) in self.carry_lots().items():
@@ -11774,7 +11774,7 @@ class Engine:
         """C103 / C114 (cash_calendar §2-3; Piero 11:40 / 14:00 Oct 23): the lots that get a sale ask so usable cash + the sale asks resting reach
         the reserve. FIRM (the ramp: 45k by Nov 3 12:00, C126 60k): lowest EV/$ first. ELASTIC (+15k, Nov 2-3): only at >= PM fair - 5c (at the bid, or
         resting at max(touch, fair - 5c)), lowest EV/$ first, the favourites of states whose last poll close is <= 17:00 PT last (they are kept
-        for wave recycling after their calls). Out: Piero's manual book, locks / pair sets, FMM, rotation (own exits), the night layers, RI
+        for wave recycling after their calls). Out: the manual book, locks / pair sets, FMM, rotation (own exits), the night layers, RI
         Senate R NO (his keep), the held R-side lots."""
         cash = min(self.cash_raw_hist) if getattr(self, "cash_raw_hist", None) else 0.0
         usable = cash - CASH_RESERVE - self.manual_reserve_left()
@@ -11881,7 +11881,7 @@ class Engine:
         nxt = next(((at, v) for at, v in ELECTION_RESERVE["steps"] if time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)) < at), None)
         asks = sum(o["qty"] * (1 - o["price"]) for o in self.open if (self.ledger.orders.get(o["id"]) or {}).get("layer") in ("release", "rotexit"))
         top_at, top = ELECTION_RESERVE["steps"][-1]
-        return (f"ELECTION CASH: cash {cash:,.0f}, usable {usable:,.0f} (cash - 5k - Piero's reserve left), election reserve now {er:,.0f}"
+        return (f"ELECTION CASH: cash {cash:,.0f}, usable {usable:,.0f} (cash - 5k - manual reserve left), election reserve now {er:,.0f}"
                 + (f", next {nxt[1]:,.0f} from {nxt[0][5:16]}" if nxt else "") + f"; sale asks resting would bring {asks:,.0f}; target {top:,.0f} usable FIRM by {top_at[5:16]} "
                 f"(short {max(0.0, top - usable - asks):,.0f} at today's asks)"
                 + (f" + {float(ELECTION_RESERVE['elastic']):,.0f} ELASTIC Nov 2-3 at >= fair - 5c (Piero 14:00 Oct 23)" if ELECTION_RESERVE.get("elastic") else " (C126: the elastic 15k is firm)"))
@@ -12390,7 +12390,7 @@ class Engine:
         short (el_recycle_short), the engine's lots of a called side (not reversed) whose PM side bid is >= 0.98 rest an ask at
         max(lot avg + 2c, the best competing ask - 0.5c, 0.94), first in queue; re-pegged down with the best competing ask, never up and never
         under the floor; lowest lot average first, at most 30k a wave, only while a LATER wave still has uncalled races (C121). Otherwise
-        nothing recycles: the lots hold to settlement. Never Piero's manual book, pair-set / lock legs or exclude_ex. -> self.el_recycle
+        nothing recycles: the lots hold to settlement. Never the manual book, pair-set / lock legs or exclude_ex. -> self.el_recycle
         {(ex, sub): ask} for the sellers (live only); shadow logs each decision; RECYCLE FAST lines for each ask and each fill."""
         cfg = ELECTION.get("recycle") or {}
         E, mode = self.election, self.el_recycle_mode()
@@ -12705,8 +12705,8 @@ class Engine:
             self.el_fill_seen = set(list(self.el_fill_seen)[-2000:])
 
     def callexit_plan(self, now):
-        """night_reconcile §4 item 4 (C17; Piero's alpha_spec §5.4 YES): after a strict call (the 0.98 rule, after the last close) against a
-        lot we hold, every engine sub-book of it (stuck coin flips included; Piero's manual book, pair sets and locks never) rests a sell at
+        """night_reconcile §4 item 4 (C17; the operator's alpha_spec §5.4 YES): after a strict call (the 0.98 rule, after the last close) against a
+        lot we hold, every engine sub-book of it (stuck coin flips included; the manual book, pair sets and locks never) rests a sell at
         the held side's best bid, rule 0 exempted (RULE0-CALLED). Shadow: logged once per book."""
         self.callexit_now = {}
         E, mode = self.election, self.el_mode_cached
@@ -12863,7 +12863,7 @@ class Engine:
     AZ06_ORDERS = ("46303780", "46306401", "46313591", "46315471")
 
     def az06_audit(self):
-        """C100 item 2, once: SIG's own record (action / side / quantity / price) of Piero's four AZ-06 orders of Oct 17 15:54-15:57."""
+        """C100 item 2, once: SIG's own record (action / side / quantity / price) of the four manual AZ-06 orders of Oct 17 15:54-15:57."""
         c = self.controls
         if (c.d.get("c100_az06") or {}).get("done") or not api.spare_reads(20):
             return
@@ -12876,7 +12876,7 @@ class Engine:
                 return
             out.append(f"{oid} {str(r.get('action') or '?').lower()} {str(r.get('side') or '?').upper()} {r.get('quantity')} at {r.get('price')} "
                        f"(filled {r.get('filledQuantity', r.get('filled', '?'))}, {r.get('status') or ('open' if r.get('open') else 'closed')})")
-        msg = "AUDIT AZ-06 House race R (Piero's Oct 17 15:54-15:57 orders, SIG's records): " + "; ".join(out)
+        msg = "AUDIT AZ-06 House race R (manual Oct 17 15:54-15:57 orders, SIG's records): " + "; ".join(out)
         self.event("AUDIT", msg); self.night.line(msg)
         with c.lock:
             c.d["c100_az06"] = dict(done=stamp(), orders=out)
@@ -12898,7 +12898,7 @@ class Engine:
             note = ("" if abs(abs(pos) - abs(m)) < 1 else f" (manual {m:+,.0f} + engine sub-books {eng_:+,.0f} = SIG {pos:+,.0f})" if abs(m + eng_ - pos) < 1
                     else f" (manual sub-book {m:+,.0f} + engine {eng_:+,.0f}: off SIG's {pos:+,.0f})")
             rows.append(f"{self.name(ex)} {side.upper()} SIG {abs(pos):,.0f} @ {avg:.3f} = {abs(pos) * avg:,.0f} at cost, fair {fs if fs is None else round(fs, 3)} [{tag}]{note}")
-        return "MANUAL (Piero's tickets): " + ("; ".join(rows) if rows else "none")
+        return "MANUAL (manual tickets): " + ("; ".join(rows) if rows else "none")
 
     def carry_party_ok(self, ex, side, notional, party):
         """alpha_spec §5.5: a carry buy on a close-race side (0.20-0.80) may not raise |net party exposure| above the cap."""
@@ -14423,7 +14423,7 @@ class EngineControls:
             return "new risk paused (exits, rebounds, unwinds and repairs keep running)"
         if action == "resume":
             with c.lock:
-                c.d["auto_pause"] = dict(history={})         # C95d: Piero's resume clears the 3x-in-2-h lock
+                c.d["auto_pause"] = dict(history={})         # C95d: the operator's resume clears the 3x-in-2-h lock
                 c.save()
             self.eng.cash_short = None
             self.eng.trims_seen, self.eng.trim_t = sum(self.eng.ex.trims.values()), None   # C95d: only a trim AFTER the click can pause again
@@ -14484,7 +14484,7 @@ class EngineControls:
             return f"gates free to promote: {layers or 'none'}"
         if action == "travel":                             # day 6 §4.2: ./travel.sh [off]
             return self.eng.travel(bool(args.get("on", True)))
-        if action == "wall":                               # Piero's manual wall: {ex, side, price, qty, exit_px, ttl_h=24, hold_h=6, news_c=0.02}
+        if action == "wall":                               # the manual wall: {ex, side, price, qty, exit_px, ttl_h=24, hold_h=6, news_c=0.02}
             ex, side = str(args.get("ex")), str(args.get("side", "")).lower()
             if ex not in self.eng.owner or side not in ("yes", "no"):
                 raise ValueError("wall needs a known market (ex) and side yes/no (the side we BUY)")
@@ -14781,7 +14781,7 @@ def main():
                 fr = traceback.extract_tb(e.__traceback__)[-1] if e.__traceback__ else None   # C112: where (the recurring dict race has no location)
                 eng.event("ERR", repr(e) + (f" at {os.path.basename(fr.filename)}:{fr.lineno} {fr.name}" if fr else ""))
                 eng.pos_fail = eng.pos_fail + 1 if "position" in repr(e).lower() else eng.pos_fail
-                if eng.pos_fail >= 2:                       # Piero's unattended rule: the positions read failing -> stop and pull
+                if eng.pos_fail >= 2:                       # the unattended rule: the positions read failing -> stop and pull
                     eng.stop_and_pull(f"positions read failed {eng.pos_fail} loops in a row ({repr(e)[:80]})")
             else:
                 eng.pos_fail = 0

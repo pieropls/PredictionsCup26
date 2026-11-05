@@ -442,7 +442,7 @@ def main():
     ap.add_argument("--ff-loop", type=float, default=10.0, help="loop period outside the profiled windows (s)")
     ap.add_argument("--smoke", type=int, default=0, help="run N loops from --start, profiled, then stop")
     ap.add_argument("--cash", type=float, default=67_000.0)
-    ap.add_argument("--trim", action="store_true", help="Piero's night list: FMM / carry / rotation / catcher planners suspended, "
+    ap.add_argument("--trim", action="store_true", help="the operator's night list: FMM / carry / rotation / catcher planners suspended, "
                     "dashboard + state every 5 min, leaderboard loggers every 30 min")
     ap.add_argument("--cache", action="store_true", help="harness-only what-if: time.strptime / time.mktime memoized and "
                     "Ledger.tranche_avg cached until the ledger's fills / orders change (no engine file is edited)")

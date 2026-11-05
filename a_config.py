@@ -265,7 +265,7 @@ ROTATION_RET_LEFT, ROTATION_STOP_ABOVE = 0.08, 5_000   # Piero 06:35 Oct 8 (C84b
 # Piero 19:56 Oct 8 strategy release (C87)
 TM_BUFFER_RESUME = 1_000        # TM entries pause while free < the floor below and resume 1k above it (no flapping); exits always run
 TM_PAUSE_FREE = 10_000          # Piero 21:37: TM entries pause only when free < 10k (was BUFFER 18k); the catcher keeps first claim on the last 10k
-D5_EXCLUDE_LAYERS = ("swing", "swingsell", "wall", "wallexit")   # Piero's position orders (RI reservoir, walls) are not bot P&L for the D5 loss stop
+D5_EXCLUDE_LAYERS = ("swing", "swingsell", "wall", "wallexit")   # manual position orders (RI reservoir, walls) are not bot P&L for the D5 loss stop
 TM_ENTRY_STOPS = [("19:00", "21:00"), ("03:00", "06:00"), ("12:00", "14:00")]   # no TM entries from 60 min before each ring (20:00, 04:00, 13:00 PT) to the window's end: cash back for the catcher
 SM_REGIME_WIN_S, SM_REGIME_EVERY_S = 1800, 60   # live regime per SM market: the trailing 30 min of prints, recomputed every minute (mm_playbook v0 rules)
 SM_REGIME = dict(sweep_ticks=10, news_c=0.02, quiet_prints=5, trend_ticks=3, trend_bounce_max=0.40, bounce_prints=20, bounce_share=0.50)   # = research/params.py REGIME
@@ -290,7 +290,7 @@ TRADING_HOLD_C = 0.03           # a trading lot >= 3c from fair is held (no +0.5
 CORE_EARLY_CLOSE_PT = "17:00"   # prefer races whose polls close by 17:00 PT (data/election/poll_close.json first_close_pt) ...
 CORE_EARLY_BONUS = 0.005        # ... +0.5 pp of edge-% in the core ranking
 CORE_EVERY_S = 60
-CORE_SKIP_SUBS = ("manual", "wall:", "swing:", "sleeve:", "pairset:", "recycle:", "catch:", "catch2:", "flip:")   # Piero's position orders and pair sets are neither book; C128 / C129: nor CATCH's lots (core never swaps one in)
+CORE_SKIP_SUBS = ("manual", "wall:", "swing:", "sleeve:", "pairset:", "recycle:", "catch:", "catch2:", "flip:")   # manual position orders and pair sets are neither book; C128 / C129: nor CATCH's lots (core never swaps one in)
 PAUSE_KINDS = ("cash_floor", "i2_breach", "api_errors", "pm_stale", "engine_errors", "fills_blind", "travel", "cash_short", "stop_pull")   # the only automatic pauses; every P&L stop is an alert
 PM_STALE_S = 120                # Polymarket fair older than 2 min -> pause (resume when fresh)
 ENGINE_ERRORS_10M = 5           # >= 5 ERR events in 10 min -> pause (resume after 10 clean minutes)
@@ -348,7 +348,7 @@ SWING_BAND = dict(lo=27_000, hi=42_000, sell_over_entry=0.01, buy_min_edge=0.14,
 # Piero 10:10 Oct 8 (C84c): RI Senate R becomes a RESERVOIR (replaces the band). Core never offered; the tradable shares sell at 0.860
 # (clips <= 3k, queue kept, rule 0 per lot) and are rebought at 0.815 / 0.810 / 0.800 (40 / 30 / 30 of what was sold, never above the
 # last sell - 4c), first among entries, sized to free cash - the 2k guard; no cash reserved while waiting. C80 does not apply to these
-# shares (Piero's instruction). Rebuild triggers (stop selling, rebuy to the full size at <= 0.85): 24-h p10 of RI NO prints >= 0.85,
+# shares (the operator's instruction). Rebuild triggers (stop selling, rebuy to the full size at <= 0.85): 24-h p10 of RI NO prints >= 0.85,
 # PM fair moved >= 2c from the deploy, or Oct 30 00:00 PT. Gate after 48 h: realized >= 0.8k/day -> tradable 40k; < 0.3k/day -> re-tune.
 RESERVOIR_TRIG_DATE = "2026-10-30 00:00:00"
 # Piero 16:10 Oct 8 (C84g): reservoirs — recycle whenever it earns more than holding. Each: a core held to settlement (never offered),
@@ -388,7 +388,7 @@ ENTRY_RESUME_FREE = 3_000       # C84c: once entries stopped under the 2k guard 
 RING_WINDOWS = [("19:30", "21:00"), ("03:30", "06:00")]
 DUMP_BIG_SWEEP_SH, DUMP_BIG_CLIP = 50_000, 4_000   # day 10 §4.2: sides whose 72-h median sweep >= 50k shares get L0/L1/L2 clips up to 4,000 (from 2,000)
 DUMP_V3_WEIGHTS_DAY_BIG = [0.45, 0.30, 0.05, 0.20]   # on those sides L3's share is trimmed to pay for it (L1 0.45, L2 0.30, L3 0.05, L4 0.20)
-# wall layer (Piero's manual pilot, Oct 5 23:40): one big resting order placed by control, with its buy-back, hold and news guard
+# wall layer (manual pilot, Oct 5 23:40): one big resting order placed by control, with its buy-back, hold and news guard
 WALL_TTL_S, WALL_HOLD_S, WALL_NEWS_C, WALL_NEWS_WINDOW_S, WALL_MIN_FREE = 24 * 3600, 6 * 3600, 0.02, 600, 2_000
 DUMP_V3_OFFSETS_DAY, DUMP_V3_WEIGHTS_DAY = [0.01, 0.02, 0.035, 0.05], [0.45, 0.25, 0.15, 0.15]   # §1.3: L4 in the day window (replay: 5c)
 DUMP_RECYCLE_FAST_S = 1800      # §1.5: cash-constrained -> a tranche older than 30 min sells back at fill + 0.5c
@@ -443,7 +443,7 @@ RELEASE_PILOT_TARGET = 10_000   # pilot: free cash above the floor
 RELEASE_MAX_COST = 0.05         # day 4 §3 (release on demand): a holding is released only if it sells >= its average entry
                                 # cost (a realized profit, price >= fair_side - 5%), or if the dump catcher is cash-constrained
                                 # now and the holding returns less per day to settlement than the dump catcher did over 24 h
-RELEASE_QUIET_HOURS = (7, 8)    # no release 07:00-08:00 PT (Piero's daily review sees the book untouched)
+RELEASE_QUIET_HOURS = (7, 8)    # no release 07:00-08:00 PT (the operator's daily review sees the book untouched)
 LIQUIDATE = {"AK-GOV-D": dict(slices=3, over_fair=0.01)}   # day 4 §3 (Piero): the day-1 AK NO sold at max(fair + 1c, SIG bid)
 # day 4 §4 reads
 PNL_READ_S = 150                # ideas_backlog (Oct 8): /portfolio/pnl every 150 s as a fallback (every loop while cash is near the floor)
@@ -481,7 +481,7 @@ HOST_ID_FILE = os.path.join(DATA, "host_id")
 NIGHT_LOG_FILE = os.path.join(os.path.dirname(DATA), "docs", "RUN_LOG.md")   # day 2: the run log (NIGHT_LOG.md = the night)
 
 # ---- C95 (Piero 15:05 Oct 16; replaces C94's lists): the COIN-FLIP ROTATION at full size (~55-60k) + a MANUAL RESERVE
-MANUAL_RESERVE = 2_000.0        # the engine never spends cash below the 5,000 floor + this; Piero's own fills draw from it (10,000 until Piero 15:55 Oct 17 item 5: 2,000 for every layer)
+MANUAL_RESERVE = 2_000.0        # the engine never spends cash below the 5,000 floor + this; manual fills draw from it (10,000 until Piero 15:55 Oct 17 item 5: 2,000 for every layer)
 ROTATION = dict(on=True, gap_min=0.04, gap_ext=0.03, keep_gap=0.03, pm_skip_c=0.02, pm_skip_s=24 * 3600, exit_fair_c=0.015, swap_gap_c=0.03,
                 release_exempt_ret=0.02, fair_lo=0.25, fair_hi=0.75, min_vol48=100_000.0, min_clip=500,
                 race_cap=8_000.0, senate_cap=12_000.0, total_cap=30_000.0, party_cap=10_000.0, party_band=(0.20, 0.80), party_r_gap=0.04, party_rho=0.5, exit_touch={},   # alpha_spec §5.5; Piero 17:20: no forced Alaska exit (uncalled races settle later on the real result)
@@ -546,7 +546,7 @@ ELECTION = dict(on=True, shadow_from="2026-10-22 06:00:00", election_day="2026-1
                                                         # SIG - PM gap >= 3c beyond its 6-h median before the close; exit when the gap is back within 1c of it
                 recycle_bid=0.98, recycle_target=20_000.0,   # item 8 (C7, until C117): a strict-called winner sold into bids >= max(0.98, lot avg + 0.5c) while usable < 20k
                 # C117 (Piero 00:20 Oct 26 item 5; docs/night_recycle.md): C7 at 0.97 from the first strict call (no usable gate), at most
-                # 30k recycled a wave (a race's last poll close); every lot of the called side (snipes, carry, FMM, rotation, core) but Piero's
+                # 30k recycled a wave (a race's last poll close); every lot of the called side (snipes, carry, FMM, rotation, core) but the operator's
                 # manual book, pair-set / lock legs and exclude_ex; into existing bids only, never under lot avg + 0.5c. mode: off / shadow
                 # (decisions to shadow.jsonl, would-be sales to RUN_LOG) / live (sells only while election_mode is live); the
                 # `election_recycle` control overrides it.
@@ -577,7 +577,7 @@ ROT_REPEG_UP_C = 0.02                     # item 2: a rotation exit re-pegs UP w
 # C106 (Piero 02:50 Oct 22 item 1): more FMM room until Oct 28 23:59 (then the cash calendar steps FMM down as approved); clips scale with the caps
 FMM_ROOM = dict(on=True, until="2026-10-28 23:59:59", race_cap=8_000.0, cf_race_cap=4_000.0, inv_cap=40_000.0, min_clip=800, cf_clip=667)
 CARRY_FIRST = {"1077": ("no", 0.845)}   # item 1: the unused free cash goes to carry bids, Rhode Island Senate R NO (<= 0.845) first, then the all-NO sets
-# C103 (docs/cash_calendar.md §3 + Piero's §5 decisions of 15:55 Oct 17, moved by Piero 15:15 Oct 21 item C: the ramp starts Oct 28)
+# C103 (docs/cash_calendar.md §3 + the operator's §5 decisions of 15:55 Oct 17, moved by Piero 15:15 Oct 21 item C: the ramp starts Oct 28)
 ELECTION_RESERVE = dict(on=True, steps=(("2026-10-28 00:00:00", 20_000.0), ("2026-10-30 00:00:00", 25_000.0), ("2026-10-31 00:00:00", 30_000.0),
                                         ("2026-11-01 00:00:00", 35_000.0), ("2026-11-01 12:00:00", 40_000.0), ("2026-11-01 18:00:00", 42_857.0),
                                         ("2026-11-02 00:00:00", 45_714.0), ("2026-11-02 06:00:00", 48_571.0), ("2026-11-02 12:00:00", 51_429.0),
@@ -620,7 +620,7 @@ GAPMM = dict(on=True, window_s=6 * 3600, refresh_s=600, min_prints=10, repeg_s=6
 CARRY = dict(on=True, sell_ev=0.05, buy_ev=0.11, min_daily=150_000, fav_min=0.75, below_fair=0.05, race_cap=12_000.0,
              race_caps={"Rhode Island Senate": 30_000.0}, swap_pts=0.04, refresh_s=1800, min_clip=500, ttl=86400,
              max_bid_sh=9_900)                 # Piero 01:05 Oct 18 item 6: e.g. RI Senate R NO 9,900 at 0.865
-# C127 (Piero 15:50 Oct 31 item 3): the END SWEEP (cash scores 0 at settlement). From Nov 4 00:30 PT the cash above the 5k floor, Piero's
+# C127 (Piero 15:50 Oct 31 item 3): the END SWEEP (cash scores 0 at settlement). From Nov 4 00:30 PT the cash above the 5k floor, the operator's
 # manual reserve and a 20k late-call cushion (0 from 08:30) takes asks >= 2c and >= 3% per $ under PM fair, highest EV/$ first, into the
 # carry book (held to settlement) under carry's race caps; not a race whose PM fair moved > 5c in 30 min or that the reversal guard stopped;
 # no orders from 08:55. The convergence sales stop while it runs; every other layer keeps the election reserve until 09:00.
@@ -629,7 +629,7 @@ CARRY = dict(on=True, sell_ev=0.05, buy_ev=0.11, min_daily=150_000, fav_min=0.75
 END_SWEEP = dict(on=True, start="2026-11-04 00:30:00", cushion=20_000.0, cushion_to_0="2026-11-04 08:30:00", stop="2026-11-04 08:55:00",
                  ev_min=0.02, ev_per_usd=0.03, move_max=0.05, move_s=1800, min_qty=50, pm_min=0.95)
 # C133 (Piero 18:05 Nov 2, docs/flip_nov2.md): FMM back on all books until Tue 10:00 in 250-share clips, cap 25k, outside the C103 reserve
-# until Tue 12:00 (WIND_DOWN fmm_no_bids / fmm_caps above); FLIP, Piero's fill-then-flip: on sides with PM fair 0.25-0.995 (CATCH's
+# until Tue 12:00 (WIND_DOWN fmm_no_bids / fmm_caps above); FLIP, the operator's fill-then-flip: on sides with PM fair 0.25-0.995 (CATCH's
 # exclusions) whose SIG spread (others' best ask - best bid) has been >= 2c for 60 s, one bid first in queue (others' best bid + 0.5c, never
 # above fair - 3c), 1,000 notional, on the 60 widest books; on a fill an ask at once at max(fill + 1c, others' best ask - 0.5c), re-pegged down
 # with the best ask, never under fill + 0.5c; after 30 min max(fill + 0.5c, best ask - 0.5c). Cap 15k at cost; no new entry under 18k usable

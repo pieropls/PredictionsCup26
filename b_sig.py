@@ -137,7 +137,7 @@ def reads_last_min():
 
 def spare_reads(keep=None):
     """Day 2 §6: optional reads (queue and depth reads, pair books, the market scan, leaders, the book sampler) go only while
-    >= keep of our READ_BUDGET (95/min since Oct 8, Piero's call) is left, so the loop's own reads never hit a 429."""
+    >= keep of our READ_BUDGET (95/min since Oct 8, the operator's call) is left, so the loop's own reads never hit a 429."""
     keep = SPARE_KEEP if keep is None else keep
     return reads_last_min() <= READ_BUDGET - keep
 

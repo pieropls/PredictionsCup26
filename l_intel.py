@@ -286,7 +286,7 @@ def leaders_study(rows, events, our_layers, now, day_s=86400, tape_from=None):
                  f"{'–' if not o else f'#{o[0]} {o[1]:+,.0f}'} | {'–' if not o or s.get(100) is None else fmt(s[100] - o[1], True)} | "
                  f"{'–' if not o or s.get(10) is None else fmt(s[10] - o[1], True)} |")
     # copy list
-    L += ["", "## Copy list (at most 5; each needs Piero's approval unless it is tier membership or a queue step-up)", ""]
+    L += ["", "## Copy list (at most 5; each needs the operator's approval unless it is tier membership or a queue step-up)", ""]
     L += [f"{i}. {c}" for i, c in enumerate(copy_list(acct, events, our_layers, tape_from, t0), 1)] or ["- nothing with enough evidence today"]
     # public profiles
     L += ["", "## Public profiles (for Piero to check by hand)", "",

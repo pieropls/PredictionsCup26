@@ -5,10 +5,10 @@ Night side: tests/sim_election's rehearsal (tests/night_world + night_rig + nigh
 data/election/poll_close.json, the 2024 Polymarket paths, the real j_executor.Executor on the fake SIG, n_election's constants as live.
 "Today's books": the World's 2026 levels are built from a copy of the server's data/state.json (the same fields
 research/night/night_sim_build.py writes into tests/fixtures/night26_levels.json; the fixture itself is not touched: night_world's
-load_2026 is wrapped here). usable U -> cash0 = U + 7,000 (5k floor + 2k Piero's reserve). The uncapped reference (usable 1M, same seed,
+load_2026 is wrapped here). usable U -> cash0 = U + 7,000 (5k floor + 2k manual reserve). The uncapped reference (usable 1M, same seed,
 same world) gives what each wave would deploy with no cash limit (the 15k-shares-a-race / 20k-a-state caps and the book still hold).
 
-Cost side: every lot in a copy of the server's data/ledger.json sub-books (net side only), less Piero's manual book, pair-set / lock legs,
+Cost side: every lot in a copy of the server's data/ledger.json sub-books (net side only), less the manual book, pair-set / lock legs,
 RI Senate R NO (1077), CO-03 D NO (894), Kansas Senate D NO (1045) and the night layers; sale price = the convergence ask
 max(tick_up(lot avg + 0.5c), side best ask) (filled there),
 or the side best bid floored at lot avg + 0.5c (the asks stepped down to the bid, never under rule 0); a lot whose floor is above both
@@ -33,7 +33,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tests"))
 
-FLOOR = 7_000.0                                            # 5k floor + Piero's 2k (n_election.CASH_FLOOR)
+FLOOR = 7_000.0                                            # 5k floor + the 2k manual reserve (n_election.CASH_FLOOR)
 SIZES = (10_000, 20_000, 30_000, 45_000, 60_000)
 EXTRA = (70_000,)                                          # ~ the end of the sellable pool at today's asks
 UNCAPPED = 1_000_000
@@ -413,7 +413,7 @@ def write_md(res, cost, path):
              f"{mean([norm[60_000][s]['waves'][-1]['usable_at'] for s in seeds]) / 60_000:.0%} left when the 22:00 wave starts, and "
              f"{mean([norm[60_000][s]['left_06'] for s in seeds]) / 1000:.1f}k for the settlement morning.")
     L.append("")
-    if path and os.path.exists(path):                     # Piero's decision lines written into the top block by hand
+    if path and os.path.exists(path):                     # the operator's decision lines written into the top block by hand
         top = open(path).read().split("\n## ")[0].split("\n")
         L += [ln for ln in top if ln.startswith("**Decision")] and [ln for ln in top if ln.startswith("**Decision")] + [""]
     for sec in kept_sections(path):
@@ -642,7 +642,7 @@ def insert_section(path, head, text):
 
 
 def kept_sections(path):
-    """The '## ' sections of an existing doc that write_md does not make itself (Piero's step table, the competition section): kept on a
+    """The '## ' sections of an existing doc that write_md does not make itself (the operator's step table, the competition section): kept on a
     full re-run."""
     if not path or not os.path.exists(path):
         return []

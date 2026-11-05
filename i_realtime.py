@@ -129,7 +129,7 @@ class SigUserFeed:
 
 
 class SigMarketFeed:
-    """C86 (Piero's OK, Oct 8 15:35): SIG's tournament markets topic `tournament:{tid}:markets` — one private broadcast channel, a
+    """C86 (the operator's OK, Oct 8 15:35): SIG's tournament markets topic `tournament:{tid}:markets` — one private broadcast channel, a
     `markets_batch` about every second with every trade (id, exchangeId, executedAt, price, quantity, sequence) and the FULL versioned
     order book (asOf {at, sequence}) of each exchange that changed. Books and sweeps only: fills stay on the user channel + REST.
     Revisions are per market (delivery.revision / previousRevision): a gap counts and flags the market's trades as incomplete (the books

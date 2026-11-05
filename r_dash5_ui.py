@@ -187,7 +187,7 @@ const RAMP = ["#0862A6", "#1A6CA8", "#2C77AB", "#3E81AD", "#4F8BAF", "#5F95B1", 
 function ov_port() {
   const p = obj(V("v5ov").port); if (p.account == null) return na5();
   const byB = ui.v5.pv === "book", byS = ui.v5.pv !== "market", B = obj(V("v5ov").books);
-  let sl = byB ? [["core", `CORE (held to settlement, ${num(obj(B.core).lots)} lots)`, obj(B.core).value], ["trading", "TRADING", obj(B.trading).value], ["apart", "Piero's positions (RI, walls, manual)", obj(B.apart).value]].map(([key, name, value]) => ({key, name, value}))
+  let sl = byB ? [["core", `CORE (held to settlement, ${num(obj(B.core).lots)} lots)`, obj(B.core).value], ["trading", "TRADING", obj(B.trading).value], ["apart", "manual positions (RI, walls, hand fills)", obj(B.apart).value]].map(([key, name, value]) => ({key, name, value}))
          : byS ? arr(p.by_strategy).map((r, i) => ({key: r.key, name: r.name, value: r.value})) : arr(p.slices).map(r => Object.assign({key: r.ex}, r));
   if (!byS && (arr(p.other).length || Math.abs(val(p.val_gap) || 0) > 1)) sl.push({key: "other", name: `Other (${arr(p.other).length} markets)`, value: p.other_value});
   sl.push({key: "cash", name: "Cash available", value: p.available, cash: true});

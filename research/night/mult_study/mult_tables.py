@@ -1,5 +1,5 @@
 """Tables for the share-multiplier study (mult_study.py's JSON): night P&L mean / p10, unused at 22:00, the later waves' cash, and
-Piero's rule (00:00 Oct 29 item 3): the highest multiplier whose mean beats 1.0 by >= 10% on normal AND slow, with reversal p10 >= 1.0's.
+the operator's rule (00:00 Oct 29 item 3): the highest multiplier whose mean beats 1.0 by >= 10% on normal AND slow, with reversal p10 >= 1.0's.
 Usage: python3 mult_tables.py mult_res.json [more.json ...]"""
 import json
 import sys

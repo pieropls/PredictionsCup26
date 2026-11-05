@@ -1955,7 +1955,7 @@ class DumpV3Tests(EngineCase):
 
 
 class OrderTruthTests(EngineCase):
-    """Evening §1.2-1.4 + Piero's unattended rules: SIG's fills projection stalls; fills come from our own order records
+    """Evening §1.2-1.4 + the unattended rules: SIG's fills projection stalls; fills come from our own order records
     (an order that shrank or left the book without our cancel, before its TTL) when the position moved the same way."""
 
 
@@ -2327,7 +2327,7 @@ class Day4Tests(EngineCase):
         never while paused; not in the quiet hour."""
         fake, eng = self.rig()
         self.addCleanup(setattr, f_engine, "RELEASE_QUIET_HOURS", f_engine.RELEASE_QUIET_HOURS)
-        f_engine.RELEASE_QUIET_HOURS = (0, 0)              # the test may run during Piero's 07:00-08:00 review hour
+        f_engine.RELEASE_QUIET_HOURS = (0, 0)              # the test may run during the operator's 07:00-08:00 review hour
         ex = mid_market(eng)
         fake.pos[ex] = 2000
         fake.avg_cost[ex] = 0.30
@@ -2377,7 +2377,7 @@ class Day4Tests(EngineCase):
             self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage()))
             eng.trading_return_24h = lambda now: 0.25
             eng.release_t = 0
-            self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage()), "day 8 §1.4: tier 2 needs Piero's flag")
+            self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage()), "day 8 §1.4: tier 2 needs the operator's flag")
             eng.controls.d["release_tier2"] = True
             eng.release_t = 0
             self.assertEqual(eng.release_plan(a_config.CASH_RESERVE + 20_000, time.time(), eng.bucket_usage()).get(ex, {}).get("why"), "tier2")
@@ -2947,7 +2947,7 @@ class CashGuardTests(EngineCase):
         self.assertLessEqual(cost["fatfinger"], max(0.0, k * 6_000 - cost["dump"] - cost["scalp"]) + 1e-6, cost)   # weighted: dump first, fat-finger last
         self.assertLessEqual(sum(cost.values()), k * 6_000 + 1e-6, cost)
 
-    def test_piero_walls_come_off_the_top_of_the_entry_budget(self):
+    def test_manual_walls_come_off_the_top_of_the_entry_budget(self):
         """C70: the dump levels may use only 1.5 x free minus the resting walls' cost (weight 1.0); the walls are never cut."""
         fake, eng, favs = self.rig(cash_above_floor=20_000)
         cov0 = dict(eng.dump_cov)
@@ -3182,7 +3182,7 @@ class CashGuardTests(EngineCase):
         eng.lots_cache = (None, {})
         eng.release_t = 0
         plan = eng.release_plan(a_config.CASH_RESERVE + 3_000, time.time(), eng.bucket_usage())
-        self.assertEqual(plan.get(ex, {}).get("why"), "rebuild", "...unless the lot is <= 5c under fair: Piero's -1c exception applies")
+        self.assertEqual(plan.get(ex, {}).get("why"), "rebuild", "...unless the lot is <= 5c under fair: the operator's -1c exception applies")
         self.assertLess(plan[ex]["rule0_margin"], 0)
         eng.release_t = 0                                      # day 8 §1.5: the exception runs only while free < 10k
         self.assertNotIn(ex, eng.release_plan(a_config.CASH_RESERVE + 12_000, time.time(), eng.bucket_usage()), "free 12k: rule 0 holds, no exception")
@@ -3198,7 +3198,7 @@ class CashGuardTests(EngineCase):
 
 
 class WallRulesC76Tests(EngineCase):
-    """C76 (Piero's RI Senate R wall): a per-wall cut (full fill leaves >= min_free), an edge floor (rests only while
+    """C76 (manual RI Senate R wall): a per-wall cut (full fill leaves >= min_free), an edge floor (rests only while
     fair_side - price >= min_edge, re-placed when it returns), and a resting wall uses the race's cap room."""
 
     def rig(self, cash_above_floor=20_000):
@@ -3295,7 +3295,7 @@ class WallC77Tests(WallRulesC76Tests):
         self.assertEqual(len(w), 2, w)
         self.assertEqual(w[0]["qty"], 10_000, "the first wall keeps its size (free 30k - 15k = 15k > 8.5k)")
         self.assertEqual(w[1]["qty"], int((30_000 - 15_000 - 8_500) / 0.85), "the second is cut by what the first could still fill")
-        # a filled wall lot is never sold by the rebuild (it has Piero's own exit)
+        # a filled wall lot is never sold by the rebuild (it has a manual exit)
         sub = f"wall:{ex}:no:{eng.walls()[0]['id']}"
         eng.ledger.subbooks.setdefault(ex, {})[sub] = -4_000.0
         eng.ledger.tranches[sub] = dict(ex=ex, side="no", kind="wall", state="open", ts=time.time(), t="x", avg=0.85)
@@ -5253,7 +5253,7 @@ class C94Tests(EngineCase):
         v = dict(getattr(eng, "_vol48", (0, {}))[1]); v[ex] = vol; eng._vol48 = (time.time() + 1e6, v)
 
     def test_c95_manual_reserve_takes_engine_cash_and_manual_fills_draw_from_it(self):
-        """C95 item 1: engine free cash = cash - 15,000; Piero's own fill draws from the reserve, not from the engine; no pause above 5k."""
+        """C95 item 1: engine free cash = cash - 15,000; manual fill draws from the reserve, not from the engine; no pause above 5k."""
         f_engine.MANUAL_RESERVE = 10_000.0
         fake, eng, ex = TMTests.rig(self, cash_above_floor=4_000)            # SIG cash 9,000: under floor + reserve
         eng.controls.d["manual_reserve"] = dict(amount=10_000.0, since="2026-01-01 00:00:00")
@@ -5313,7 +5313,7 @@ class C94Tests(EngineCase):
         self.assertNotIn(c3, [x["ex"] for x in eng.rot_candidates(time.time())])
         eng.book[c3] = dict(eng.book.get(c3) or {}, pos=0.0)
 
-    def test_c95c_piero_manual_fill_goes_to_the_manual_book_and_is_never_sold(self):
+    def test_c95c_manual_fill_goes_to_the_manual_book_and_is_never_sold(self):
         """C95c (Oct 16 15:27): Piero bought 25,000 SC-01 D YES by hand; the audit booked it as inventory and the no-edge release sold
         8,356 at 0.305 ahead of his own exit. His fill now moves the shares to 'manual'; fresh inventory is left alone 10 min."""
         fake, eng, favs = self.rig()
@@ -5368,7 +5368,7 @@ class C94Tests(EngineCase):
         msg = f_engine.EngineControls(eng).apply("resume", {})
         self.assertIn("resumed", msg)
         loop(eng, fake); loop(eng, fake)
-        self.assertFalse(eng.controls.paused, "old trims do not undo Piero's resume")
+        self.assertFalse(eng.controls.paused, "old trims do not undo the operator's resume")
         eng.ex.trims["recycle"] += 1                          # a NEW trim after the click: the safety pause still works
         loop(eng, fake)
         self.assertTrue(eng.controls.paused)
@@ -5963,7 +5963,7 @@ class SleeveTests(EngineCase):
 
 
 class WallTests(EngineCase):
-    """Piero's manual wall (Oct 5 23:40): a control places one big resting order; it is cut so a full fill leaves >= 2k free;
+    """Manual wall (Oct 5 23:40): a control places one big resting order; it is cut so a full fill leaves >= 2k free;
     what fills rests its buy-back at his YES price (rule 0 applies); after 6 h it is held; a 2c Polymarket move against it
     pulls it; everything is logged."""
 
@@ -6466,7 +6466,7 @@ class Piero2115Tests(EngineCase):
     def test_fmm_stops_on_the_floor_only_when_its_own_fills_took_cash_under_it(self):
         fake, eng, mk = FMMTests.rig(self)
         FMMTests.live(self, eng)
-        eng.cash_raw_hist = [546.0]                          # Piero's own buy took cash under the floor (AZ-06, Oct 17 15:54)
+        eng.cash_raw_hist = [546.0]                          # a manual buy took cash under the floor (AZ-06, Oct 17 15:54)
         eng.fmm_gate(time.time())
         self.assertFalse(eng.controls.d["fmm"].get("stopped"), "not FMM's: no stop")
         self.assertTrue(any("not from FMM's fills" in e["text"] for e in eng.events))
@@ -6649,7 +6649,7 @@ class C97Tests(EngineCase):
         eng.foreign_fill_actions()
         self.assertEqual(eng.ledger.fills[-1]["action"], "sell")
         eng.manual_book(time.time())
-        self.assertAlmostEqual(eng.ledger.subbooks[a]["manual"], 21_687.0, places=0, msg="Piero's sale reduces his manual book (AZ-06, Oct 17)")
+        self.assertAlmostEqual(eng.ledger.subbooks[a]["manual"], 21_687.0, places=0, msg="a manual sale reduces the manual book (AZ-06, Oct 17)")
 
     def test_fmm_gets_the_first_10k_of_free_cash_and_the_rotation_claims_nothing_at_its_cap(self):
         fake, eng, mk = FMMTests.rig(self)
@@ -7196,7 +7196,7 @@ class C102Tests(EngineCase):
         eng.px[a] = fake.px[a] = (0.97, 0.98, 0.975)          # NO's best bid 0.02
         E.calls[a] = dict(side="yes", t=time.time(), signal_t=time.time(), rule="B", strict=True, bought=0.0, cost=0.0, fails=0, stopped=False, reversed=False)
         eng.el_step(time.time())
-        self.assertEqual([r["sub"] for r in eng.callexit_now[a]], [f"sm:{a}"], "never Piero's manual book")
+        self.assertEqual([r["sub"] for r in eng.callexit_now[a]], [f"sm:{a}"], "never the manual book")
         self.assertEqual(eng.callexit_now[a][0]["px"], 0.02)
         E.calls[a]["strict"] = False                           # rule A only: no RULE0-CALLED (C1 / C17)
         eng.el_step(time.time())
@@ -7283,7 +7283,7 @@ class C102Tests(EngineCase):
         self.assertFalse(eng.el_lane_paused(), "the call lane runs on")
         self.assertTrue(any("NIGHT ERR-PAUSE (passive only)" in e["text"] for e in eng.events))
         eng.controls.set_paused(True, "Piero", by="dashboard")
-        self.assertTrue(eng.el_lane_paused(), "Piero's own pause stops everything")
+        self.assertTrue(eng.el_lane_paused(), "a manual pause stops everything")
         eng.controls.set_paused(False, "clear", by="test")
         eng.events = [dict(kind="ERR", t=hms, text=f"#{i} KeyError('x') at n_election.py:300 _buy") for i in range(6)]
         eng.hard_pauses(time.time())

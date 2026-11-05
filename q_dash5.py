@@ -54,10 +54,10 @@ REGISTRY = [
 ]
 APART = [
     dict(key="ri", name="RI Senate R", layers=["swing", "swingsell"], subs=["swing:"], control=["swing"], status="Unwinding",
-         rules="Piero's partial unwind: 11,900 NO held, the rest offered at the position average (0.840) as passive asks. "
+         rules="manual partial unwind: 11,900 NO held, the rest offered at the position average (0.840) as passive asks. "
                "RI is bought only by the catcher on pumps; catcher lots there cycle at entry + 2c."),
     dict(key="walls", name="Walls", layers=["wall", "wallexit"], subs=["wall:"], control=["wall"], status="Held",
-         rules="Piero's manual walls (the NM Senate R walls): held to settlement, buy-backs only under his rules."),
+         rules="the manual walls (the NM Senate R walls): held to settlement, buy-backs only under his rules."),
     dict(key="held", name="Day-1 and manual holdings", layers=["exit", "ladder", "rebound", "position", "sleeve"], subs=["inventory", "manual", "sleeve:"],
          control=[], status="Held", rules="Inventory, manual positions, settlement holds and fills from before the engine. Held to settlement."),
 ]
@@ -866,7 +866,7 @@ def why_not(eng, ex, side_fair, held, orders):
     if orders:
         return ""
     if ex in getattr(eng, "manual_ex", set()):
-        return "manual market: Piero's position only"
+        return "manual market: manual position only"
     if eng.ex.is_frozen(ex):
         return "frozen by the executor"
     try:
@@ -913,7 +913,7 @@ def markets(eng, pos_rows=None):
     vol = {ex: sum(v for _, v in d) for ex, d in list(getattr(eng, "vol24", {}).items())}
     feed = getattr(eng, "mkt_feed", None)
     rows, seen = [], set()
-    for b in eng.bots:                                      # every contract once: market bots and the position bots (Piero's manual holdings)
+    for b in eng.bots:                                      # every contract once: market bots and the position bots (manual holdings)
         if b.ex in seen or b.kind not in ("market", "position"):
             continue
         seen.add(b.ex)
@@ -1041,7 +1041,7 @@ def activity(eng, n=40):
 # ------------------------------------------------------------------------------------------------ strategies (Live §3.2)
 def books_split(eng, pos_rows, account):
     """C88: CORE vs TRADING — cost, value at marks, value at fair, lots, cap (CORE = the controller's core set; TRADING = every other engine lot;
-    Piero's position orders (RI, walls, manual) are apart)."""
+    manual position orders (RI, walls, manual) are apart)."""
     core = dict(cost=0.0, value=0.0, fair=0.0, shares=0.0, n=0)
     trad = dict(cost=0.0, value=0.0, fair=0.0, shares=0.0, n=0)
     apart = dict(cost=0.0, value=0.0, fair=0.0, shares=0.0, n=0)

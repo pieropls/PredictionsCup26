@@ -6,7 +6,7 @@ The engine (f_engine, Piero 15:15 Oct 21) runs it in mode off / shadow / live: `
 when `defer`: the snipes go out from the loop's fast step, where the executor lives), `on_tick` from the loop. In shadow, the engine's
 place / cancel callbacks write would-be orders to data/election/shadow.jsonl and send nothing.
 
-Invariants kept: placements only through the caller's executor (I4 self-cross and I2 are its business); cash floor + Piero's reserve
+Invariants kept: placements only through the caller's executor (I4 self-cross and I2 are its business); cash floor + manual reserve
 (5k + 2k, C21) is a hard stop here; manual markets are never touched; nothing is placed to move a price; rule 0 holds before a call
 (a reversal stops the race and holds, C16)."""
 import collections
@@ -41,7 +41,7 @@ SNIPE_LAYERS = ("callsnipe", "settle", "drift", "callbid")   # C138: the post-ca
 REVERSAL_PM, REVERSAL_WINDOW_S = 0.90, 600
 # ---- C10 settlement morning: a strict call + PM side >= 0.98 held 2 h -> buy < 0.99 at the ask (06:00-08:30 PT); no at-market exit
 SETTLE_PM, SETTLE_HOLD_S, SETTLE_MAX = 0.98, 2 * 3600, 0.99
-# ---- C21 the cash floor: 5k + Piero's 2k reserve
+# ---- C21 the cash floor: 5k + the 2k manual reserve
 CASH_FLOOR = 7_000
 PENDING_S = 60                          # an order with no answer from the executor after 60 s was dropped / never sent: its budget is released
 FEED_GAP_S = 30                         # no Polymarket quote on any book for 30 s = a feed gap: every 0.95 run restarts (sim: a 3-min gap)
