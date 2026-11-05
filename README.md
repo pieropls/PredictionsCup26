@@ -25,7 +25,7 @@
 <td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#account"><img src="img/mini_account.png" width="100%" alt="Account value from 100k: SIG marks vs Polymarket fair"></a><br><sub>Account from 100k</sub></td>
 <td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#rank"><img src="img/mini_rank.png" width="100%" alt="Our rank over time, log scale"></a><br><sub>Rank over time</sub></td>
 <td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#daily"><img src="img/mini_daily.png" width="100%" alt="Daily P&L per SIG day"></a><br><sub>Daily P&L</sub></td>
-<td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#ranking"><img src="img/mini_ranking.png" width="100%" alt="Every player's P&L on the last full board before settlement (23:14 PT Nov 4), us marked at #90"></a><br><sub>All players, pre-settlement</sub></td>
+<td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#ranking"><img src="img/mini_ranking.png" width="100%" alt="Every player's P&L on the last full board before settlement, us #90 then and #70 now"></a><br><sub>All players · #90 → #70</sub></td>
 </tr>
 </table>
 <p align="center"><sub>Click a chart to explore it: hover, zoom, full size.</sub></p>
@@ -42,7 +42,7 @@
 *P&L per SIG day (00:00 UTC) at SIG's marks, with the day at Polymarket fair as a line.*
 
 ![Every player's P&L on the last full board, us marked](img/final_ranking.png)
-*Every player's P&L on the last full board (23:14 PT Nov 4, before settlement): we were #90; the open marker is #70 on the latest board.*
+*Every player's P&L on the last full board (23:14 PT Nov 4, before settlement): hollow, us at #90 then; filled, #70 on the latest board.*
 
 ![Final portfolio at the 09:00 lock](img/portfolio_snapshot.png)
 *136 positions at the 09:00 lock, before settlement: the top ten are worth 84.9k at SIG marks and 97.8k at Polymarket's results.*

@@ -26,13 +26,13 @@ West Virginia Senate D,NO,2449,0.9514,1954.86,2449.00,yes
 Virginia Senate D,YES,2514,0.7950,1906.90,2514.00,yes
 Delaware Senate R,NO,1980,0.9429,1845.10,1980.00,yes
 Massachusetts Governor R,NO,1956,0.9451,1776.77,1956.00,yes
-VA-01 House race R,NO,1613,0.9520,1553.32,1573.48,no
-CO-04 House race R,NO,1631,0.8399,1516.31,1509.49,no
+VA-01 House race R,NO,1613,0.9520,1553.32,1586.39,no
+CO-04 House race R,NO,1631,0.8399,1516.31,1489.10,no
 Arkansas Senate D,NO,1452,0.9574,1425.06,1452.00,yes
 MN-02 House race R,NO,1396,0.9675,1350.82,1396.00,yes
-FL-09 House race D,YES,1296,0.9606,1239.60,1268.78,no
+FL-09 House race D,YES,1296,0.9606,1239.60,1275.91,no
 New Hampshire Senate R,NO,1459,0.7151,1221.92,1459.00,yes
-SC-01 House race D,YES,1250,0.9000,1206.79,1233.12,no
+SC-01 House race D,YES,1250,0.9000,1206.79,1236.25,no
 FL-16 House race R,YES,1351,0.9307,1149.03,1351.00,yes
 South Carolina Governor D,NO,981,0.9700,936.63,981.00,yes
 Michigan Governor D,YES,1221,0.9431,919.54,1221.00,yes
@@ -41,7 +41,7 @@ New Hampshire Governor D,NO,919,0.9333,823.54,919.00,yes
 Oregon Governor R,NO,1143,0.9476,733.24,1143.00,yes
 Colorado Senate D,YES,808,0.9665,726.94,808.00,yes
 CA-48 House race D,YES,749,0.9587,715.28,749.00,yes
-MT-01 House race R,NO,696,0.9065,684.67,682.78,no
+MT-01 House race R,NO,696,0.9065,684.67,691.82,no
 New York Governor R,NO,699,0.9545,630.89,699.00,yes
 KY-04 House race D,NO,702,0.9550,610.80,702.00,yes
 CO-08 House race R,NO,604,0.9637,576.74,604.00,yes
@@ -65,19 +65,19 @@ Kentucky Senate D,NO,209,0.8917,132.10,209.00,yes
 Tennessee Senate R,NO,500,0.1300,126.56,0.00,yes
 Alaska Governor D,YES,96,0.8300,93.82,95.90,no
 FL-22 House race D,NO,100,0.4153,80.52,0.00,yes
-ME-02 House race D,NO,88,0.6418,66.80,87.69,no
+ME-02 House race D,NO,88,0.6418,66.80,87.65,no
 MI-10 House race D,YES,54,0.9700,51.21,54.00,yes
 Iowa Governor R,YES,252,0.1470,40.37,0.00,yes
 Wyoming Senate D,NO,40,0.9223,39.18,40.00,yes
 South Carolina Senate D,NO,500,0.6562,38.71,0.00,yes
-Alaska Senate D,NO,150,0.3233,34.69,8.25,no
+Alaska Senate D,NO,150,0.3233,34.69,7.12,no
 Oklahoma Governor D,NO,30,0.9600,29.34,30.00,yes
 Illinois Senate D,NO,1070,0.0553,27.26,0.00,yes
 ME-02 House race R,NO,50,0.4600,26.72,0.32,no
 Montana Senate D,NO,27,0.9478,23.80,27.00,yes
 New Hampshire Senate D,NO,52,0.1500,16.70,0.00,yes
 Wyoming Senate R,YES,12,0.9099,11.87,12.00,yes
-AZ-06 House race R,YES,141,0.1900,9.99,1.62,no
+AZ-06 House race R,YES,141,0.1900,9.99,1.34,no
 Nebraska Senate I,NO,10,0.8972,9.60,10.00,yes
 TX-28 House race D,YES,9,0.9684,8.91,9.00,yes
 Delaware Senate D,YES,10,0.9450,8.43,10.00,yes
@@ -96,27 +96,27 @@ WA-03 House race D,NO,143,0.1050,5.25,0.00,yes
 Texas Governor D,YES,5,0.2890,4.97,5.00,yes
 AZ-01 House race R,NO,5,0.7620,4.86,5.00,no
 Oklahoma Senate D,YES,50,0.0650,4.63,0.00,yes
-VA-01 House race D,NO,103,0.3776,4.57,4.53,no
+VA-01 House race D,NO,103,0.3776,4.57,1.55,no
 Maine Senate D,YES,4,0.9484,3.65,4.00,yes
 Montana Senate R,NO,130,0.1140,3.64,0.00,yes
 Georgia Senate R,NO,5,0.9538,3.55,5.00,yes
 MI-10 House race R,NO,3,0.6800,2.89,3.00,yes
 TX-15 House race R,NO,3,0.9199,2.67,3.00,yes
-CO-03 House race R,YES,3,0.5168,2.65,2.90,no
+CO-03 House race R,YES,3,0.5168,2.65,2.96,no
 New Mexico Governor D,YES,2,0.9597,1.98,2.00,yes
 Colorado Governor R,NO,2,0.9650,1.94,2.00,yes
 Nebraska Governor R,YES,2,0.8131,1.92,2.00,yes
 CA-22 House race R,NO,2,0.9090,1.61,2.00,yes
 Oregon Senate D,YES,2,0.9599,1.57,2.00,yes
 Iowa Senate R,YES,6,0.5220,1.44,0.00,yes
-Mississippi Senate D,NO,9,0.9149,1.41,0.31,no
+Mississippi Senate D,NO,9,0.9149,1.41,0.33,no
 Kansas Governor D,NO,68,0.5900,1.37,0.24,no
 New Mexico Senate D,NO,81,0.0400,1.28,0.00,yes
 MN-05 House race R,YES,39,0.0950,1.06,0.00,yes
 CA-48 House race R,NO,1,0.8938,0.98,1.00,yes
 NY-13 House race R,NO,1,0.9450,0.98,1.00,yes
 Oklahoma Senate R,YES,1,0.9650,0.98,1.00,yes
-MN-01 House race D,NO,10,0.5851,0.97,0.53,no
+MN-01 House race D,NO,10,0.5851,0.97,0.68,no
 Florida Governor D,NO,1,0.9144,0.96,1.00,yes
 Illinois Governor D,YES,1,0.9550,0.95,1.00,yes
 CO-08 House race D,YES,1,0.8648,0.92,1.00,yes
@@ -124,16 +124,16 @@ Alabama Senate D,NO,1,0.9100,0.89,1.00,yes
 West Virginia Senate R,YES,1,0.9500,0.89,1.00,yes
 North Carolina Senate D,YES,1,0.9450,0.86,1.00,yes
 Florida Senate R,YES,1,0.9450,0.84,1.00,yes
-Mississippi Senate R,YES,8,0.7761,0.68,0.28,no
+Mississippi Senate R,YES,8,0.7761,0.68,0.24,no
 Connecticut Governor R,NO,1,0.9400,0.66,1.00,yes
 IA-01 House race D,NO,1,0.1900,0.26,0.00,yes
 Nebraska Senate D,YES,6,0.0300,0.26,0.00,yes
-SC-01 House race R,YES,5,0.4998,0.26,0.07,no
-MT-01 House race D,NO,9,0.5350,0.25,0.19,no
+SC-01 House race R,YES,5,0.4998,0.26,0.04,no
+MT-01 House race D,NO,9,0.5350,0.25,0.06,no
 TX-23 House race D,NO,1,0.5552,0.23,0.00,yes
-CO-04 House race D,NO,3,0.6286,0.21,0.22,no
+CO-04 House race D,NO,3,0.6286,0.21,0.25,no
 Montana Senate I,YES,2,0.0850,0.14,0.00,yes
 Louisiana Senate R,NO,4,0.0950,0.13,0.00,yes
 PA-01 House race D,NO,4,0.5130,0.06,0.00,yes
 Cash available,,,,1054.19,1054.19,
-Account,,,,154876.24,179671.90,
+Account,,,,154876.24,179679.36,
