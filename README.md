@@ -2,54 +2,57 @@
 <h1>Predictions Cup 2026</h1>
 </div>
 
-<p align="center"><img src="img/banner.png" width="100%" alt="Susquehanna Predictions Cup · 2026 Midterm Elections Tournament"></p>
-<p align="center"><sub><i>Personal project by a participant; not affiliated with or endorsed by Susquehanna.</i></sub></p>
+<p align="center"><img src="img/banner.png" width="100%" alt="Susquehanna Predictions Cup · Midterm Elections Tournament · upbeat-cedar-5206"></p>
 
 ## My journey
-
-*Day one by hand (−10.3k); the engine took over that afternoon and ran 24/7 on a server from Oct 7.*
 
 ### Final Results for upbeat-cedar-5206
 
 <div align="center">
 <table>
 <tr>
-<td align="center"><sub>Final rank</sub><br><b>#67</b> <sub>of 1,969 · top 3.4%</sub></td>
-<td align="center"><sub>P&amp;L</sub><br><b>+73.3k</b> <sub>+73%</sub></td>
-<td align="center"><sub>Best rank</sub><br><b>#62</b></td>
-<td align="center"><sub>Trades</sub><br><b>20,544</b></td>
+<td align="center"><sub>Final rank</sub><br><b>#67</b><br><sub>top 1.3% of 5,141 members · top 3.4% of 1,969 traders</sub></td>
+<td align="center"><sub>P&amp;L</sub><br><b>+73,266</b></td>
 <td align="center"><sub>Volume</sub><br><b>3.6M</b></td>
+<td align="center"><sub>Trades</sub><br><b>20,544</b></td>
+<td align="center"><sub>Win rate</sub><br><b>78%</b></td>
 </tr>
 </table>
-<sub>SIG settlement in progress (board as of 04:58 PT, Nov 5) · 179.7k if every market settles on its result.</sub>
+<p><sub>55 of 136 markets still to settle on SIG</sub></p>
 </div>
 
 <table>
 <tr>
-<td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#account"><img src="img/mini_account.png" width="100%" alt="Account value from 100k: SIG marks vs Polymarket fair"></a><br><sub>Account from 100k</sub></td>
-<td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#rank"><img src="img/mini_rank.png" width="100%" alt="Our rank over time, log scale"></a><br><sub>Rank over time</sub></td>
-<td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#daily"><img src="img/mini_daily.png" width="100%" alt="Daily P&L per SIG day"></a><br><sub>Daily P&L</sub></td>
-<td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#ranking"><img src="img/mini_ranking.png" width="100%" alt="Every player's P&L on the last full board before settlement, us #90 then and #67 now"></a><br><sub>All players · #90 → #67</sub></td>
+<td width="20%" align="center" valign="top"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#account"><img src="img/mini_account.png" width="100%" alt="Account value from 100k: SIG marks vs Polymarket fair"></a><br><sub>Account from 100k</sub></td>
+<td width="20%" align="center" valign="top"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#rank"><img src="img/mini_rank.png" width="100%" alt="Our rank over time, log scale"></a><br><sub>Rank over time</sub></td>
+<td width="20%" align="center" valign="top"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#daily"><img src="img/mini_daily.png" width="100%" alt="Daily P&L per SIG day"></a><br><sub>Daily P&L</sub></td>
+<td width="20%" align="center" valign="top"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#ranking"><img src="img/mini_ranking.png" width="100%" alt="Every player's P&L on the last full board before settlement, us #90 then and #67 now"></a><br><sub>All players · #90 → #67</sub></td>
+<td width="20%" align="center" valign="top"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#portfolio"><img src="img/mini_portfolio.png" width="100%" alt="Final portfolio at the 09:00 lock by the party each position wins with: pro-D 77%, pro-R 23% at SIG marks"></a><br><sub>Final portfolio, pre‑settlement</sub></td>
 </tr>
 </table>
 <p align="center"><sub>Click a chart to explore it: hover, zoom, full size.</sub></p>
 
-<details><summary><b>Full-size charts and the final portfolio</b></summary>
+<!-- Official top 100 ranking: refresh.sh shows this block once data/official_ranking.pdf (or .png) is in the repo
+<details><summary><b>Official top 100 ranking</b></summary>
 
-![Account value from 100k: SIG marks vs Polymarket fair](img/account_value.png)
-*The account from 100k at SIG's marks and at Polymarket fair; the dot is the value if every market settles on Polymarket's result.*
+<p align="center"><a href="data/official_ranking.pdf"><img src="img/official_ranking_p1.png" width="70%" alt="SIG's official top 100 ranking, page 1"></a></p>
+<p align="center"><sub><a href="data/official_ranking.pdf">Open the PDF</a></sub></p>
 
-![Our rank over time, log scale](img/rank_over_time.png)
-*From around #900 in week one to the top 100 by Oct 21; best #62 on election night.*
+</details>
+-->
 
-![Daily P&L per SIG day](img/daily_pnl.png)
-*P&L per SIG day (00:00 UTC) at SIG's marks, with the day at Polymarket fair as a line.*
+<!-- Certificate: refresh.sh shows this block once data/certificate.pdf (or .png) is in the repo
+<details><summary><b>Certificate</b></summary>
 
-![Every player's P&L on the last full board, us marked](img/final_ranking.png)
-*Every player's P&L on the last full board (23:14 PT Nov 4, before settlement): hollow, us at #90 then; filled, #67 on the latest board.*
+<p align="center"><a href="data/certificate.pdf"><img src="img/certificate_p1.png" width="70%" alt="Certificate, page 1"></a></p>
+<p align="center"><sub><a href="data/certificate.pdf">Open the PDF</a></sub></p>
 
-![Final portfolio at the 09:00 lock](img/portfolio_snapshot.png)
-*136 positions at the 09:00 lock, before settlement: the top ten are worth 84.9k at SIG marks and 97.8k at Polymarket's results.*
+</details>
+-->
+
+<details><summary><b>My journey in one paragraph</b></summary>
+
+On day one I traded two contracts by hand and was down 10.3k by the close. I took it as the cue to treat the Cup seriously: that afternoon I started building a systematic trading engine, and from Oct 7 it traded 24/7 on a server. It took a week to earn the loss back. Then came the hunt for the top 100 and beyond: market making against Polymarket's fair value, morning reports, the fight against adverse selection, research and backtests, all of it building toward election night. That's where the engine delivered: +24.3k on the last SIG day, and a final #67 of 1,969.
 
 </details>
 
