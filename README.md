@@ -17,7 +17,7 @@
 <td align="center"><sub>Volume</sub><br><b>3.6M</b></td>
 </tr>
 </table>
-<sub>SIG settlement in progress (board as of 01:42 PT, Nov 5) · best rank #62 · 179.7k if every market settles on its result.</sub>
+<sub>SIG settlement in progress (board as of 01:57 PT, Nov 5) · best rank #62 · 179.7k if every market settles on its result.</sub>
 </div>
 
 <table>
@@ -25,7 +25,7 @@
 <td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#account"><img src="img/mini_account.png" width="100%" alt="Account value from 100k: SIG marks vs Polymarket fair"></a><br><sub>Account from 100k</sub></td>
 <td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#rank"><img src="img/mini_rank.png" width="100%" alt="Our rank over time, log scale"></a><br><sub>Rank over time</sub></td>
 <td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#daily"><img src="img/mini_daily.png" width="100%" alt="Daily P&L per SIG day"></a><br><sub>Daily P&L</sub></td>
-<td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#ranking"><img src="img/mini_ranking.png" width="100%" alt="Every player's P&L, us marked"></a><br><sub>Every player's P&L</sub></td>
+<td width="25%" align="center"><a href="https://pieropls.github.io/PredictionsCup26/journey.html#ranking"><img src="img/mini_ranking.png" width="100%" alt="Every player's P&L on the last full board before settlement (23:14 PT Nov 4), us marked at #90"></a><br><sub>All players, pre-settlement</sub></td>
 </tr>
 </table>
 <p align="center"><sub>Click a chart to explore it: hover, zoom, full size.</sub></p>
@@ -42,7 +42,7 @@
 *P&L per SIG day (00:00 UTC) at SIG's marks, with the day at Polymarket fair as a line.*
 
 ![Every player's P&L on the last full board, us marked](img/final_ranking.png)
-*Every player's P&L on the last full board snapshot, with our position marked.*
+*Every player's P&L on the last full board (23:14 PT Nov 4, before settlement): we were #90; the open marker is #70 on the latest board.*
 
 ![Final portfolio at the 09:00 lock](img/portfolio_snapshot.png)
 *136 positions at the 09:00 lock, before settlement: the top ten are worth 84.9k at SIG marks and 97.8k at Polymarket's results.*
@@ -53,7 +53,7 @@
 
 The system I built and ran for 34 days: one Python engine on one server, watched from my laptop, by Claude and by me.
 
-**[Open the dashboard →](https://pieropls.github.io/PredictionsCup26/)** <sub>frozen at the final values</sub>
+**[Open the dashboard →](https://pieropls.github.io/PredictionsCup26/)** <sub>frozen after the close, before settlement</sub>
 
 ```mermaid
 %%{init: {"look": "classic", "flowchart": {"curve": "basis", "nodeSpacing": 24, "rankSpacing": 40, "wrappingWidth": 320}, "themeVariables": {"fontSize": "16px"}}}%%
@@ -142,7 +142,7 @@ flowchart LR
 
 | Box | What it does |
 |---|---|
-| **SIG exchange** | One YES book per contract (NO = 1 − YES); 237 contracts across 116 races. REST for orders, cancels and positions: ≤ 95 reads and 25 writes a minute. Websocket for books, trades and fills. The board shows SIG marks; the score is cash after every market resolves. |
+| **SIG exchange** | One YES book per contract (NO = 1 − YES); 237 contracts across 117 races (116 armed on election night). REST for orders, cancels and positions: ≤ 95 reads and 25 writes a minute. Websocket for books, trades and fills. The board shows SIG marks; the score is cash after every market resolves. |
 | **Polymarket** | The deeper market on the same races; its mid is the fair value for every SIG contract. A race counts as called when the side bid holds ≥ 0.95 for 20 s, or prints ≥ 0.98 once, after the last poll close. |
 | **Poll-close file** | Every race, its state, and when its last polls close. No call is trusted before that time; resting orders are pulled 10 minutes before each first close. |
 
@@ -155,7 +155,7 @@ flowchart LR
 | **Engine loop** | Refreshes state; each layer proposes orders; the executor checks them and sends them. Runs under systemd on the server, 24/7, from Oct 7 to Nov 4 (on my laptop before that). |
 | **Ledger + sub-books** | Every share belongs to exactly one layer, and a layer can only sell its own lots. The sub-books always sum to the real SIG position; I2 (reducing orders never exceed the position) is property-tested over 500 seeds. |
 | **Market making** | FMM quotes favourites under fair: 3,912 round trips, +5.5k realized.<br>CATCH v1 → v3 posts deep bids that catch sweeps and sells them on the snap-back: +7.9k realized.<br>FLIP takes first in queue and flips on the fill: 442 flips, +0.9k.<br>Carry and two-book locks hold to settlement. |
-| **Election-night machine** | A call detector after each state closes.<br>A sniper under min(0.97, PM − 3c), up to 15k shares a race.<br>A reversal guard: if PM drops under 0.90 within 10 min, that race stops.<br>Recycling at ≥ 0.97 to fund the next wave.<br>The result: calls on 229 books in 115 of 116 races; 296k shares at an average of 0.940, +9.8k vs fair; 297 ms p50 from call to order. |
+| **Election-night machine** | A call detector after each state closes.<br>A sniper under min(0.97, PM − 3c), up to 15k shares a race.<br>A reversal guard: if PM drops under 0.90 within 10 min, that race stops.<br>Recycling at ≥ 0.97 (from 16:14) to fund the next wave.<br>The result: calls on 229 books in 115 of 116 races; 296k shares at an average of 0.940, +9.8k vs fair; 297 ms p50 from call to order. |
 | **Rehearsals + stress tests** | 3 full rehearsals with synthetic calls injected into the live feed; a night simulator at different cash levels; 421 tests. |
 | **Risk + executor** | Rule 0 (never sell below the lot average + 0.5c); I2 and the cash floor checked before every order; 25 writes a minute, 5 of them reserved for the call lane; a kill switch per layer. |
 | **Ops timers** | systemd timers for every scheduled step (the 14:40 go-live, poll-close pulls, wind-downs), plus health checks, alerts, the run log and a settlement watch. |
@@ -227,10 +227,10 @@ Favourites held to settlement as a carry book: bids at EV/$ ≥ 11%, sales at EV
 
 <details><summary><b>05 · The Lock</b> · pair sets, H4, two-book locks · <i>NO + NO for under 1</i> · <b>+1.6k</b> locked at entry</summary>
 
-Both NO sides of a two-candidate race bought for under 1 in total and held to settlement.
+Both sides of a two-candidate race bought for under 1 in total. Pair sets were unwound early once the set could be sold above cost; H4 and the two-book locks held to settlement.
 - **Parameters:** H4 ≤ 0.96 a set; the market maker's locks ≤ 0.99.
 - **Ran:** pair sets Oct 1–4, H4 from Oct 11, two-book locks Oct 17 → Oct 29.
-- **Result:** +1.6k locked at entry: 141 pair sets (+1.4k) and the two-book locks (+0.2k on 11.7k shares). H4 itself never found a set.
+- **Result:** +1.6k locked at entry: 141 pair sets (+1.4k, unwound early) and the two-book locks (+0.2k on 11.7k shares). H4 itself never found a set.
 
 </details>
 
@@ -254,7 +254,7 @@ Both NO sides of a two-candidate race bought for under 1 in total and held to se
 
 ![Election night: cumulative snipe notional and edge vs Polymarket fair](img/election_night.png)
 
-**Calls on 229 books in 115 of 116 races · 296k shares at 0.940 · +9.8k vs fair · 297 ms p50 from call to order.**
+**Calls on 229 books in 115 of 116 races · 296k shares at 0.940 · +9.8k vs fair · 297 ms p50 from call to order hand-off (p95 608 ms).**
 
 </details>
 
@@ -266,7 +266,7 @@ Manual trades where the engine can't act: crashes, thin books, prices far below 
 
 ## Takeaways
 
-1. **Size a reserve by its opportunity cost.** The election reserve left the catchers idle for a week while the tape showed 1.56M of sweep edge vs fair; they caught about 0.6k.
+1. **Size a reserve by its opportunity cost.** The election reserve left the catchers idle for a week while the tape showed 1.56M of sweep edge vs fair (at full sweep size); they caught about 0.6k.
 2. **Optimise for the scoring rule, not the marks.** At the lock the board said 154.9k while settlement value was 179.7k, and the rank went from #62 to #90 on SIG's lagging marks.
 3. **Size from the book, not one formula.** The first wave bought 1,803 Virginia Senate R NO with 388k shares on the book under the cap.
 4. **Every seller must read the call state.** The release layer sold 69,084 shares of called winners at 0.9527 while the sniper bought the same books at up to 0.97.
@@ -277,13 +277,13 @@ Manual trades where the engine can't act: crashes, thin books, prices far below 
 <summary><b>Full post-mortem</b></summary>
 
 **1. An election cash reserve starved the dump catchers for a week**
-- **Symptom:** the dump, fat-finger, ladder and wall layers all showed `full` and rested nothing. From Oct 26 to Nov 2 the tape showed 126 sweeps worth 1.92M of edge vs fair, 1.56M of it after the reserve started. About 0.6k was caught, and the rank slid from #95 to #120.
+- **Symptom:** the dump, fat-finger, ladder and wall layers all showed `full` and rested nothing. From Oct 26 to Nov 2 the tape showed 126 sweeps worth 1.92M of edge vs fair, 1.56M of it after the reserve started. About 0.6k was caught, and the rank slid from about #90 to #120 (low #164 on Nov 2).
 - **Cause:** from Oct 28, a reserve ramping from 20k to 60k was held back for election night, so every entry layer saw free cash under 2k. The catchers had in fact been dry since Oct 17, when the market maker took first claim on free cash. Nothing alerted on a layer marked `full` that rested 0 orders.
-- **Fix:** CATCH v2 on Nov 2 was exempted from the reserve and anchored on SIG's book as well as Polymarket. It made +7.9k in about a day.
+- **Fix:** CATCH v2/v3 on Nov 2 was exempted from the reserve and anchored on SIG's book as well as Polymarket. It made +7.9k in about 25 hours.
 - **Next time:** size a reserve with its opportunity cost, not only its funding cost (the study counted only the sales needed to raise it). Alert when a layer that's switched on has rested nothing for an hour.
 
 **2. Board marks vs settlement value**
-- **Symptom:** after the calls the board fell from 165k to 154k while the settlement value held at about 179k. The rank went from #62 to #90 overnight.
+- **Symptom:** after the calls the board fell from 165.0k to 154.9k at the lock while the settlement value held at about 179.7k. The rank went from #62 to #90 overnight.
   - Resolved winners sat at thin SIG prices: 15,455 Virginia Senate R NO had a 0.695 bid (10.7k) against 15.5k at settlement.
   - The engine's own fair fell back to SIG's mid wherever Polymarket stopped quoting resolved markets.
 - **Cause:** SIG values positions at a lagging `currentPrice` that drives the leaderboard. It isn't the last trade (it matched on 5 of 113 positions). The rank chase used board ranks.
@@ -313,7 +313,7 @@ Manual trades where the engine can't act: crashes, thin books, prices far below 
   - CATCH had Alaska, Maine and Georgia on its skip list; the sniper had its own, shorter list.
   - The rehearsals scripted Alaska as "no call", so the case was never exercised.
 - **Fix:** none in code. The election lane was stopped at 01:03 and the shares were sold at 0.80–0.83 (about −1.8k). The call direction still looks right; the loss came from the forced exit.
-- **Next time:** one exclusion list read by every layer, and a rehearsal in which an RCV race gets called.
+- **Next time:** one exclusion list read by every layer, and a rehearsal in which a ranked-choice race gets called.
 
 **6. Cash accounting in bursts**
 - **Symptom:**
@@ -341,11 +341,16 @@ img/         README images only
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r engine/requirements.txt
-python3 -m unittest discover research/tests                                  # 421 tests, about a minute, no network
-I2_SEEDS=500 python3 -m unittest research/tests/test_executor.py             # the I2 property test (run before every release)
-cp engine/.env.example .env    # SIG_API_KEY, SIG_ENGINE_HOST, SIG_DATA, ...
-SIG_DATA=/tmp/sig-dry python3 -u engine/f_engine.py      # dry run: reads everything, sends nothing
-python3 -u engine/f_engine.py --live                     # trades; refuses on any host but SIG_ENGINE_HOST
+# 421 tests, about a minute, no network
+python3 -m unittest discover research/tests
+# the I2 property test over 500 seeds (run before every release)
+I2_SEEDS=500 python3 -m unittest research/tests/test_executor.py
+# SIG_API_KEY, SIG_ENGINE_HOST, SIG_DATA, ...
+cp engine/.env.example .env
+# dry run: reads everything, sends nothing
+SIG_DATA=/tmp/sig-dry python3 -u engine/f_engine.py
+# live: trades, and refuses on any host but SIG_ENGINE_HOST
+python3 -u engine/f_engine.py --live
 ```
 
 - **engine/** is the pipeline in reading order: `a_config` (settings) → `b_sig` (SIG client) → `c_polymarket` → `d_ledger` → `e_bots` → `f_engine` (the loop) → `i_realtime`, `j_executor`, `l_intel`, `n_election`. Each entry point puts `engine/` and `dashboard/` on its path; module names are unchanged.
