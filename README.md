@@ -17,7 +17,7 @@
 <td align="center"><sub>Volume</sub><br><b>3.6M</b></td>
 </tr>
 </table>
-<sub>SIG settlement in progress (board as of 01:57 PT, Nov 5) · best rank #62 · 179.7k if every market settles on its result.</sub>
+<sub>SIG settlement in progress (board as of 02:58 PT, Nov 5) · best rank #62 · 179.7k if every market settles on its result.</sub>
 </div>
 
 <table>
@@ -56,76 +56,71 @@ The system I built and ran for 34 days: one Python engine on one server, watched
 **[Open the dashboard →](https://pieropls.github.io/PredictionsCup26/)** <sub>frozen after the close, before settlement</sub>
 
 ```mermaid
-%%{init: {"look": "classic", "flowchart": {"curve": "basis", "nodeSpacing": 24, "rankSpacing": 40, "wrappingWidth": 320}, "themeVariables": {"fontSize": "16px"}}}%%
-flowchart LR
+%%{init: {"look": "classic", "flowchart": {"curve": "basis", "nodeSpacing": 14, "rankSpacing": 24, "wrappingWidth": 320}, "themeVariables": {"fontSize": "16px"}}}%%
+flowchart TB
+  SIG[["SIG exchange<br/>REST + websocket<br/>≤ 95 reads · 25 writes / min"]]
   PM["Polymarket<br/>fair value · race calls"]
   POLL["Poll-close file<br/>who is called, when"]
+
   subgraph SERVER["SERVER · one Python engine, 24/7"]
-    direction TB
-    WS["websocket listener"]
+    direction LR
+    WS["websocket<br/>listener"]
     subgraph FEEDS["live feeds"]
       direction LR
       F1[books] ~~~ F2[trades]
       F3[orders] ~~~ F4[positions]
       F5[fills] ~~~ F6[cash]
     end
-    LEDGER["ledger + sub-books"]
     LOOP["engine loop"]
-    REH["rehearsals + stress tests<br/>3 full runs · 421 tests"]
+    LEDGER["ledger + sub-books"]
     subgraph STRAT["strategies"]
       direction LR
       MM["market making<br/>FMM · CATCH · FLIP · carry"]
-      NIGHT["election-night machine<br/>115 of 116 races · ~300 ms"]
+      NIGHT["election-night machine<br/>call → order in ~300 ms"]
     end
+    REH["rehearsals + stress tests<br/>3 full runs · 421 tests"]
     EXEC[["risk + executor<br/>rule 0 · I2 · 25 writes/min"]]
+    FEEDER["dashboard feeder"]
     OPS["ops timers"]
-    DASHF["dashboard feeder"]
     WS --> FEEDS --> LOOP
-    LEDGER <--> LOOP
-    LOOP --> STRAT
+    LOOP <--> LEDGER
+    LOOP --> STRAT --> EXEC
     REH -.- STRAT
-    STRAT --> EXEC
-    LOOP ----> DASHF
-    EXEC ~~~ OPS
+    LOOP --> FEEDER
+    LOOP --> OPS
   end
+
   subgraph LAPTOP["My laptop"]
     direction LR
-    MIRROR["Dashboard mirror<br/>Piero's Intel"]
-    RES["Research + simulations"]
+    MIRROR["dashboard mirror<br/>Piero's Intel"]
+    RES["research + simulations"]
     CC["Claude Code<br/>204 releases"]
   end
   subgraph CLAUDE["Claude app"]
     direction LR
-    MON["Live monitoring"]
-    MORN["Morning reports"]
+    MON["live monitoring"]
+    MORN["morning reports"]
   end
   subgraph PIERO["Piero"]
     direction LR
-    READ["Reads reports"]
-    DEC["Decisions + controls"]
-    OVER["Discretionary overlay"]
+    READ["reads reports"]
+    DEC["decisions + controls"]
+    OVER["discretionary overlay"]
   end
+
   PM -->|fair value · calls| SERVER
+  SIG <==>|market data ⇄ orders| SERVER
   POLL -->|close times| SERVER
-  SIGG <==>|books · trades · fills<br/>orders| SERVER
-  SERVER -->|state| LAPTOP
-  LAPTOP -.->|releases| SERVER
+  SERVER <-->|state · releases| LAPTOP
   SERVER -.->|logs · alerts| CLAUDE
-  SERVER ~~~ PIERO
-  PIERO -.->|controls| SERVER
-  PIERO ==>|manual orders| SIGG
-  %% declared last: the layout's cycle-breaking starts here, which keeps SIG on the left
-  subgraph SIGG["SIG exchange"]
-    SIGT["REST + websocket"]
-  end
+  SERVER <-.->|reports · controls| PIERO
+  SIG <==>|manual orders| PIERO
+
   classDef default fill:none,stroke:#8b949e,stroke-width:1.5px
   classDef key fill:none,stroke-width:3.5px
   classDef feed font-size:14px
-  classDef bare fill:none,stroke:none
-  class EXEC key
+  class EXEC,SIG key
   class F1,F2,F3,F4,F5,F6 feed
-  class SIGT bare
-  style SIGG fill:none,stroke:#8b949e,stroke-width:3.5px
   style SERVER fill:none,stroke:#8b949e,stroke-width:2px
   style FEEDS fill:none,stroke:#8b949e
   style STRAT fill:none,stroke:#8b949e
