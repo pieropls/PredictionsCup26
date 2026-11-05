@@ -55,7 +55,7 @@ flowchart LR
         CC["Claude Code"]
     end
     CL["Claude<br/>monitoring · reports"]
-    ME["Me<br/>decisions · controls<br/>discretionary overlay"]
+    ME["Me<br/>decisions · controls · orders"]
     SIG -->|"books · trades"| LIS --> ENG
     PM -->|"fair · calls"| ENG
     ENG --> STR --> EXE
@@ -67,7 +67,7 @@ flowchart LR
     CC --> CL
     MIR <--> ME
     CL -->|reports| ME
-    SIG <-->|"manual orders"| ME
+    SIG <-->|orders| ME
 ```
 
 - One Python engine; **rule 0:** never sell below the lot average + 0.5c; **I2:** reducing orders never exceed the position.
@@ -119,7 +119,7 @@ flowchart LR
 - **16:14** C135 raises the wave multiplier from 2.5 to 8.
 - **17:00 / 18:00** The two big waves, ~103k shares each.
 - **19:15** C138: sellers stop selling called winners.
-- **22:04** Alaska Senate (ranked choice) is called; at 22:29 a 20.5k hand sale is spent in 7 seconds.
+- **22:04** Alaska Senate (ranked choice) is called; at 22:29 the cash from a 20.5k sale is spent in 7 seconds.
 - **01:03** Election lane stopped; final sweep until 08:30.
 
 ![election night](img/election_night.png)
@@ -133,7 +133,7 @@ flowchart LR
 3. **Size from the book, not one formula.** The first wave bought 1,803 Virginia Senate R NO with 388k shares on the book under the cap.
 4. **Every seller must read the call state.** The release layer sold 69,084 shares of called winners at 0.9527 while the sniper bought the same books at up to 0.97.
 5. **Keep one exclusion list for every layer.** The sniper bought 14,949 Alaska Senate R NO in a ranked-choice race; the forced exit cost about 1.8k.
-6. **Keep one cash authority.** A 20.5k hand sale was spent in 7 seconds on queued snipes; SIG then refused writes while the engine still read 20.5k of cash.
+6. **Keep one cash authority.** The cash from a 20.5k sale was spent in 7 seconds on queued snipes; SIG then refused writes while the engine still read 20.5k of cash.
 
 <details>
 <summary><b>Full post-mortem</b></summary>
@@ -172,7 +172,7 @@ flowchart LR
 - **Symptom:** the detector called Alaska Senate at a Polymarket bid of 0.95 at 22:04. The sniper bought 14,949 R NO at 0.926.
 - **Cause:**
   - Alaska counts by ranked choice for about two weeks, so it can't settle by Nov 4. That adds SIG's VWAP close-out risk to the race risk.
-  - CATCH had Alaska, Maine and Georgia on its skip list; the sniper excluded only manual markets.
+  - CATCH had Alaska, Maine and Georgia on its skip list; the sniper had its own, shorter list.
   - The rehearsals scripted Alaska as "no call", so the case was never exercised.
 - **Fix:** none in code. The election lane was stopped at 01:03 and the shares were sold at 0.80–0.83 (about −1.8k). The call direction still looks right; the loss came from the forced exit.
 - **Next time:** one exclusion list read by every layer, and a rehearsal in which an RCV race gets called.
@@ -180,11 +180,11 @@ flowchart LR
 **6. Cash accounting in bursts**
 - **Symptom:**
   - In the Oct 21 sim, a filled snipe was counted twice: in the commit ledger and in the falling raw cash. A lost executor answer also released its budget twice, so the first two waves took everything.
-  - On the night the error ran the other way. At 22:29 the sniper spent a 20.5k hand sale in 7 seconds on queued snipes. SIG refused writes with "insufficient available funds" while the engine read 20.5k of cash.
+  - On the night the error ran the other way. At 22:29 the sniper spent the cash from a 20.5k sale in 7 seconds on queued snipes. SIG refused writes with "insufficient available funds" while the engine read 20.5k of cash.
   - At 18:00 SIG also turned out to reserve funds for resting orders, which an Oct 2 test had ruled out.
 - **Cause:** probably that the sim fix released the fill hold at once while the cash read lagged behind it, plus two cash models, the engine's and SIG's.
 - **Fix:** C103/C104 fixed the double count before the night. The live over-spend ended when the lane stopped at 01:03.
-- **Next time:** treat SIG's available funds as the only cash authority, use an order record that counts only what was sent and filled, and put manual trades through the same check.
+- **Next time:** treat SIG's available funds as the only cash authority, use an order record that counts only what was sent and filled, and put every order through the same check.
 
 </details>
 
