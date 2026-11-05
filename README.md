@@ -1,3 +1,7 @@
+<div align="center">
+<h1>Predictions Cup 2026</h1>
+</div>
+
 <p align="center"><img src="img/banner.png" width="100%" alt="Susquehanna Predictions Cup · 2026 Midterm Elections Tournament"></p>
 <p align="center"><sub><i>Personal project by a participant; not affiliated with or endorsed by Susquehanna.</i></sub></p>
 
