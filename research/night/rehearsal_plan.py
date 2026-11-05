@@ -41,7 +41,7 @@ time.tzset()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, ROOT)
+sys.path[:0] = [os.path.join(ROOT, d) for d in ("engine", "dashboard", "research")]   # engine/, dashboard/, research/ (the tests package)
 import n_election as el  # noqa: E402  (the engine's detector, read-only use)
 
 SERVER = os.environ.get("SIG_SERVER", "user@your-server")

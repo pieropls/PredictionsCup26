@@ -30,8 +30,8 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tests"))
+sys.path[:0] = [os.path.join(ROOT, d) for d in ("engine", "dashboard", "research")]   # engine/, dashboard/, research/ (the tests package)
+sys.path.insert(0, os.path.join(ROOT, "research", "tests"))
 
 FLOOR = 7_000.0                                            # 5k floor + the 2k manual reserve (n_election.CASH_FLOOR)
 SIZES = (10_000, 20_000, 30_000, 45_000, 60_000)

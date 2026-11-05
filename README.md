@@ -303,27 +303,27 @@ Manual trades where the engine can't act: crashes, thin books, prices far below 
 <summary><b>Setup, tests, dry run, server</b></summary>
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-python3 -m unittest discover tests                                      # 421 tests, about a minute, no network
-I2_SEEDS=500 python3 -m unittest tests.test_executor.InvariantTests     # the I2 property test (run before every release)
-cp .env.example .env    # SIG_API_KEY, SIG_ENGINE_HOST, SIG_DATA, ...
-SIG_DATA=/tmp/sig-dry python3 -u f_engine.py      # dry run: reads everything, sends nothing
-python3 -u f_engine.py --live                     # trades; refuses on any host but SIG_ENGINE_HOST
+python3 -m venv .venv && .venv/bin/pip install -r engine/requirements.txt
+python3 -m unittest discover research/tests                                      # 421 tests, about a minute, no network
+I2_SEEDS=500 python3 -m unittest research/tests/test_executor.py     # the I2 property test (run before every release)
+cp engine/.env.example .env    # SIG_API_KEY, SIG_ENGINE_HOST, SIG_DATA, ...
+SIG_DATA=/tmp/sig-dry python3 -u engine/f_engine.py      # dry run: reads everything, sends nothing
+python3 -u engine/f_engine.py --live                     # trades; refuses on any host but SIG_ENGINE_HOST
 ```
 
 - **Pipeline:** one file per stage: `a_config.py` (settings) → `b_sig.py` (SIG client) → `c_polymarket.py` → `d_ledger.py` → `e_bots.py` → `f_engine.py` (the loop) → `j_executor.py`.
   - Alongside them: `i_realtime.py` (websocket), `l_intel.py` (tape and sweep detection), `n_election.py` (the night) and the dashboard (`g_dashboard.py`, `q_dash5.py`, `r_dash5_ui.py`).
 - **Server:**
-  - `deploy/server/sig-engine.service` runs `start.sh`, which refuses to start if another engine looks alive or the key is missing.
-  - `deploy/server/ops/install.sh` installs the ops timers.
+  - `server/sig-engine.service` runs `start.sh`, which refuses to start if another engine looks alive or the key is missing.
+  - `server/ops/install.sh` installs the ops timers.
 - **Election-night simulator:** `research/night/` is the simulator, built on the 2024 Polymarket paths, plus the rehearsal tooling.
-- **Results** (`results/`, derived data only):
+- **Results** (`data/`, derived data only):
   - `pnl_daily.csv` (per SIG day) and `rank.csv` (hourly);
   - `night_snipes.csv` (each live call);
   - `releases.csv`.
 - **Data and frozen dashboard:**
   - `data/` holds only `pm_map.json`, the SIG ↔ Polymarket market map. Player names and ids in the test fixtures are anonymised.
-  - `site/index.html` is the frozen dashboard, also served from the `gh-pages` branch.
+  - `dashboard/site/index.html` is the frozen dashboard, also served from the `gh-pages` branch.
 
 </details>
 

@@ -15,8 +15,8 @@ import time
 import types
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tests"))
+sys.path[:0] = [os.path.join(ROOT, d) for d in ("engine", "dashboard", "research")]   # engine/, dashboard/, research/ (the tests package)
+sys.path.insert(0, os.path.join(ROOT, "research", "tests"))
 sys.modules.setdefault("b_sig", __import__("fake_sig").FakeSIG() if hasattr(__import__("fake_sig"), "FakeSIG") else types.ModuleType("b_sig"))
 import f_engine  # noqa: E402
 import n_election as el  # noqa: E402

@@ -6,8 +6,8 @@ import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tests"))
+sys.path[:0] = [os.path.join(ROOT, d) for d in ("engine", "dashboard", "research")]   # engine/, dashboard/, research/ (the tests package)
+sys.path.insert(0, os.path.join(ROOT, "research", "tests"))
 import tests  # noqa: E402,F401  (the package guard: SIG_DATA is a temp dir, never data/)
 import night_report as nr  # noqa: E402
 import night_world as nw  # noqa: E402

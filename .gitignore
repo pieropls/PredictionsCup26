@@ -1,6 +1,7 @@
-data/*
-!data/pm_map.json
 .env
 __pycache__/
 *.pyc
 .venv/
+data/*
+!data/pm_map.json
+!data/*.csv

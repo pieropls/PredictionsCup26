@@ -31,8 +31,8 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "tests"))
+sys.path[:0] = [os.path.join(ROOT, d) for d in ("engine", "dashboard", "research")]   # engine/, dashboard/, research/ (the tests package)
+sys.path.insert(0, os.path.join(ROOT, "research", "tests"))
 import reserve_sizing as rs                                 # noqa: E402
 
 TS = (0.99, 0.98, 0.97, 0.96)

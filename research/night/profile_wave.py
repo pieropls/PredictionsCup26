@@ -471,7 +471,7 @@ def main():
         win = {"smoke": (t_start, t_start + 1e9)}
 
     sys.path.insert(0, code)
-    sys.path.insert(1, os.path.join(ROOT, "tests"))
+    sys.path.insert(1, os.path.join(ROOT, "research", "tests"))
     import night_world as nw                               # World first: it builds on the real clock's mktime only
     t0w = _RT()
     W0 = nw.World(seed=a.seed)
