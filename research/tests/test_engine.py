@@ -8721,7 +8721,9 @@ class C133Tests(EngineCase):
         C94Tests.c95_market(self, eng, fake, b, 0.10, (0.12, 0.13, 0.125), race="RX")
         C94Tests.c95_market(self, eng, fake, c, 0.95, (0.80, 0.81, 0.805), race="RY")
         FMMTests.live(self, eng)
-        f_engine.FMM_C133 = dict(a_config.FMM_C133, clip_until="2099-01-01 00:00:00", c103_off_until="2099-01-01 00:00:00", bid_sell_at="2099-01-01 00:00:00")
+        # the C133 push 1.5 days ago (the real one, Nov 2 18:26, made the 3-day-old lot below a new one from Nov 5 18:26 on)
+        f_engine.FMM_C133 = dict(a_config.FMM_C133, clip_until="2099-01-01 00:00:00", c103_off_until="2099-01-01 00:00:00", bid_sell_at="2099-01-01 00:00:00",
+                                 new_since=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 1.5 * 86400)))
         eng.engine_cash_now = lambda: a_config.CASH_RESERVE + 10_000.0
         tg = [t for t in eng.fmm_targets(time.time(), paper=False) if t[5] == "fmm"]
         self.assertTrue(tg and max(t[4] for t in tg) == 250 and all(t[4] <= 250 for t in tg), "250-share clips")
