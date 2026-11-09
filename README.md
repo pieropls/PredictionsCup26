@@ -4,11 +4,13 @@
 
 <p align="center"><img src="img/banner.png" width="100%" alt="Susquehanna Predictions Cup · Midterm Elections Tournament · upbeat-cedar-5206"></p>
 
-<p align="center">$\small\color{red}\textsf{Published Monday, Nov 9, 2026 · 15 of my 136 markets were still settling on SIG; they're counted at their called result.}$</p>
+<p align="center"><img src="img/published.svg" alt="Published Monday, Nov 9, 2026 · 15 of my 136 markets were still settling on SIG; they&#x27;re counted at their called result."></p>
 
 ## My journey
 
 ### Final Results for upbeat-cedar-5206
+
+<sub>Susquehanna (SIG) ran the Cup on its own exchange: five weeks of play-money trading on the 2026 US midterms, 100k each, scored on cash after every market settles.</sub>
 
 <div align="center">
 <table>
@@ -22,9 +24,7 @@
 </table>
 </div>
 
-<sub>Susquehanna (SIG) ran the Cup on its own exchange: five weeks of play-money trading on the 2026 US midterms, 100k each, scored on cash after every market settles.</sub>
-
-I started with a mistake. On day one I traded two contracts by hand and was down 10.3k by the close; by that night the leader was up 603k and I was #591, still down 7.2k. One of the top teams, I learned later, had rested 3,000-share bids at half a cent and asks at 99.5 cents in every market, and caught every careless market order. My engine went live that afternoon and moved to a server on Oct 7, but it took a full week just to get back to 100k, and I fell as low as #928 on the way. From there I built market makers that quoted around Polymarket's prices and climbed into the top 100 by Oct 21. On election night the engine spotted a race call in 115 of 116 races, had an order ready a median 0.3&nbsp;s later, and bought in 95 of them. I finished #63 of 1,969.
+I started with a mistake. On day one I traded two contracts by hand and lost 10.3k; that night the leader was up 603k and I was #591. One of the top teams, I learned later, had rested 3,000-share bids at half a cent and asks at 99.5 cents in every market, and caught every careless market order. My engine went live that afternoon and moved to a server on Oct 7, but it took a full week just to get back to 100k, and I fell as low as #928 on the way. From there I built market makers that quoted around Polymarket's prices and climbed into the top 100 by Oct 21. On election night the engine spotted a race call in 115 of 116 races, had an order ready a median 0.3&nbsp;s later, and bought in 95 of them. I finished #63 of 1,969.
 
 <table>
 <tr>
@@ -123,7 +123,7 @@ flowchart TB
     REH ~~~ SUPPORT
   end
 
-  subgraph DESK["my desk"]
+  subgraph DESK["<b>DESK</b>"]
     direction LR
     subgraph LAPTOP["My laptop"]
       direction LR
@@ -154,6 +154,7 @@ flowchart TB
   DATA <==>|"market data ⇄ orders"| SERVER
   SERVER <-.->|"state · logs ⇅ releases"| DESK
   DATA <==>|orders| DESK
+  DESK ~~~ PAD["<br/><br/><br/><br/><br/><br/><br/>"]
 
   classDef default fill:none,stroke:#8b949e,stroke-width:1.2px
   classDef key fill:none,stroke:#8b949e,stroke-width:3px
@@ -172,6 +173,7 @@ flowchart TB
   style DESK fill:none,stroke:#8b949e,stroke-dasharray:6 4
   style CLAUDE fill:none,stroke:#8b949e,stroke-dasharray:6 4
   style PIERO fill:none,stroke:#8b949e,stroke-dasharray:6 4
+  style PAD fill:none,stroke:none
 ```
 
 **How it fits together.** The websocket listener and SIG's REST reads keep the books, trades, orders, positions, fills and cash in memory; Polymarket gives the fair price of every contract. The ledger knows which strategy owns every share. Each pass of the engine loop (about every 10 s), the strategies propose orders. Every order then passes the risk check before it reaches SIG: rule 0 (never sell below cost + 0.5c), I2 (never sell more than you hold), the cash floor and SIG's write limit. Around the server, I watched Piero's Intel and Claude's reports and set the controls. Claude turned each change into a written spec, and Claude Code built, tested and shipped it: 204 releases in 34 days.
@@ -301,7 +303,7 @@ Both sides of a two-candidate race bought for under 1 in total.
 - **Call detector:** our side's Polymarket bid ≥ 0.95 for 20 s, or touches ≥ 0.98 once, after the state's last poll close. **Calls on 229 books in 115 of 116 races.**
 - **Sniper:** walks SIG's book up to min(0.97, PM bid − 3c), ≤ 15k shares a race, on its own thread; from 17:15 (C137) a strict call goes to PM bid − 1.5c. **636 fills in 95 races, 295,921 shares at 0.940, +9.8k vs fair; 297 ms median from call to order (608 ms p95).**
 - **Reversal guard:** a PM bid back under 0.90 within 10 minutes stops the race. **Fired 34 times on 21 races.**
-- **Recycling:** sells called winners to fund later waves. **31,079 shares at 0.979, +1.0k vs cost.**
+- **Recycling:** sells called winners to fund later waves. **30,295 shares at 0.979, +1.0k vs cost.**
 - **Poll-close pulls:** entry layers pull from 600 s before the first close; in the rehearsals the last order was gone **at least 419–422 s** before each close.
 - **Final sweep, 01:03 → 08:30:** bought resolved winners still offered on SIG. **11,585 shares at 0.929, +0.8k.**
 
@@ -322,7 +324,7 @@ Both sides of a two-candidate race bought for under 1 in total.
 
 I want to be clear about how this was built. I decided what to trade and what to build, and stepped in with my own input when the market moved faster than the rules. Claude Code wrote and tested almost all of the code, from written specs. Claude, in the chat app, was my second brain: it read the logs and the data, wrote the morning reports and the specs, and checked every release. It also got things wrong in a calm, convincing voice: once it reported the market maker refilling a sweep in −0.3 s, before the sweep had even happened. It was a measurement bug; the real median was 4.3 s. So I asked for the number from the data, every time.
 
-**34 days · 204 releases · 88 specs and notes · ~103k-line run log · 421 tests · 3 full rehearsals**
+**34 days · 204 releases · 90 specs and notes · ~103k-line run log · 421 tests · 3 full rehearsals**
 
 <p align="center"><img src="img/work_heatmap.png" width="80%" alt="When the work happened: 204 releases by day and hour of day, PT"></p>
 <p align="center"><sub>46 of the 204 releases went out between midnight and 06:00 PT.</sub></p>

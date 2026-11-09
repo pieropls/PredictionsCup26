@@ -70,7 +70,7 @@ MI-10 House race D,YES,54,0.9700,51.21,54.00,yes,pro-D,0.9855,yes
 Iowa Governor R,YES,252,0.1470,40.37,0.00,yes,pro-R,0.0005,yes
 Wyoming Senate D,NO,40,0.9223,39.18,40.00,yes,pro-R,0.9995,yes
 South Carolina Senate D,NO,500,0.6562,38.71,0.00,yes,pro-R,0.0005,yes
-Alaska Senate D,NO,150,0.3233,34.69,2.62,no,pro-R,0.0524,no
+Alaska Senate D,NO,150,0.3233,34.69,2.70,no,pro-R,0.0524,no
 Oklahoma Governor D,NO,30,0.9600,29.34,30.00,yes,pro-R,0.9995,yes
 Illinois Senate D,NO,1070,0.0553,27.26,0.00,yes,pro-R,0.0005,yes
 ME-02 House race R,NO,50,0.4600,26.72,0.28,no,pro-D,0.0887,no
@@ -136,4 +136,4 @@ Montana Senate I,YES,2,0.0850,0.14,0.00,yes,other,0.0005,yes
 Louisiana Senate R,NO,4,0.0950,0.13,0.00,yes,pro-D,0.0005,yes
 PA-01 House race D,NO,4,0.5130,0.06,0.00,yes,pro-R,0.0005,yes
 Cash available,,,,1054.19,1054.19,,,,
-Account,,,,154876.24,179850.81,,,,
+Account,,,,154876.24,179850.88,,,,
