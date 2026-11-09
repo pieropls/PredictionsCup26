@@ -4143,7 +4143,7 @@ class Engine:
                     self.event("AUDIT", msg); self.night.line(msg)
 
     def manual_book(self, now):
-        """C95c (Piero 15:27 Oct 16: the no-edge release sold 8,356 of his 25,000 SC-01 D YES bought by hand): a fill of an order the
+        """C95c (Piero 15:27 Oct 16: the no-edge release sold part of an operator position, SC-01 D YES): a fill of an order the
         engine did not place moves its shares into the 'manual' sub-book, which no engine seller touches; a manual sale reduces it.
         A manual fill that reduces an engine holding (manual book empty, engine inventory on the other side) stays with the engine's
         books. Each fill is booked once (flag on the fill), from C95c on."""
@@ -8226,7 +8226,7 @@ class Engine:
             try:
                 with open(os.path.join(os.path.dirname(DATA), "docs", "RECAP.md"), "a") as fh:
                     fh.write(f"\n- **{stamp()[:16]} PT, first CASH SHORT (afternoon D-B), engine-recorded:** {'; '.join(why)[:400]}. "
-                             f"Cash read {raw:,.0f}. Evidence: `data/cash_short.jsonl`. (Claude Code to confirm SIG's behaviour.)\n")
+                             f"Cash read {raw:,.0f}. Evidence: `data/cash_short.jsonl`. (To be confirmed against SIG's behaviour.)\n")
             except OSError:
                 pass
 

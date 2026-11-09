@@ -1082,7 +1082,7 @@ def vehicle_buy(st, ex, buy, lim, n, tag="cleanup", ttl=15.0, by="Piero 01:00 No
 
 
 def cleanup_sweep(st):
-    """Piero 01:00 Nov 4 items 1c and 2 (01:25: 'you execute the buys'), every 10 min until 08:30: VA-05 House race D NO into bids at 0.86
+    """Piero 01:00 Nov 4 items 1c and 2 (01:25: run the buys), every 10 min until 08:30: VA-05 House race D NO into bids at 0.86
     (0.84 from 02:30; floor 0.82), then buys with the cash above 1,000: PM side resolved at 1.00 (SIG ask <= 0.96) or PM side bid >= 0.995
     (ask <= 0.955), cheapest ask first, limit ask + 1c within the cap, max 5,000 a market, never control markets / Georgia / Alaska / Maine."""
     if now_s() > SWEEP_UNTIL:
