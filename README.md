@@ -13,16 +13,18 @@
 <div align="center">
 <table>
 <tr>
-<td align="center"><sub>Final rank</sub><br><b>#63</b><br><sub>top 1.2% of 5,141 members · top 3.2% of 1,969 traders</sub></td>
-<td align="center"><sub>P&amp;L</sub><br><b>+79,874</b></td>
+<td align="center"><sub>Final rank</sub><br><b>#63</b><br><sub>top 1.2% of 5,141 members · top 3.2% of the 1,969 who traded</sub></td>
+<td align="center"><sub>P&amp;L</sub><br><b>+79,874</b><br><sub>board +79,688</sub></td>
 <td align="center"><sub>Volume</sub><br><b>3.6M</b></td>
 <td align="center"><sub>Trades</sub><br><b>20,544</b></td>
-<td align="center"><sub>Win rate</sub><br><b>78%</b></td>
+<td align="center"><sub>Win rate</sub><br><b>78%</b><br><sub>of resolved markets</sub></td>
 </tr>
 </table>
 </div>
 
-I started with a mistake. On day one I traded two contracts by hand and was down 10.3k by the close; by that night the leader was up 603k and I was #591. One of the top teams, I learned later, had rested 3,000-share bids at half a cent and asks at 99.5 cents in every market, and caught every careless market order. My engine went live that afternoon and moved to a server on Oct 7, but it took a full week just to get back to 100k, and I fell as low as #928 on the way. From there I found a small, real edge in market making against Polymarket's prices and climbed into the top 100 by Oct 21. On election night the engine caught the call in 115 of 116 races, had an order ready a median 0.3 s later, and bought in 95 of them. I finished #63 of 1,969.
+<sub>Susquehanna (SIG) ran the Cup on its own exchange: five weeks of play-money trading on the 2026 US midterms, 100k each, scored on cash after every market settles.</sub>
+
+I started with a mistake. On day one I traded two contracts by hand and was down 10.3k by the close; by that night the leader was up 603k and I was #591, still down 7.2k. One of the top teams, I learned later, had rested 3,000-share bids at half a cent and asks at 99.5 cents in every market, and caught every careless market order. My engine went live that afternoon and moved to a server on Oct 7, but it took a full week just to get back to 100k, and I fell as low as #928 on the way. From there I built market makers that quoted around Polymarket's prices and climbed into the top 100 by Oct 21. On election night the engine spotted a race call in 115 of 116 races, had an order ready a median 0.3&nbsp;s later, and bought in 95 of them. I finished #63 of 1,969.
 
 <table>
 <tr>
@@ -178,13 +180,13 @@ flowchart TB
 
 | What | Measured | Source |
 |---|---|---|
-| Race call → order ready | 297 ms median, 608 ms p95 (204 orders) | the call-lane timer, election night |
-| Order → SIG's acknowledgement | 306 ms median, 558 ms p95 (8,020 batches) | the executor's journal, Oct 27 → Nov 4 |
+| Race call → order ready | 297 ms median, 608 ms p95 (204 orders) | call-lane timer, Nov 3 |
+| Order → SIG's acknowledgement | 306 ms median, 558 ms p95 (8,020 batches) | executor journal, Oct 27 → Nov 4 |
 | Engine loop | a pass every 10 s median, 15 s p95 | 252,483 loops, Oct 7 → Nov 4 |
-| Write budget | SIG allows 30 a minute; the engine used 25, with 5 held for race calls | SIG's API docs |
-| Server | San Francisco region, 24/7 from Oct 7 | |
+| Write budget | SIG allows 30 a minute; the engine used 25, 5 of them held for race calls | SIG's API docs |
+| Server | San Francisco region, 24/7 from Oct 7 | run log |
 
-Race calls don't wait for the loop: the sniper runs on its own thread.
+Race calls don't wait for the loop: the election-night sniper runs on its own thread.
 
 <details><summary><b>What each box does</b></summary>
 
@@ -206,7 +208,7 @@ Race calls don't wait for the loop: the sniper runs on its own thread.
 | **Engine loop** | Refreshes state, computes fair values, and asks each strategy for orders, about every 10 s. Under systemd on the server from Oct 7 to Nov 4 (on my laptop before that). |
 | **Market making** | FMM quotes favourites under fair: 3,912 round trips, +5.5k realized.<br>CATCH v1 → v3 posts deep bids that catch sweeps and sells them on the snap-back: +7.9k realized.<br>FLIP takes first in the queue and flips on the fill: 442 flips, +0.9k realized.<br>Carry holds favourites to settlement. |
 | **Election-night machine** | A call detector after each state closes; a sniper under min(0.97, PM − 3c), PM − 1.5c on a strict call from 17:15, up to 15k shares a race; a reversal guard; recycling of called winners to fund later waves. Calls in 115 of 116 races; 296k shares at 0.940, +9.8k vs fair. |
-| **Rehearsals + stress tests** | 3 full rehearsals with synthetic calls injected into the live feed; a night simulator at different cash levels; 421 tests. |
+| **Rehearsals + stress tests** | 3 full rehearsals in shadow mode (no orders sent), with synthetic calls injected into the live feed; a night simulator at different cash levels; 421 tests. |
 | **Risk + executor** | Rule 0 (never sell below the lot's cost + 0.5c), I2 and the cash floor checked before every order; 25 writes a minute, 5 of them held for race calls; a kill switch per strategy. |
 | **Ops timers** | systemd timers for every scheduled step (the 14:40 go-live, poll-close pulls, wind-downs), plus health checks, alerts, the run log and a settlement watch. |
 | **Dashboard feeder** | Publishes the account at SIG marks and at fair, the rank, cash and the night's calls. |
@@ -220,7 +222,7 @@ Race calls don't wait for the loop: the sniper runs on its own thread.
 | **Research + simulations** | Tape studies, the night simulator, parameter sweeps before each change. |
 | **Dashboard mirror** | Piero's Intel on my laptop, mirrored from the server every minute. |
 
-#### Piero
+#### Piero (me)
 
 | Box | What it does |
 |---|---|
@@ -239,6 +241,7 @@ Race calls don't wait for the loop: the sniper runs on its own thread.
 - **Sub-book:** the part of a position one strategy owns; a strategy can only sell its own lots.
 - **Rule 0:** never sell below the lot's cost + 0.5c.
 - **I2:** a selling order never exceeds the shares held; tested over 500 random seeds before every release.
+- **Realized:** profit on closed round trips only; lots still held at the end count in the account, not here.
 - **FMM / CATCH / FLIP:** the favourite market maker / deep bids that catch sweeps / one bid first in the queue, flipped on the fill.
 - **Call lane:** the sniper's own thread, with 5 writes a minute held for race calls: 297 ms median from call to order.
 
@@ -246,7 +249,7 @@ Race calls don't wait for the loop: the sniper runs on its own thread.
 
 ## Strategies deployed
 
-Six layers on one ledger: five ran around the clock, one was built for election night.
+Six layers on one ledger: five traded around the clock while switched on, one was built for election night. Each figure is measured inside its layer, and "realized" counts closed trades only, so the figures don't add up to the account's P&L.
 
 <details><summary><b>01 · The Favourite Maker</b> · FMM · <i>quotes favourites under fair</i> · <b>+5.5k</b> · 3,912 round trips</summary>
 
@@ -261,21 +264,21 @@ Bids on favourites (Polymarket fair ≥ 0.75) at the touch and 1–3c under it, 
 
 Deep bids under SIG's book and Polymarket fair. They fill when someone sweeps the book and are sold back on the snap-back.
 - **Parameters (v3):** levels at min(SIG bid − 4/8/15c, fair − 10/15/25c) and fair − 40c; exits at max(fill + 3c, min(pre-sweep mid, fair − 1c)).
-- **Ran:** the first dump / fat-finger layers Oct 4 → 16; v1 → v3 Nov 2 → Nov 3 12:30.
+- **Ran:** the first dump / fat-finger layers traded Oct 4 → 16, then sat on with no cash (post-mortem 1); v1 → v3 Nov 2 → Nov 3 12:30.
 - **Result:** +7.9k realized in about 25 hours (57 exits). One NH Governor R sweep filled 22,306 shares at +6.1k vs fair.
 
 </details>
 
 <details><summary><b>03 · The Flipper</b> · FLIP · <i>first in the queue, flips on the fill</i> · <b>+0.9k</b> · 442 flips</summary>
 
-On books with a SIG spread ≥ 2c, one bid first in the queue at the best bid + 0.5c. On a fill, an ask goes up at once at max(fill + 1c, best ask − 0.5c).
+On books with a SIG spread ≥ 2c, one bid first in the queue at the best bid + 0.5c. On a fill, an ask goes up at once at max(fill + 1c, best ask − 0.5c), and at fill + 0.5c after 30 minutes.
 - **Parameters:** the 60 widest books, 1k a book, bid ≤ fair − 3c.
 - **Ran:** Nov 2 18:32 → Nov 3 08:00.
-- **Result:** +0.9k realized; 442 flips (150k shares) on 247 entry fills, a median of about 40 minutes from fill to flip.
+- **Result:** +0.9k realized on 442 exit fills (150k shares) against 247 entry fills; a median of about 40 minutes from fill to exit.
 
 </details>
 
-<details><summary><b>04 · The Long Hold</b> · carry + convergence · <i>holds favourites to settlement</i> · <b>EV +13%</b> per dollar at the first close</summary>
+<details><summary><b>04 · The Long Hold</b> · carry + convergence · <i>holds favourites to settlement</i> · <b>EV +13%</b> per dollar at the first poll close</summary>
 
 Favourites held to settlement as a carry book: bids at EV/$ ≥ 11%, sales at EV/$ ≤ 5%, never below the lot's cost + 0.5c. From Oct 29 the convergence sales funded the election reserve.
 - **Ran:** Oct 17 → Nov 4.
@@ -292,13 +295,13 @@ Both sides of a two-candidate race bought for under 1 in total.
 
 </details>
 
-<details><summary><b>06 · The Sniper</b> · election-night machine · <i>buys races as they're called</i> · <b>+9.8k</b> vs fair · 296k shares</summary>
+<details><summary><b>06 · The Sniper</b> · election-night machine · <i>buys races as they're called</i> · <b>+9.8k</b> vs fair at the fill · 296k shares</summary>
 
 - **Call detector:** our side's Polymarket bid ≥ 0.95 for 20 s, or ≥ 0.98 once, after the state's last poll close. **Calls on 229 books in 115 of 116 races.**
 - **Sniper:** walks SIG's book up to min(0.97, PM bid − 3c), ≤ 15k shares a race, on its own thread; from 17:15 (C137) a strict call goes to PM bid − 1.5c. **636 fills in 95 races, 295,921 shares at 0.940, +9.8k vs fair; 297 ms median from call to order (608 ms p95).**
 - **Reversal guard:** a PM bid back under 0.90 within 10 minutes stops the race. **Fired 34 times on 21 races.**
 - **Recycling:** sells called winners to fund later waves. **31,079 shares at 0.979, +1.0k vs cost.**
-- **Poll-close pulls:** entry layers pull 600 s before the first close; **419–422 s measured** in the rehearsals.
+- **Poll-close pulls:** entry layers pull from 600 s before the first close; in the rehearsals the last order was gone **at least 419–422 s** before each close.
 - **Final sweep, 01:03 → 08:30:** bought resolved winners still offered on SIG. **11,585 shares at 0.929, +0.8k.**
 
 **The night, Nov 3 PT**
@@ -316,7 +319,7 @@ Both sides of a two-candidate race bought for under 1 in total.
 
 ## Working with Claude
 
-I want to be clear about how this was built. I decided what to trade and what to build, and stepped in with my own input when the market moved faster than the rules. Claude Code wrote and tested almost all of the code, from written specs. Claude, in the chat app, was my second brain: it read the logs and the data, wrote the morning reports and the specs, and checked every release. It also got things wrong in a calm, convincing voice: once it reported the market maker refilling a sweep in −0.3 s, a measurement bug; the real median was 4.3 s. So I asked for the number from the data, every time.
+I want to be clear about how this was built. I decided what to trade and what to build, and stepped in with my own input when the market moved faster than the rules. Claude Code wrote and tested almost all of the code, from written specs. Claude, in the chat app, was my second brain: it read the logs and the data, wrote the morning reports and the specs, and checked every release. It also got things wrong in a calm, convincing voice: once it reported the market maker refilling a sweep in −0.3 s, before the sweep had even happened. It was a measurement bug; the real median was 4.3 s. So I asked for the number from the data, every time.
 
 **34 days · 204 releases · 88 specs and notes · ~103k-line run log · 421 tests · 3 full rehearsals**
 
@@ -325,18 +328,18 @@ I want to be clear about how this was built. I decided what to trade and what to
 
 ## Takeaways
 
-1. **Test the exchange on day one, then size for it.** I knew resting orders didn't lock cash, yet I capped deep orders and later held a cash reserve. One of the top teams rested stink bids of up to 1M shares in every market ([Teun Schuur's write-up](https://github.com/IHateVolatility/SIG-Prediction-Cup)).
-2. **Optimise for the scoring rule, not the marks.** At the lock the board said 154.9k against about 179.7k at settlement, and I fell from #62 to #90 on SIG's lagging marks. Settlement brought me back to #63.
-3. **Size from the book, not one formula.** The first wave bought 1,803 Virginia Senate R NO with 388k shares offered under the cap.
-4. **Every seller must read the call state.** An older layer sold 69,084 shares of called winners at 0.9527 while the sniper bought them at up to 0.97.
-5. **Keep one exclusion list.** The sniper bought 14,949 Alaska Senate R NO in a ranked-choice race; the forced exit cost about 1.8k.
+1. **Test the exchange on day one, then size for it.** My day-one test showed resting orders didn't use up cash, yet I capped deep bids and later held a cash reserve. One top team grew its stink bids from 3,000 to 1M shares in every market ([Teun Schuur's write-up](https://github.com/IHateVolatility/SIG-Prediction-Cup)).
+2. **Optimise for the scoring rule, not the marks.** At the Nov 4 lock the board valued my account at 154.9k; at Polymarket's prices it was worth about 179.7k. My rank went from #62 to #90 on the board and came back to #63 as SIG settled.
+3. **Size from the book, not one formula.** The first wave bought only 1,803 Virginia Senate R NO; 388k were offered under the cap.
+4. **Every seller must read the call state.** An older layer sold 69,084 called winners at 0.9527 (up to 3.3k under settlement value) while the sniper bought at up to 0.97.
+5. **Keep one exclusion list.** The sniper bought 14,949 Alaska Senate R NO in a ranked-choice race that couldn't settle in time; selling out cost about 1.8k.
 6. **Keep one cash authority.** The sniper spent a 20.5k sale's cash in 7 seconds; SIG then refused writes while the engine still read 20.5k.
 
 <details>
 <summary><b>Full post-mortem</b></summary>
 
 **1. An election cash reserve starved the sweep catchers for a week**
-- **Symptom:** the dump, fat-finger, ladder and wall layers all showed `full` and rested nothing. From Oct 26 to Nov 2 the tape showed 126 sweeps worth 1.92M of edge vs fair, 1.56M of it after the reserve started. About 0.6k was caught, and the rank slid from about #90 to #120 (low #165 on Nov 2).
+- **Symptom:** the dump, fat-finger, ladder and wall layers all showed `full` and rested nothing. From Oct 26 to Nov 2 the tape showed 126 sweeps worth 1.92M of edge vs fair at full sweep size (far more than one account could take), 1.56M of it after the reserve started. About 0.6k was caught, and the rank slid from about #90 to #120 (low #165 on Nov 2).
 - **Cause:** from Oct 28, a reserve ramping from 20k to 60k was held back for election night, so every entry layer saw free cash under 2k. The catchers had in fact been dry since Oct 17, when the market maker took first claim on free cash. Nothing alerted on a layer marked `full` that rested 0 orders.
 - **Fix:** CATCH v2/v3 on Nov 2 was exempted from the reserve and anchored on SIG's book as well as Polymarket. It made +7.9k realized in about 25 hours.
 - **Next time:** size a reserve by its opportunity cost, not only its funding cost. Alert when a layer that's switched on has rested nothing for an hour.
