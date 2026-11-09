@@ -79,10 +79,11 @@ Piero's Intel is the dashboard I traded from: account, rank, cash, positions and
 %%{init: {"flowchart": {"curve": "basis", "nodeSpacing": 12, "rankSpacing": 28, "padding": 10, "wrappingWidth": 300, "subGraphTitleMargin": {"top": 4, "bottom": 10}}, "themeVariables": {"fontSize": "16px"}}}%%
 flowchart TB
   subgraph DATA["<b>DATA</b>"]
-    direction TB
+    direction LR
     PM("<b>Polymarket</b><br/>fair value · race calls")
     SIG["<b>SIG exchange</b><br/>REST + websocket<br/>≤ 95 reads · 25 writes / min"]
     POLL("<b>poll-close file</b><br/>who is called, when")
+    PM ~~~ SIG ~~~ POLL
   end
 
   subgraph SERVER["<b>SERVER</b> · one Python engine, 24/7"]
@@ -100,16 +101,18 @@ flowchart TB
     LEDGER["<b>ledger + sub-books</b><br/>one owner per share"]
     LOOP["<b>engine loop</b><br/>fair value · decisions"]
     subgraph STRAT["strategies"]
-      direction TB
+      direction LR
       MM["<b>market making</b><br/>FMM · CATCH · FLIP · carry"]
       NIGHT["<b>election-night machine</b><br/>call → order in ~300 ms"]
+      MM ~~~ NIGHT
     end
     REH("rehearsals + stress tests<br/>3 full runs · 421 tests")
     EXEC["<b>risk + executor</b><br/>rule 0 · I2 · rate limits"]
     subgraph SUPPORT["ops + reporting"]
-      direction TB
+      direction LR
       OPS["<b>ops timers</b><br/>health · alerts · night jobs"]
       FEEDER["<b>dashboard feeder</b>"]
+      OPS ~~~ FEEDER
     end
     WS --> FEEDS --> LEDGER --> LOOP
     LOOP --> STRAT --> EXEC
@@ -128,18 +131,20 @@ flowchart TB
         MORN("morning reports")
       end
       subgraph TOOLS[" "]
-        direction LR
+        direction TB
         CC("Claude Code<br/>204 releases")
         RES("research + simulations")
         MIRROR("dashboard mirror<br/>Piero's Intel")
+        CC ~~~ RES ~~~ MIRROR
       end
       CLAUDE ~~~ TOOLS
     end
     subgraph PIERO["Piero"]
-      direction LR
+      direction TB
       READ("reads reports")
       DEC("decisions + controls")
       OVER("discretionary input")
+      READ ~~~ DEC ~~~ OVER
     end
     LAPTOP <-.->|reports ⇅ directs| PIERO
   end
