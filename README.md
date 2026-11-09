@@ -388,12 +388,12 @@ I want to be clear about how this was built. I decided what to trade and what to
 ## Code
 
 ```
-data/        pm_map.json + derived results (pnl_daily, rank, night_snipes, releases, portfolio_final)
-server/      systemd unit, start script, ops timers, deploy and rollback
-research/    night/ (simulator, rehearsals) · tests/ (421 tests, fake SIG, night rig) · tape/ (k_tape_study.py)
-dashboard/   g_dashboard, h_status, m_dash4, q_dash5, r_dash5_ui + site/ (frozen Piero's Intel, journey.html)
-engine/      a_config → n_election, the pipeline in reading order, + requirements.txt, .env.example
-img/         README images only
+engine/      a_config → n_election: the pipeline in reading order
+dashboard/   Piero's Intel server + site/ (the frozen dashboard, journey.html)
+research/    night/ simulator, rehearsals · tests/ 421 tests, fake SIG · tape/
+server/      systemd unit, start script, ops timers, deploy, rollback
+data/        SIG ↔ Polymarket map + derived CSVs (P&L, rank, snipes, releases)
+img/         README images
 ```
 
 <details><summary><b>How to run</b></summary>
