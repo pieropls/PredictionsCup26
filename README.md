@@ -13,11 +13,11 @@
 <div align="center">
 <table>
 <tr>
-<td align="center"><sub>Final rank</sub><br><b>#63</b><br><sub>top 1.2% of 5,141 members · top 3.2% of the 1,969 who traded</sub></td>
-<td align="center"><sub>P&amp;L</sub><br><b>+79,874</b><br><sub>at settlement · board now +79,688</sub></td>
+<td align="center"><sub>Final rank</sub><br><b>#63</b><br><sub>top 1.2% of 5,141 members<br>top 3.2% of the 1,969 who traded</sub></td>
+<td align="center"><sub>P&amp;L</sub><br><b>+79,874</b><br><sub>board now +79,688</sub></td>
 <td align="center"><sub>Volume</sub><br><b>3.6M</b></td>
 <td align="center"><sub>Trades</sub><br><b>20,544</b></td>
-<td align="center"><sub>Win rate</sub><br><b>78%</b><br><sub>of resolved markets</sub></td>
+<td align="center"><sub>Win rate</sub><br><b>78%</b></td>
 </tr>
 </table>
 </div>
@@ -241,6 +241,7 @@ Race calls don't wait for the loop: the election-night sniper runs on its own th
 - **Sub-book:** the part of a position one strategy owns; a strategy can only sell its own lots.
 - **Rule 0:** never sell below the lot's cost + 0.5c.
 - **I2:** a selling order never exceeds the shares held; tested over 500 random seeds before every release.
+- **Win rate:** SIG's figure: the share of the resolved markets I traded that made money.
 - **Realized:** profit on closed round trips only; lots still held at the end count in the account, not here.
 - **FMM / CATCH / FLIP:** the favourite market maker / deep bids that catch sweeps / one bid first in the queue, flipped on the fill.
 - **Call lane:** the sniper's own thread, with 5 writes a minute held for race calls: 297 ms median from call to order.
