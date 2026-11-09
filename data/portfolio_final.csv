@@ -70,10 +70,10 @@ MI-10 House race D,YES,54,0.9700,51.21,54.00,yes,pro-D,0.9855,yes
 Iowa Governor R,YES,252,0.1470,40.37,0.00,yes,pro-R,0.0005,yes
 Wyoming Senate D,NO,40,0.9223,39.18,40.00,yes,pro-R,0.9995,yes
 South Carolina Senate D,NO,500,0.6562,38.71,0.00,yes,pro-R,0.0005,yes
-Alaska Senate D,NO,150,0.3233,34.69,2.55,no,pro-R,0.0524,no
+Alaska Senate D,NO,150,0.3233,34.69,2.62,no,pro-R,0.0524,no
 Oklahoma Governor D,NO,30,0.9600,29.34,30.00,yes,pro-R,0.9995,yes
 Illinois Senate D,NO,1070,0.0553,27.26,0.00,yes,pro-R,0.0005,yes
-ME-02 House race R,NO,50,0.4600,26.72,0.27,no,pro-D,0.0887,no
+ME-02 House race R,NO,50,0.4600,26.72,0.28,no,pro-D,0.0887,no
 Montana Senate D,NO,27,0.9478,23.80,27.00,yes,pro-R,0.9995,yes
 New Hampshire Senate D,NO,52,0.1500,16.70,0.00,yes,pro-R,0.0005,yes
 Wyoming Senate R,YES,12,0.9099,11.87,12.00,yes,pro-R,0.9995,yes
@@ -110,13 +110,13 @@ CA-22 House race R,NO,2,0.9090,1.61,2.00,yes,pro-D,0.9960,yes
 Oregon Senate D,YES,2,0.9599,1.57,2.00,yes,pro-D,0.9995,yes
 Iowa Senate R,YES,6,0.5220,1.44,0.00,yes,pro-R,0.0005,yes
 Mississippi Senate D,NO,9,0.9149,1.41,0.12,no,pro-R,0.0709,no
-Kansas Governor D,NO,68,0.5900,1.37,0.51,no,pro-R,0.0115,no
+Kansas Governor D,NO,68,0.5900,1.37,0.41,no,pro-R,0.0115,no
 New Mexico Senate D,NO,81,0.0400,1.28,0.00,yes,pro-R,0.0005,yes
 MN-05 House race R,YES,39,0.0950,1.06,0.00,yes,pro-R,0.0005,yes
 CA-48 House race R,NO,1,0.8938,0.98,1.00,yes,pro-D,0.9950,yes
 NY-13 House race R,NO,1,0.9450,0.98,1.00,yes,pro-D,0.9995,yes
 Oklahoma Senate R,YES,1,0.9650,0.98,1.00,yes,pro-R,0.9995,yes
-MN-01 House race D,NO,10,0.5851,0.97,0.35,no,pro-R,0.0648,no
+MN-01 House race D,NO,10,0.5851,0.97,0.34,no,pro-R,0.0648,no
 Florida Governor D,NO,1,0.9144,0.96,1.00,yes,pro-R,0.9995,yes
 Illinois Governor D,YES,1,0.9550,0.95,1.00,yes,pro-D,0.9995,yes
 CO-08 House race D,YES,1,0.8648,0.92,1.00,yes,pro-D,0.9995,yes
@@ -136,4 +136,4 @@ Montana Senate I,YES,2,0.0850,0.14,0.00,yes,other,0.0005,yes
 Louisiana Senate R,NO,4,0.0950,0.13,0.00,yes,pro-D,0.0005,yes
 PA-01 House race D,NO,4,0.5130,0.06,0.00,yes,pro-R,0.0005,yes
 Cash available,,,,1054.19,1054.19,,,,
-Account,,,,154876.24,179850.84,,,,
+Account,,,,154876.24,179850.81,,,,

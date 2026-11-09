@@ -4,7 +4,7 @@
 
 <p align="center"><img src="img/banner.png" width="100%" alt="Susquehanna Predictions Cup · Midterm Elections Tournament · upbeat-cedar-5206"></p>
 
-<p align="center">$\small\color{red}\textsf{Published Monday, Nov 9, 2026 · 15 of our 136 markets were still settling on SIG; they're counted at their called result.}$</p>
+<p align="center">$\small\color{red}\textsf{Published Monday, Nov 9, 2026 · 15 of my 136 markets were still settling on SIG; they're counted at their called result.}$</p>
 
 ## My journey
 
@@ -14,7 +14,7 @@
 <table>
 <tr>
 <td align="center"><sub>Final rank</sub><br><b>#63</b><br><sub>top 1.2% of 5,141 members · top 3.2% of the 1,969 who traded</sub></td>
-<td align="center"><sub>P&amp;L</sub><br><b>+79,874</b><br><sub>board +79,688</sub></td>
+<td align="center"><sub>P&amp;L</sub><br><b>+79,874</b><br><sub>at settlement · board now +79,688</sub></td>
 <td align="center"><sub>Volume</sub><br><b>3.6M</b></td>
 <td align="center"><sub>Trades</sub><br><b>20,544</b></td>
 <td align="center"><sub>Win rate</sub><br><b>78%</b><br><sub>of resolved markets</sub></td>
@@ -39,7 +39,7 @@ I started with a mistake. On day one I traded two contracts by hand and was down
 
 <details><summary><b>Week by week</b></summary>
 
-- **Oct 1** · Day one: two contracts by hand, -10.3k. The engine's first fill comes at 13:16 PT.
+- **Oct 1** · Day one: two contracts by hand, −10.3k. The engine's first fill comes at 13:16 PT.
 - **Oct 6** · The low: #928.
 - **Oct 7** · The engine moves to a server and runs 24/7 from then on.
 - **Oct 8** · Back above 100k (101.3k), #220 that night.
@@ -183,7 +183,7 @@ flowchart TB
 | Race call → order ready | 297 ms median, 608 ms p95 (204 orders) | call-lane timer, Nov 3 |
 | Order → SIG's acknowledgement | 306 ms median, 558 ms p95 (8,020 batches) | executor journal, Oct 27 → Nov 4 |
 | Engine loop | a pass every 10 s median, 15 s p95 | 252,483 loops, Oct 7 → Nov 4 |
-| Write budget | SIG allows 30 a minute; the engine used 25, 5 of them held for race calls | SIG's API docs |
+| Write budget | SIG allows 30 a minute; the engine used 25, including 5 held for race calls | SIG's API docs |
 | Server | San Francisco region, 24/7 from Oct 7 | run log |
 
 Race calls don't wait for the loop: the election-night sniper runs on its own thread.
@@ -194,7 +194,7 @@ Race calls don't wait for the loop: the election-night sniper runs on its own th
 
 | Box | What it does |
 |---|---|
-| **Polymarket** | The deeper market on the same races; its mid is the fair value for every SIG contract. A race counts as called when our side's bid holds ≥ 0.95 for 20 s, or prints ≥ 0.98 once, after the last poll close. |
+| **Polymarket** | The deeper market on the same races; its mid is the fair value for every SIG contract. A race counts as called when our side's bid holds ≥ 0.95 for 20 s, or touches ≥ 0.98 once, after the last poll close. |
 | **SIG exchange** | One YES book per contract (NO = 1 − YES); 237 contracts across 117 races. REST for orders, cancels and positions; websocket for books, trades and fills. SIG allows 100 reads and 30 writes a minute; the engine kept to 95 and 25. The board shows SIG marks; the score is cash after every market settles. |
 | **Poll-close file** | Every race, its state, and when its last polls close. No call is trusted before that time; resting orders are pulled 10 minutes before each first close. |
 
@@ -236,7 +236,7 @@ Race calls don't wait for the loop: the election-night sniper runs on its own th
 
 - **Fair value:** Polymarket's mid on the same race, used as the price a SIG contract should trade at.
 - **SIG marks vs settlement:** the board values positions at SIG's own lagging price; the score is the cash after each market settles at 1 or 0.
-- **Called race:** our side's Polymarket bid holds ≥ 0.95 for 20 s, or prints ≥ 0.98 once, after the state's last poll close.
+- **Called race:** our side's Polymarket bid holds ≥ 0.95 for 20 s, or touches ≥ 0.98 once, after the state's last poll close.
 - **Sweep / stink bid:** a large order that walks through several price levels / a resting order far from fair that only fills on such a sweep.
 - **Sub-book:** the part of a position one strategy owns; a strategy can only sell its own lots.
 - **Rule 0:** never sell below the lot's cost + 0.5c.
@@ -297,7 +297,7 @@ Both sides of a two-candidate race bought for under 1 in total.
 
 <details><summary><b>06 · The Sniper</b> · election-night machine · <i>buys races as they're called</i> · <b>+9.8k</b> vs fair at the fill · 296k shares</summary>
 
-- **Call detector:** our side's Polymarket bid ≥ 0.95 for 20 s, or ≥ 0.98 once, after the state's last poll close. **Calls on 229 books in 115 of 116 races.**
+- **Call detector:** our side's Polymarket bid ≥ 0.95 for 20 s, or touches ≥ 0.98 once, after the state's last poll close. **Calls on 229 books in 115 of 116 races.**
 - **Sniper:** walks SIG's book up to min(0.97, PM bid − 3c), ≤ 15k shares a race, on its own thread; from 17:15 (C137) a strict call goes to PM bid − 1.5c. **636 fills in 95 races, 295,921 shares at 0.940, +9.8k vs fair; 297 ms median from call to order (608 ms p95).**
 - **Reversal guard:** a PM bid back under 0.90 within 10 minutes stops the race. **Fired 34 times on 21 races.**
 - **Recycling:** sells called winners to fund later waves. **31,079 shares at 0.979, +1.0k vs cost.**
@@ -329,7 +329,7 @@ I want to be clear about how this was built. I decided what to trade and what to
 ## Takeaways
 
 1. **Test the exchange on day one, then size for it.** My day-one test showed resting orders didn't use up cash, yet I capped deep bids and later held a cash reserve. One top team grew its stink bids from 3,000 to 1M shares in every market ([Teun Schuur's write-up](https://github.com/IHateVolatility/SIG-Prediction-Cup)).
-2. **Optimise for the scoring rule, not the marks.** At the Nov 4 lock the board valued my account at 154.9k; at Polymarket's prices it was worth about 179.7k. My rank went from #62 to #90 on the board and came back to #63 as SIG settled.
+2. **Optimise for the scoring rule, not the marks.** At the Nov 4 lock the board valued my account at 154.9k; at Polymarket's prices it was worth about 179.7k then. My rank went from #62 to #90 on the board and came back to #63 as SIG settled.
 3. **Size from the book, not one formula.** The first wave bought only 1,803 Virginia Senate R NO; 388k were offered under the cap.
 4. **Every seller must read the call state.** An older layer sold 69,084 called winners at 0.9527 (up to 3.3k under settlement value) while the sniper bought at up to 0.97.
 5. **Keep one exclusion list.** The sniper bought 14,949 Alaska Senate R NO in a ranked-choice race that couldn't settle in time; selling out cost about 1.8k.
