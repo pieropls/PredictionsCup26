@@ -412,26 +412,26 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 │   ├── d_ledger.py          orders, fills and sub-books: one owner per share
 │   ├── e_bots.py            the decision logic per market and race, no I/O
 │   ├── f_engine.py          the loop: state, fair values, strategies, risk
-│   ├── i_realtime.py        websocket feeds (SIG, Polymarket) that wake the loop
+│   ├── i_realtime.py        websocket feeds that wake the loop
 │   ├── j_executor.py        every SIG write: I2, rule 0, the write budget
 │   ├── l_intel.py           tape and leaderboard studies inside the engine
-│   ├── n_election.py        the election-night machine: calls, snipes, recycling
+│   ├── n_election.py        election night: calls, snipes, recycling
 │   ├── requirements.txt
 │   └── .env.example         the settings it reads from its environment
 ├── dashboard/               Piero's Intel
-│   ├── g_dashboard.py       the web server inside the engine (localhost, token)
+│   ├── g_dashboard.py       the web server in the engine (localhost, token)
 │   ├── h_status.py          the engine at a glance, in the terminal
 │   ├── m_dash4.py           the v4 payload
-│   ├── q_dash5.py           the v5 payload: Overview, Engine, Markets, Leaders
+│   ├── q_dash5.py           the v5 payload behind the four tabs
 │   ├── r_dash5_ui.py        the v5 page code and CSS
 │   └── site/
 │       ├── index.html       the frozen dashboard (GitHub Pages)
 │       └── journey.html     the interactive charts behind the README minis
 ├── research/
-│   ├── night/               election-night simulator, sizing studies, the 2024 replay (23 files)
+│   ├── night/               the night simulator and sizing studies (23 files)
 │   ├── tape/
 │   │   └── k_tape_study.py  where the money on SIG came from
-│   └── tests/               421 tests: a fake SIG, the night rig, every module (19 files)
+│   └── tests/               421 tests, a fake SIG, the night rig (19 files)
 ├── server/
 │   ├── sig-engine.service   the systemd unit
 │   ├── start.sh             refuses to start if another engine is alive
@@ -441,10 +441,10 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 │   ├── log.sh               one run-log line, stamped by the server clock
 │   ├── tunnel.sh            opens the dashboard over SSH
 │   └── ops/
-│       ├── ops.py           timed jobs: health, alerts, night checks, settlement
+│       ├── ops.py           timed jobs: health, alerts, settlement
 │       ├── settle_read.py   read-only SIG reads for the settlement watch
 │       ├── install.sh       installs the ops timers
-│       ├── night/           the rehearsal plan, evaluator and pass criteria (3 files)
+│       ├── night/           the rehearsal plan and its checks (3 files)
 │       └── systemd/         the ops service and its timers (22 files)
 ├── data/
 │   ├── night_snipes.csv     every race called on election night
@@ -453,7 +453,7 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 │   ├── portfolio_final.csv  the positions at the close
 │   ├── rank.csv             my rank, hourly
 │   └── releases.csv         every release
-└── img/                     README images (9 files)
+└── img/                     README images (10 files)
 ```
 
 <details><summary><b>Working with Claude</b></summary>
