@@ -383,7 +383,7 @@ function ov_rankchart() {
   for (const v of [10, 25, 50, 100, 250, 500, 1000]) if (Math.log10(v) <= lmax) s += `<line class="gl" x1="${L}" x2="${W - R}" y1="${f1(Y(v))}" y2="${f1(Y(v))}"/><text x="${L - 6}" y="${f1(Y(v) + 4)}" text-anchor="end">#${v}</text>`;
   for (const v of [100, 50, 25]) s += `<line x1="${L}" x2="${W - R}" y1="${f1(Y(v))}" y2="${f1(Y(v))}" stroke="var(--steel)" stroke-dasharray="4 4"/><text x="${W - R + 4}" y="${f1(Y(v) + 4)}" class="lbl">top ${v}</text>`;
   { const tt = timeTicks(t0, t1, W); for (const t of tt.ticks) s += `<text x="${f1(X(t))}" y="${H - 26}" text-anchor="middle">${esc(tt.label(t))}</text>`; } s += xax5(W, L, R, H, "date (PT)");
-  const id = "ovrank", sr = {name: "our rank", color: "var(--sigb)", t: pts.map(p => p[0]), v: pts.map(p => p[1]), Y, gap: 7200, fmt: v => "#" + num(v)};
+  const id = "ovrank", sr = {name: "my rank", color: "var(--sigb)", t: pts.map(p => p[0]), v: pts.map(p => p[1]), Y, gap: 7200, fmt: v => "#" + num(v)};
   CH[id] = {id, t0, t1, L, R, W, X, series: [sr]};
   s += `<path class="ln" stroke="var(--sigb)" d="${linePath(pts, X, Y)}"/><circle id="xh-${id}-0" r="3.5" fill="var(--sigb)" display="none"/>`;
   s += `<line id="xh-${id}" class="xh" y1="${T}" y2="${H - B}" display="none"/><rect data-chart="${id}" x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/>${yax5(H, T, B, "rank (log scale)")}</svg>`;
@@ -405,7 +405,7 @@ function mkRows() {
   return rows;
 }
 
-const MKC = [["race", "Race", 0], ["contract", "Contract", 0], ["sig_yes", "SIG Buy YES", 1], ["sig_no", "SIG Buy NO", 1], ["pm_yes", "PM Buy YES", 1], ["pm_no", "PM Buy NO", 1], ["gap", "Gap SIG−PM", 1], ["hold", "Held at the lock", 0]];
+const MKC = [["race", "Race", 0], ["contract", "Contract", 0], ["sig_yes", "SIG Buy YES", 1], ["sig_no", "SIG Buy NO", 1], ["pm_yes", "PM Buy YES", 1], ["pm_no", "PM Buy NO", 1], ["gap", "Gap SIG−PM", 1], ["hold", "Held at the close", 0]];
 
 function mk_table() {
   const rows = mkRows(); if (!arr(S.v5mk_rows).length) return na5();
@@ -453,7 +453,7 @@ function mk_map(rows) {
     }
     s += `</div>`;
   }
-  return s + legend([["", "fill = how much we hold · ring = the SIG−Polymarket gap (amber ≥ 3¢, red ≥ 5¢)"]]);
+  return s + legend([["", "fill = how much I hold · ring = the SIG−Polymarket gap (amber ≥ 3¢, red ≥ 5¢)"]]);
 }
 
 function v5click(e) {
@@ -572,10 +572,10 @@ try { const t = localStorage.getItem("sig-dash-theme"); if (t === "light" || t =
 
 try { const h = new URLSearchParams(String(location.hash || "").replace(/^#/, "")); if (h.get("tab") && TABS[h.get("tab")]) ui.tab = h.get("tab"); if (h.get("theme")) setTheme(h.get("theme")); } catch (e) { }
 
-// ---- frozen export (readme_publish_spec §1.4): the final account, the lock portfolio, the engine's measured layers, the night's calls
+// ---- frozen export (readme_publish_spec §1.4): the final account, the portfolio at the close, the engine's measured layers, the night's calls
 const PARTY = {"pro-D": "#4184e4", "pro-R": "#e5534b", "other": "#8b949e"};
 const WHAT = {
-  overview: "My account from the Oct 1 start to settlement: P&L, rank, and the 136 positions I held at the Nov 4, 09:00 PT lock.",
+  overview: "My account from the Oct 1 start to settlement: P&L, rank, and the 136 positions I held at the Nov 4, 09:00 PT close.",
   live: "How the engine ran, what each strategy layer measured on its own, and the election night's race calls wave by wave.",
   markets: "Every SIG contract next to its Polymarket price, as the dashboard read them after trading closed and before SIG settled anything.",
   leaders: "SIG's leaderboard lines around my final rank. Other players' names and IDs are left out.",
@@ -585,7 +585,7 @@ const asof = t => t ? `${esc(dday(t))}, ${esc(String(t).slice(11, 16))} PT` : "�
 const pdot = k => `<i class="pd5" style="background:${PARTY[k] || PARTY.other}"></i>`;
 function ov_hero() {
   return `<div class="hero5">${CUP_SRC ? `<img alt="" src="${CUP_SRC}">` : ""}<div class="txt"><h2>Piero's Intel</h2><div class="s">Susquehanna Predictions Cup, midterm elections 2026</div>
-    <div class="s">Trading from Oct 1 to the Nov 4, 09:00 PT lock; SIG settled the markets from Nov 5</div></div></div>`;
+    <div class="s">Trading from Oct 1 to the Nov 4, 09:00 PT close; SIG settled the markets from Nov 5</div></div></div>`;
 }
 function ov_band() {
   const F = F0(); if (F.account == null) return `<div class="band5">${na5()}</div>`;
@@ -593,7 +593,7 @@ function ov_band() {
   const st = F.open_n ? `${num(F.settled)} of ${num(F.of)} markets settled; the other ${num(F.open_n)} counted at their called result` : `all ${num(F.of)} markets settled`;
   return `<div class="band5 g3">${fig("Final P&L", sgn(F.pnl), cls(F.pnl), `account <b>${num(F.account)}</b> from the 100,000 start`, st)}
     ${fig("Final rank", "#" + num(F.rank), "", `of ${num(F.total)} traders · top ${num(100 * F.rank / F.total, 1)}% · top ${num(100 * F.rank / F.members, 1)}% of ${num(F.members)} members`, `SIG's leaderboard, ${asof(F.board_t)}: ${sgn(F.board_pnl)} at SIG marks`)}
-    ${fig("Settled on SIG", num(F.settled) + " of " + num(F.of), "", F.settled_pm === F.settled ? "markets, every one on the Polymarket result" : "markets", `the board valued the account at <b>${num(F.account_lock)}</b> at the lock`)}</div>`;
+    ${fig("Settled on SIG", num(F.settled) + " of " + num(F.of), "", F.settled_pm === F.settled ? "markets, every one on the Polymarket result" : "markets", `the board valued the account at <b>${num(F.account_lock)}</b> at the close`)}</div>`;
 }
 function ov_rank() {
   const F = F0(), L = obj(V("leaders_frozen")); if (F.rank == null) return na5();
@@ -607,7 +607,7 @@ function ov_rank() {
 function ov_port() {
   const F = F0(), ps = arr(F.positions); if (!ps.length) return na5();
   const sp = obj(F.split), cash0 = (F.account || 0) - ps.reduce((a, r) => a + (r.value_final || 0), 0);
-  const sl = [["pro-D", "pro-D positions", sp["pro-D"]], ["pro-R", "pro-R positions", sp["pro-R"]], ["other", "independents", sp.other], ["cash", "cash at the lock", cash0]];
+  const sl = [["pro-D", "pro-D positions", sp["pro-D"]], ["pro-R", "pro-R positions", sp["pro-R"]], ["other", "independents", sp.other], ["cash", "cash at the close", cash0]];
   const tot = sl.reduce((a, r) => a + Math.max(0, r[2] || 0), 0) || 1;
   const R0 = 92, R1 = 58, C = 110; let a = -Math.PI / 2, svg = `<svg width="${2 * C}" height="${2 * C}" viewBox="0 0 ${2 * C} ${2 * C}" style="max-width:100%">`;
   for (const [k, name, v0] of sl) {
@@ -622,15 +622,15 @@ function ov_port() {
   const shown = ui.v5.oexp ? ps : ps.slice(0, 20);
   const res = r => r.status === "open" ? `${px(r.result)} <span class="sub5">Polymarket price</span>` : px(r.result);
   const stt = {settled: "settled on SIG", called: "called, settling", open: "not called yet"};
-  let t = `<div class="wrap5 mob7 q4"><table class="t5"><thead><tr><th>Market</th><th>Side</th><th class="n">Shares</th><th class="n">SIG mark at the lock</th><th class="n">Value at the lock</th><th class="n">Pays</th><th class="n">Final value</th><th>Status</th></tr></thead><tbody>`;
-  for (const r of shown) t += `<tr><td>${pdot(r.party)}${esc(r.name)} <span class="m7">${esc(r.side)} ${num(r.shares)}</span></td><td class="d7">${esc(r.side)}</td><td class="n d7">${num(r.shares)}</td><td class="n" data-l="mark, lock">${px(r.mark)}</td><td class="n" data-l="value, lock">${num(r.value_lock)}</td><td class="n" data-l="pays">${res(r)}</td><td class="n" data-l="final">${num(r.value_final)}</td><td class="sub5" data-l="">${stt[r.status] || ""}</td></tr>`;
+  let t = `<div class="wrap5 mob7 q4"><table class="t5"><thead><tr><th>Market</th><th>Side</th><th class="n">Shares</th><th class="n">SIG mark at the close</th><th class="n">Value at the close</th><th class="n">Pays</th><th class="n">Final value</th><th>Status</th></tr></thead><tbody>`;
+  for (const r of shown) t += `<tr><td>${pdot(r.party)}${esc(r.name)} <span class="m7">${esc(r.side)} ${num(r.shares)}</span></td><td class="d7">${esc(r.side)}</td><td class="n d7">${num(r.shares)}</td><td class="n" data-l="mark, close">${px(r.mark)}</td><td class="n" data-l="value, close">${num(r.value_lock)}</td><td class="n" data-l="pays">${res(r)}</td><td class="n" data-l="final">${num(r.value_final)}</td><td class="sub5" data-l="">${stt[r.status] || ""}</td></tr>`;
   t += `</tbody></table></div>${ps.length > 20 ? `<div style="margin-top:8px"><button class="btn5" data-oexp="1">${ui.v5.oexp ? "Show the top 20" : `Show all ${num(ps.length)} positions`}</button></div>` : ""}`;
   const lockv = ps.reduce((a, r) => a + (r.value_lock || 0), 0);
   const fig = (lab, big, sub) => `<div><div class="lab5">${lab}</div><div class="big5" style="font-size:30px">${big}</div><div class="sub5">${sub}</div></div>`;
-  return `<div class="h5"><h3>Final portfolio: the ${num(ps.length)} positions at the lock, and what they pay</h3></div>
-    <div class="pt6"><div class="pd6">${svg}<div>${lg}</div></div><div class="pf6">${fig("At SIG marks, at the lock", k1(lockv), "the positions as the board valued them")}
+  return `<div class="h5"><h3>Final portfolio: the ${num(ps.length)} positions at the close, and what they pay</h3></div>
+    <div class="pt6"><div class="pd6">${svg}<div>${lg}</div></div><div class="pf6">${fig("At SIG marks, at the close", k1(lockv), "the positions as the board valued them")}
     ${fig("Final value", k1(ps.reduce((a, r) => a + (r.value_final || 0), 0)), "1.00 a winning share, 0 a losing one")}
-    ${fig("Cash at the lock", k1(cash0), "")}</div></div>${t}
+    ${fig("Cash at the close", k1(cash0), "")}</div></div>${t}
     <div class="sub5" style="margin-top:8px">Party = the side each position wins with: pro-D (D YES or R NO), pro-R (R YES or D NO). Markets still open on SIG: my side at ≥ 0.95 on Polymarket counts as 1.00, at ≤ 0.05 as 0, otherwise at its Polymarket price.</div>`;
 }
 function eng_facts() {
@@ -660,7 +660,7 @@ function eng_night() {
 function mk_head() {
   const m = V("v5mk"), sm = obj(m.summary);
   return `<div class="sub5" style="margin-bottom:8px">Prices as of ${esc(m.as_of_txt || "–")}: trading had closed at 09:00 and SIG had not settled anything yet.</div>
-    <div style="margin-bottom:10px">${num(sm.contracts)} contracts · I held ${num(sm.held)} at the lock</div>
+    <div style="margin-bottom:10px">${num(sm.contracts)} contracts · I held ${num(sm.held)} at the close</div>
     <div class="fil5"><input id="mkq" placeholder="search state, race, district (press /)" value="${esc(ui.v5.mkq)}" style="min-width:240px">
     ${[["all", "All"], ["hold", "Held"], ["nohold", "Not held"], ["g3", "Gap ≥ 3¢"], ["g5", "Gap ≥ 5¢"]].map(([k, t]) => `<button data-mkf="${k}" class="${ui.v5.mkf === k ? "on" : ""}">${t}</button>`).join("")}
     <select id="mkg"><option value="">every race type</option>${["Senate", "Governor", "House", "National"].map(g => `<option ${ui.v5.mkg === g ? "selected" : ""}>${g}</option>`).join("")}</select>
@@ -674,7 +674,7 @@ function mk_panel() {
   return `<div class="side5"><button class="btn5 x" data-closemk="1">✕</button><h3 style="font-size:17px;margin:0 0 4px">${esc(r.title)}</h3><div class="sub5">${esc(r.race)} · ${esc(r.contract)}</div>
     <h3 style="margin-top:14px">SIG, after the close</h3><div>bid <b>${px(r.sig_bid)}</b> · ask <b>${px(r.sig_ask)}</b></div>
     <h3 style="margin-top:14px">Polymarket</h3><div>bid <b>${px(r.pm_bid)}</b> · ask <b>${px(r.pm_ask)}</b> · fair <b>${px(r.fair)}</b></div>
-    <h3 style="margin-top:14px">My position at the lock</h3>${h ? `<div><b>${esc(String(h.side).toUpperCase())} ${num(h.shares)}</b> · ${num(h.value)} at SIG marks</div>
+    <h3 style="margin-top:14px">My position at the close</h3>${h ? `<div><b>${esc(String(h.side).toUpperCase())} ${num(h.shares)}</b> · ${num(h.value)} at SIG marks</div>
       ${h.result == null ? "" : `<div>pays <b>${px(h.result)}</b> a share · final value <b>${num(h.value_final)}</b></div><div class="sub5">${esc(stt[h.status] || "")}</div>`}` : na5("none")}</div>`;
 }
 function lead_frozen() {
