@@ -269,8 +269,6 @@ Colours: blue for the data, teal for the engine core, purple for the strategies,
 
 I never forecast a race. Each layer was built for a behaviour I expected from 1,969 players trading play money: thin books, fat fingers and sweeps, players pushing prices to bait others, and a SIG book that lags Polymarket when a race is called. Every quote is anchored to Polymarket's fair value, never to SIG's book alone, so a pushed price can't drag the engine with it.
 
-<p align="center"><img src="img/strategy_mix.png" width="100%" alt="Who did the trading, Oct 8 to the Nov 4 close: FMM 76.9% of fills and 29.1% of volume; CATCH 2.2% of fills and 7.3% of volume; FLIP 2.8% of fills and 5.9% of volume; carry 0.0% of fills and 0.3% of volume; locks 0.1% of fills and 0.2% of volume; sniper 2.8% of fills and 11.3% of volume; other engine layers 9.5% of fills and 13.6% of volume; my own (discretionary) 5.6% of fills and 32.4% of volume"><br><sub>From Oct 8, when the engine started tagging every order with its layer; the card above counts the whole Cup.</sub></p>
-
 <details><summary>🟪 <b>01 · The Favourite Maker</b> · FMM · quotes favourites just under fair · 3,912 round trips</summary>
 
 - **Why:** favourites rarely flip, and a bid stays only while the touch is at least 2c under Polymarket's fair, re-checked every loop, which limits adverse selection.
@@ -332,7 +330,7 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 - **22:04** Alaska Senate (ranked choice) is called; at 22:29 the cash from a 20.5k sale is spent in 7 seconds.
 - **01:03** Election lane stopped; final sweep until 08:30.
 
-![Election night: cumulative snipe notional and edge vs Polymarket fair](img/election_night.png)
+![Election night, Nov 3 PT: what the sniper bought, cumulative, 278.3k SUSQies by 23:28; and its edge vs Polymarket's fair at each fill, cumulative, +9.8k SUSQies; dotted lines at each wave's last poll close](img/election_night.png)
 
 </details>
 
@@ -457,7 +455,7 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 │   ├── portfolio_final.csv  the positions at the close
 │   ├── rank.csv             my rank, hourly
 │   └── releases.csv         every release
-└── img/                     README images (10 files)
+└── img/                     README images (9 files)
 ```
 
 <details><summary><b>Working with Claude</b></summary>
