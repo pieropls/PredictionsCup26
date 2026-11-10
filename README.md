@@ -23,7 +23,7 @@ From Oct 1 to Nov 4, 2026, Susquehanna (SIG) ran the Predictions Cup: a predicti
 <td align="center"><sub>P&amp;L</sub><br><b>+79,874</b><br><sub>board +79.7k</sub></td>
 <td align="center"><sub>Volume</sub><br><b>3.6M</b></td>
 <td align="center"><sub>Trades</sub><br><b>20,544</b></td>
-<td align="center"><sub>Win rate</sub><br><b>85%</b></td>
+<td align="center"><sub>Win rate</sub><br><b>85%</b><br><sub>of resolved markets</sub></td>
 </tr>
 </table>
 </div>
@@ -265,7 +265,7 @@ Colours: blue for the data, teal for the engine core, purple for the strategies,
 
 I never forecast a race. Each layer was built for a behaviour I expected from 1,969 players trading play money: thin books, fat fingers and sweeps, players pushing prices to bait others, and a SIG book that lags Polymarket when a race is called. Every quote is anchored to Polymarket's fair value, never to SIG's book alone, so a pushed price can't drag the engine with it.
 
-<p align="center"><img src="img/strategy_mix.png" width="100%" alt="Who did the trading, Oct 8 to the Nov 4 close: FMM 76.9% of fills and 29.1% of volume; CATCH 2.2% of fills and 7.3% of volume; FLIP 2.8% of fills and 5.9% of volume; carry 0.0% of fills and 0.3% of volume; locks 0.1% of fills and 0.2% of volume; sniper 2.8% of fills and 11.3% of volume; other engine layers 9.5% of fills and 13.6% of volume; my own (discretionary) 5.6% of fills and 32.4% of volume"></p>
+<p align="center"><img src="img/strategy_mix.png" width="100%" alt="Who did the trading, Oct 8 to the Nov 4 close: FMM 76.9% of fills and 29.1% of volume; CATCH 2.2% of fills and 7.3% of volume; FLIP 2.8% of fills and 5.9% of volume; carry 0.0% of fills and 0.3% of volume; locks 0.1% of fills and 0.2% of volume; sniper 2.8% of fills and 11.3% of volume; other engine layers 9.5% of fills and 13.6% of volume; my own (discretionary) 5.6% of fills and 32.4% of volume"><br><sub>From Oct 8, when the engine started tagging every order with its layer; the card above counts the whole Cup.</sub></p>
 
 <details><summary>🟪 <b>01 · The Favourite Maker</b> · FMM · quotes favourites just under fair · 3,912 round trips</summary>
 
@@ -280,7 +280,7 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 
 - **Why:** players with play money send size-only orders into thin books; a market order walks the book and leaves the price far below fair for a moment.
 - **How (v3):** bids at min(SIG bid − 4/8/15c, fair − 10/15/25c) and at fair − 40c; each fill goes back on offer at max(fill + 3c, min(the pre-sweep mid, fair − 1c)).
-- **When:** the first dump and fat-finger layers Oct 4 → 16, then without free cash (post-mortem 1); v1 → v3 Nov 2 → Nov 3 12:30.
+- **When:** the earlier dump and fat-finger layers ran Oct 4 → 16, then had no free cash to bid with (post-mortem 1); CATCH v1 to v3 ran Nov 2 → Nov 3 12:30.
 - **Result:** +7.9k realized in this layer in about 25 hours (57 exits). One NH Governor R sweep filled 22,306 shares at +6.1k vs fair.
 
 </details>
@@ -305,8 +305,8 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 
 <details><summary>🟪 <b>05 · The Lock</b> · pair sets, H4, two-book locks · both sides of a race for under 1 · 141 pair sets</summary>
 
-- **Why:** players priced each party's book on its own, so a race's two books sometimes added up to less than 1; buying both locks in the gap whatever the result.
-- **How:** pair sets and H4 at ≤ 0.96 a set; the market maker's two-book locks at ≤ 0.99.
+- **Why:** players priced each party's book on its own, so a race's two books sometimes added up to less than 1; buying both sides captures the gap whatever the result.
+- **How:** pair sets at ≤ 0.96 a set; H4, the same lock bought with idle cash (both NOs in a two-candidate race, ≤ 0.96 together); the market maker's two-book locks at ≤ 0.99.
 - **When:** pair sets Oct 1–4, H4 from Oct 11, two-book locks Oct 17 → Oct 29.
 - **Result:** the 141 pair sets locked +1.4k at entry; most were unwound early, the majority above cost. The two-book locks held to settlement: +0.2k on 11.7k shares. H4 never found a set.
 
@@ -317,7 +317,7 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 - **Why:** after Polymarket calls a race, SIG's book lags: half of the night's fills came 16 minutes or more after the call, with the called side still on offer under 1.
 - **How:** a race counts as called when our side's Polymarket bid holds ≥ 0.95 for 20 s, or touches ≥ 0.98 once, after the state's last poll close. The sniper walks SIG's book up to min(0.97, PM bid − 3c), ≤ 15k shares a race, on its own thread; from 17:15 (C137) a strict call goes to PM bid − 1.5c. The reversal guard stops a race whose PM bid falls back under 0.90 within 10 minutes, and entry layers pull from 600 s before each first poll close.
 - **When:** Nov 3 14:40 → Nov 4 01:03; a final sweep until 08:30.
-- **Result:** calls on 229 books in 115 of 116 races; 636 fills in 95 races, 295,921 shares at 0.940, +9.8k vs Polymarket's fair at the fill; 297 ms median from call to order (608 ms p95). The reversal guard fired 34 times on 21 races; in the rehearsals the last entry order was gone at least 419–422 s before each close. Recycling sold 30,295 shares at 0.979, +1.0k vs cost; the final sweep bought 11,585 shares at 0.929, +0.8k.
+- **Result:** calls on 229 books in 115 of 116 races; 636 fills in 95 races, 295,921 shares at 0.940, +9.8k vs Polymarket's fair at the fill; 297 ms median from call to order (608 ms p95). The reversal guard fired 34 times on 21 races; in the three rehearsals every entry order was gone at least 419 s before each poll close. Recycling sold 30,295 shares at 0.979, +1.0k vs cost; the final sweep bought 11,585 shares at 0.929, +0.8k.
 
 **The night, Nov 3 PT**
 - **14:40** Election mode live: 234 books in 116 races armed.
@@ -341,11 +341,11 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 
 **What didn't**
 1. **Day one by hand.** Two careless orders cost 10.3k and a week to win back.
-2. **Idle catchers.** Capped resting bids, then the election cash reserve, left them idle for a week while the tape showed 1.56M of sweep edge at full size.
+2. **Idle catchers.** A cap on resting bids, then the election cash reserve, kept the sweep-catching layers idle for a week, while the tape showed 1.56M of sweep edge (counted at full sweep size, far more than one account could take).
 3. **Election-night bugs.** First-wave sizing too small, older sellers selling called winners under the sniper's price, the missing Alaska exclusion, and a cash model that disagreed with SIG's.
 
 **What I'd do differently**
-1. **Test the exchange's mechanics on day one, and size for them.** Resting orders didn't lock cash.
+1. **Test the exchange's mechanics on day one, and size for them.** On SIG a resting order didn't tie up any cash, yet I capped my deep bids and later held back a cash reserve.
 2. **Optimise for the scoring rule, not the board's marks.** At the close the board valued my account at 154.9k; settlement was worth about 179.7k.
 3. **Keep one source of truth.** One exclusion list, one cash authority, and every seller reads the call state.
 
@@ -360,14 +360,14 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 
 **2. Board marks vs settlement value**
 - **Symptom:** after the calls the board fell from 165.0k to 154.9k at the close while the settlement value held at about 179.7k, and the rank slipped from its best, #62, that morning.
-  - Resolved winners sat at thin SIG prices: 15,455 Virginia Senate R NO had a 0.695 bid (10.7k) against 15.5k at settlement.
+  - Races already decided stayed marked at thin SIG prices: my 15,455 Virginia Senate R NO shares (NO on the Republican) were valued at the 0.695 bid, 10.7k, and paid 15.5k at settlement.
   - The engine's own fair fell back to SIG's mid wherever Polymarket stopped quoting resolved markets.
 - **Cause:** SIG values positions at a lagging `currentPrice` that drives the leaderboard. It isn't the last trade (it matched on 5 of 113 positions). The rank chase used board ranks.
 - **Fix:** reporting only. The hourly lines valued called sides at 1.00, and the final snapshots showed both values. The final sweep bought resolved winners at 0.89–0.95. As SIG settled, every market paid Polymarket's result and the rank came back to #63.
 - **Next time:** pin down the scoring rule in week one, and run the rank chase on settlement value, not marks.
 
 **3. Per-race sizing too small at the first wave, fixed live**
-- **Symptom:** at 16:00, Virginia Senate R NO bought 1,803 shares with 388k shares on the book under the cap. Georgia and Kentucky were the same.
+- **Symptom:** at 16:00 the sniper bought only 1,803 Virginia Senate R NO shares, with 388k on the book under its cap. Georgia and Kentucky were the same.
 - **Cause:** wave share = multiplier × usable cash ÷ uncalled races in this and later waves. With a multiplier of 2.5 that gave about 1.7k a race. The sims had picked a low multiplier to protect a reversal night and the last wave. The rehearsals logged the same small sizes, but no pass/fail criterion looked at them.
 - **Fix:** C135, live at 16:14, raised the multiplier to 8 (about 4.6k a race) and topped up the open races.
 - **Next time:** add a rehearsal criterion for depth left on the table. Size the first wave from what the book offers, then hold back for later waves.
@@ -396,7 +396,7 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
   - In the Oct 21 sim, a filled snipe was counted twice: in the commit ledger and in the falling raw cash. A lost executor answer also released its budget twice, so the first two waves took everything.
   - On the night the error ran the other way. At 22:29 the sniper spent the cash from a 20.5k sale in 7 seconds on queued snipes. SIG refused writes with "insufficient available funds" while the engine read 20.5k of cash.
   - At 18:00 SIG refused even exit orders for "insufficient available funds" while it showed 43.8k of cash. I never pinned down why.
-- **Cause:** probably that the sim fix released the fill hold at once while the cash read lagged behind it, plus two cash models, the engine's and SIG's.
+- **Cause:** probably two things. After the sim fix, the engine released the cash it held for a fill at once, before its own cash figure had caught up; and the engine and SIG each kept their own count of available cash.
 - **Fix:** C103/C104 fixed the double count before the night. The live over-spend ended when the lane stopped at 01:03.
 - **Next time:** treat SIG's available funds as the only cash authority, use an order record that counts only what was sent and filled, and put every order through the same check.
 
