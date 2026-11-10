@@ -12,7 +12,7 @@
 
 <details><summary><b>What is the SIG Predictions Cup?</b></summary>
 
-From Oct 1 to Nov 4, 2026, Susquehanna (SIG) ran the Predictions Cup: a prediction market on the US midterms, on its own exchange. Everyone started with 100,000 SUSQies of play money and was ranked on their balance after every market settled. There were 237 contracts ("Will the Republican Party win the Maine Senate?" and so on), one order book each (NO = 1 − YES), a 0.5c tick, no trading fees, and an API allowing 30 writes and 100 reads a minute. 5,141 people signed up; 1,969 traded.
+From Oct 1 to Nov 4, 2026, Susquehanna (SIG) ran the Predictions Cup: a prediction market on the US midterms, on its own exchange. Everyone started with 100,000 SUSQies of play money and was ranked on their balance after every market settled. There were 237 contracts ("Will the Democratic Party win the CO-08 House race?" and so on), one order book each (NO = 1 − YES), a 0.5c tick, no trading fees, and an API allowing 30 writes and 100 reads a minute. 5,141 people signed up; 1,969 traded.
 
 </details>
 
@@ -28,7 +28,7 @@ From Oct 1 to Nov 4, 2026, Susquehanna (SIG) ran the Predictions Cup: a predicti
 </table>
 </div>
 
-I started with a mistake. On day one I traded two contracts by hand and lost 10.3k; that night the leader was up 603k and I was #591. One of the top teams, I learned later, had rested 3,000-share bids at half a cent and asks at 99.5 cents in every market, and caught every careless market order. My engine went live that afternoon and moved to a server on Oct 7, but it took a full week just to get back to 100k, and I fell as low as #928 on the way. From there I built market makers that quoted around Polymarket's prices and climbed into the top 100 by Oct 21. On election night the engine spotted a race call in 115 of 116 races, had an order ready a median 0.3&nbsp;s later, and bought in 95 of them. I finished #63 of 1,969.
+I started with a mistake. On day one I traded two contracts by hand and lost 10.3k; that night the leader was up 603k and I was #591. One of the top players, I learned later, had rested 3,000-share bids at half a cent and asks at 99.5 cents in every market, and caught every careless market order. My engine went live that afternoon and moved to a server on Oct 7, but it took a full week just to get back to 100k, and I fell as low as #928 on the way. From there I built market makers that quoted around Polymarket's prices and climbed into the top 100 by Oct 21. On election night the engine spotted a race call in 115 of 116 races, had an order ready a median 0.3&nbsp;s later, and bought in 95 of them. I finished #63 of 1,969.
 
 <table>
 <tr>
@@ -90,12 +90,42 @@ How the pieces connect: market data comes in from SIG and Polymarket, the server
 ```mermaid
 %%{init: {"flowchart": {"curve": "basis", "nodeSpacing": 12, "rankSpacing": 28, "padding": 10, "wrappingWidth": 300, "subGraphTitleMargin": {"top": 4, "bottom": 10}}, "themeVariables": {"fontSize": "16px"}}}%%
 flowchart TB
+  ORD["orders"]
+
   subgraph DATA["<b>DATA</b>"]
-    direction LR
+    direction TB
     PM("<b>Polymarket</b><br/>fair value · race calls")
     SIG["<b>SIG exchange</b><br/>REST + websocket<br/>≤ 95 reads · 25 writes / min"]
     POLL("<b>poll-close file</b><br/>who is called, when")
     PM ~~~ SIG ~~~ POLL
+  end
+
+  subgraph DESK["<b>DESK</b>"]
+    direction LR
+    subgraph LAPTOP["My laptop"]
+      direction LR
+      subgraph CLAUDE["Claude app"]
+        direction LR
+        MON("live monitoring")
+        MORN("morning reports")
+      end
+      subgraph TOOLS[" "]
+        direction TB
+        CC("Claude Code<br/>204 releases")
+        RES("research + simulations")
+        MIRROR("dashboard mirror<br/>Piero's Intel")
+        CC ~~~ RES ~~~ MIRROR
+      end
+      CLAUDE ~~~ TOOLS
+    end
+    subgraph PIERO["Piero"]
+      direction TB
+      READ("reads reports")
+      DEC("decisions + controls")
+      OVER("discretionary input")
+      READ ~~~ DEC ~~~ OVER
+    end
+    LAPTOP <-.->|reports ⇅ directs| PIERO
   end
 
   subgraph SERVER["<b>SERVER</b> · one Python engine, 24/7"]
@@ -136,38 +166,11 @@ flowchart TB
     REH ~~~ SUPPORT
   end
 
-  subgraph DESK["<b>DESK</b>"]
-    direction LR
-    subgraph LAPTOP["My laptop"]
-      direction LR
-      subgraph CLAUDE["Claude app"]
-        direction LR
-        MON("live monitoring")
-        MORN("morning reports")
-      end
-      subgraph TOOLS[" "]
-        direction TB
-        CC("Claude Code<br/>204 releases")
-        RES("research + simulations")
-        MIRROR("dashboard mirror<br/>Piero's Intel")
-        CC ~~~ RES ~~~ MIRROR
-      end
-      CLAUDE ~~~ TOOLS
-    end
-    subgraph PIERO["Piero"]
-      direction TB
-      READ("reads reports")
-      DEC("decisions + controls")
-      OVER("discretionary input")
-      READ ~~~ DEC ~~~ OVER
-    end
-    LAPTOP <-.->|reports ⇅ directs| PIERO
-  end
-
+  ORD ==> DATA
+  ORD ==> DESK
   DATA <==>|"market data ⇄ orders"| SERVER
-  SERVER <-.->|"state · logs ⇅ releases"| DESK
-  DATA <==>|orders| DESK
-  DESK ~~~ PAD["<br/><br/><br/><br/><br/><br/><br/>"]
+  DESK <-.->|"state · logs ⇅ releases"| SERVER
+  SERVER ~~~ PAD["<br/><br/><br/>"]
 
   classDef default fill:none,stroke:#8b949e,stroke-width:1.2px
   classDef data fill:#2f81f71a,stroke:#2f81f7,stroke-width:1.5px
@@ -197,6 +200,7 @@ flowchart TB
   style CLAUDE fill:none,stroke:#bf8700,stroke-dasharray:6 4
   style PIERO fill:none,stroke:#bf8700,stroke-dasharray:6 4
   style PAD fill:none,stroke:none
+  style ORD fill:none,stroke:none
 ```
 
 **How it fits together.** The websocket listener and SIG's REST reads keep the books, trades, orders, positions, fills and cash in memory; Polymarket gives every contract's fair price. The ledger knows which strategy owns every share. Each pass of the engine loop (about every 10 s), the strategies propose orders, and every order passes the risk check before it reaches SIG: rule 0 (never sell below cost + 0.5c), I2 (never sell more than you hold), the cash floor and SIG's write limit. Around the server, I watched Piero's Intel and Claude's reports and set the controls; Claude turned each change into a written spec, and Claude Code built, tested and shipped it: 204 releases in 34 days.
