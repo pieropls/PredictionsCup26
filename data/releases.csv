@@ -74,7 +74,7 @@ C65-2258,2026-10-05T22:58:40-07:00,folder mtime,unknown (before the deploy log),
 C66-2333,2026-10-05T23:33:56-07:00,folder mtime,unknown (before the deploy log),"entry budget allocated dump L1-L4, L0, scalper, fat-finger"
 C66-2334,2026-10-05T23:35:00-07:00,folder mtime,unknown (before the deploy log),"entry budget allocated dump L1-L4, L0, scalper, fat-finger"
 C66-2335,2026-10-05T23:36:11-07:00,folder mtime,unknown (before the deploy log),"entry budget allocated dump L1-L4, L0, scalper, fat-finger"
-C67-2345,2026-10-05T23:46:29-07:00,folder mtime,unknown (before the deploy log),"wall layer for manual resting orders, budget fix"
+C67-2345,2026-10-05T23:46:29-07:00,folder mtime,unknown (before the deploy log),"wall layer for discretionary resting orders, budget fix"
 C68-2349,2026-10-05T23:49:50-07:00,folder mtime,unknown (before the deploy log),"wall bounded by its own 2k-free cut, not the day-2 reserve"
 C69-0054,2026-10-06T00:54:43-07:00,folder mtime,unknown (before the deploy log),day 8: weighted entry budget of 1.5 x free cash
 C70-0108,2026-10-06T01:08:41-07:00,folder mtime,unknown (before the deploy log),walls' resting cost taken off the top of the entry budget
@@ -141,9 +141,9 @@ C94c-2237,2026-10-13T22:38:18-07:00,releases.log (deploy time),yes,rotation fund
 C94d-2241,2026-10-13T23:08:48-07:00,releases.log (deploy time),yes,"rotation pool recomputed from ledger fills, capped by cash"
 C94e-1652,2026-10-15T16:53:12-07:00,releases.log (deploy time),yes,rotation pool reads SIG cash; oversized bids pulled
 C94f-1657,2026-10-15T17:24:06-07:00,releases.log (deploy time),yes,rotation exit asks keep running during a pause
-C95-1511,2026-10-16T15:13:06-07:00,releases.log (deploy time),yes,"manual reserve, fund sales, coin-flip rotation buys"
+C95-1511,2026-10-16T15:13:06-07:00,releases.log (deploy time),yes,"discretionary reserve, fund sales, coin-flip rotation buys"
 C95b-1516,2026-10-16T15:16:56-07:00,folder mtime,no,retired reservoirs stay retired; funding sale ordering
-C95c-1534,2026-10-16T15:43:34-07:00,releases.log (deploy time),yes,"manual fills go to manual book, never sold"
+C95c-1534,2026-10-16T15:43:34-07:00,releases.log (deploy time),yes,"discretionary fills go to their own book, never sold"
 C95d-1547,2026-10-16T15:48:28-07:00,folder mtime,no,C95 follow-up build (no separate note)
 C95e-1557,2026-10-16T16:14:10-07:00,releases.log (deploy time),yes,"exit sizing to room left, resume clears I2 lock, token kept"
 C95f-1618,2026-10-16T16:44:40-07:00,releases.log (deploy time),yes,rotation skips markets where we hold the other side
@@ -155,7 +155,7 @@ C97-1610,2026-10-17T16:11:57-07:00,releases.log (deploy time),yes,"capital alloc
 C98-1644,2026-10-17T16:45:47-07:00,releases.log (deploy time),yes,carry book: 43 favourite lots held to settlement
 C98b-1719,2026-10-17T17:21:00-07:00,releases.log (deploy time),yes,net party exposure cap 10k on close races for rotation/carry
 C99a-0112,2026-10-18T01:13:59-07:00,releases.log (deploy time),yes,"sale asks keep place, sell at the bid, AZ-06 market paused"
-C99b-0127,2026-10-18T01:44:46-07:00,releases.log (deploy time),yes,foreign order direction read from SIG; manual line hourly
+C99b-0127,2026-10-18T01:44:46-07:00,releases.log (deploy time),yes,foreign order direction read from SIG; discretionary line hourly
 C99d-0218,2026-10-18T02:19:17-07:00,releases.log (deploy time),yes,sale at the bid also needs SIG avg + 0.5c
 C99e-0252,2026-10-18T02:54:04-07:00,releases.log (deploy time),yes,inventory lots never sell under SIG position avg + 0.5c
 C99f-0819,2026-10-18T08:20:55-07:00,releases.log (deploy time),yes,FMM priority counts unread fills; pull uncovered carry bids

@@ -227,8 +227,8 @@ Colours: blue for the data, teal for the engine core, purple for the strategies,
 
 | Box | What it does |
 |---|---|
-| **Polymarket** | The deeper market on the same races; its mid is the fair value for every SIG contract. A race counts as called when our side's bid holds ≥ 0.95 for 20 s, or touches ≥ 0.98 once, after the last poll close. |
-| **SIG exchange** | One YES book per contract (NO = 1 − YES); 237 contracts across 117 races. REST for orders, cancels and positions; websocket for books, trades and fills. SIG allows 100 reads and 30 writes a minute; the engine kept to 95 and 25. The board shows SIG marks; the score is cash after every market settles. |
+| **Polymarket** | The deeper market on the same races; its mid is the fair value for every SIG contract. A race counts as called when the leading side's bid holds ≥ 0.95 for 20 s, or touches ≥ 0.98 once, after the last poll close. |
+| **SIG exchange** | One YES book per contract (NO = 1 − YES); 237 contracts across 117 races (the engine traded 116: California Governor had no Polymarket match, so no fair value). REST for orders, cancels and positions; websocket for books, trades and fills. SIG allows 100 reads and 30 writes a minute; the engine kept to 95 and 25. The board shows SIG marks; the score is cash after every market settles. |
 | **Poll-close file** | Every race, its state, and when its last polls close. No call is trusted before that time; resting orders are pulled 10 minutes before each first close. |
 
 #### Server
@@ -267,9 +267,9 @@ Colours: blue for the data, teal for the engine core, purple for the strategies,
 
 ## Strategies deployed
 
-I never forecast a race. Each layer was built for a behaviour I expected from 1,969 players trading play money: thin books, fat fingers and sweeps, players pushing prices to bait others, and a SIG book that lags Polymarket when a race is called. Every quote is anchored to Polymarket's fair value, never to SIG's book alone, so a pushed price can't drag the engine with it.
+Each layer was built for a behaviour I expected from 1,969 players trading play money: thin books, fat fingers and sweeps, players pushing prices to bait others, and a SIG book that lags Polymarket when a race is called. Every quote is anchored to Polymarket's fair value, never to SIG's book alone, so a pushed price can't drag the engine with it.
 
-<details><summary>🟪 <b>01 · The Favourite Maker</b> · FMM · quotes favourites just under fair · 3,912 round trips</summary>
+<details><summary><b>01 · The Favourite Maker</b> · FMM · quotes favourites just under fair · 3,912 round trips</summary>
 
 - **Why:** favourites rarely flip, and a bid stays only while the touch is at least 2c under Polymarket's fair, re-checked every loop, which limits adverse selection.
 - **How:** bids at the touch and 1–3c under it on favourites (fair ≥ 0.75), 5k a race at cost; each fill goes straight back on offer at max(fill + 0.5c, fair + the book's 6-hour median gap).
@@ -278,7 +278,7 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 
 </details>
 
-<details><summary>🟪 <b>02 · The Net</b> · CATCH v1 → v3 · deep bids that catch sweeps and fat fingers · 57 exits</summary>
+<details><summary><b>02 · The Net</b> · CATCH v1 → v3 · deep bids that catch sweeps and fat fingers · 57 exits</summary>
 
 - **Why:** players with play money send size-only orders into thin books; a market order walks the book and leaves the price far below fair for a moment.
 - **How (v3):** bids at min(SIG bid − 4/8/15c, fair − 10/15/25c) and at fair − 40c; each fill goes back on offer at max(fill + 3c, min(the pre-sweep mid, fair − 1c)).
@@ -287,7 +287,7 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 
 </details>
 
-<details><summary>🟪 <b>03 · The Flipper</b> · FLIP · first in the queue, flips on the fill · 442 flips</summary>
+<details><summary><b>03 · The Flipper</b> · FLIP · first in the queue, flips on the fill · 442 flips</summary>
 
 - **Why:** thin SIG books often sat 2c or more wide, so one bid at the front of the queue earns the spread without a view on the race.
 - **How:** on the 60 widest books (spread ≥ 2c), one bid at the best bid + 0.5c, never above fair − 3c, 1k a book; on a fill an ask goes up at once at max(fill + 1c, best ask − 0.5c), and at fill + 0.5c after 30 minutes.
@@ -296,7 +296,7 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 
 </details>
 
-<details><summary>🟪 <b>04 · The Long Hold</b> · carry · holds favourites to settlement · 33 lots at the peak</summary>
+<details><summary><b>04 · The Long Hold</b> · carry · holds favourites to settlement · 33 lots at the peak</summary>
 
 - **Why:** SIG often priced a favourite a few cents under Polymarket; held to settlement, that gap pays without having to sell to anyone.
 - **How:** bids where the expected value per dollar against Polymarket's fair is ≥ 11%, sales at ≤ 5%, never below the lot's cost + 0.5c. From Oct 29 the convergence sales funded the election reserve.
@@ -305,7 +305,7 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 
 </details>
 
-<details><summary>🟪 <b>05 · The Lock</b> · pair sets, H4, two-book locks · both sides of a race for under 1 · 141 pair sets</summary>
+<details><summary><b>05 · The Lock</b> · pair sets, H4, two-book locks · both sides of a race for under 1 · 141 pair sets</summary>
 
 - **Why:** players priced each party's book on its own, so a race's two books sometimes added up to less than 1; buying both sides captures the gap whatever the result.
 - **How:** pair sets at ≤ 0.96 a set; H4, the same lock bought with idle cash (both NOs in a two-candidate race, ≤ 0.96 together); the market maker's two-book locks at ≤ 0.99.
@@ -314,12 +314,15 @@ I never forecast a race. Each layer was built for a behaviour I expected from 1,
 
 </details>
 
-<details><summary>🟥 <b>06 · The Sniper</b> · election-night machine · buys races the moment they're called · 115 races called</summary>
+<details><summary><b>06 · The Sniper</b> · election-night machine · buys races the moment they're called · 115 races called</summary>
 
 - **Why:** after Polymarket calls a race, SIG's book lags: half of the night's fills came 16 minutes or more after the call, with the called side still on offer under 1.
-- **How:** a race counts as called when our side's Polymarket bid holds ≥ 0.95 for 20 s, or touches ≥ 0.98 once, after the state's last poll close. The sniper walks SIG's book up to min(0.97, PM bid − 3c), ≤ 15k shares a race, on its own thread; from 17:15 (C137) a strict call goes to PM bid − 1.5c. The reversal guard stops a race whose PM bid falls back under 0.90 within 10 minutes, and entry layers pull from 600 s before each first poll close.
+- **How:** a race counts as called when the leading side's Polymarket bid holds ≥ 0.95 for 20 s, or touches ≥ 0.98 once, after the state's last poll close. The sniper walks SIG's book up to min(0.97, PM bid − 3c), ≤ 15k shares a race, on its own thread; from 17:15 (C137) a strict call goes to PM bid − 1.5c. The reversal guard stops a race whose PM bid falls back under 0.90 within 10 minutes, and entry layers pull from 600 s before each first poll close.
 - **When:** Nov 3 14:40 → Nov 4 01:03; a final sweep until 08:30.
-- **Result:** calls on 229 books in 115 of 116 races; 636 fills in 95 races, 295,921 shares at 0.940, +9.8k vs Polymarket's fair at the fill; 297 ms median from call to order (608 ms p95). The reversal guard fired 34 times on 21 races; in the three rehearsals every entry order was gone at least 419 s before each poll close. Recycling sold 30,295 shares at 0.979, +1.0k vs cost; the final sweep bought 11,585 shares at 0.929, +0.8k.
+- **Result:**
+  - **Calls and fills:** calls on 229 books in 115 of 116 races; 636 fills in 95 races, 295,921 shares at 0.940, +9.8k vs Polymarket's fair at the fill; 297 ms median from call to order (608 ms p95).
+  - **Guards:** the reversal guard fired 34 times on 21 races; in the three rehearsals every entry order was gone at least 419 s before each poll close.
+  - **Recycling and the final sweep:** recycling sold 30,295 shares at 0.979, +1.0k vs cost; the final sweep bought 11,585 shares at 0.929, +0.8k.
 
 **The night, Nov 3 PT**
 - **14:40** Election mode live: 234 books in 116 races armed.
